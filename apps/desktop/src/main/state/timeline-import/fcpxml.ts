@@ -5,7 +5,7 @@ import { canvasSizeError, FPS_OPTIONS } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { TimeMappingError } from '../../../shared/timeMapping'
 import { addTime, compareTime, divideTime, exactTime, multiplyTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
-import type { Rational } from '../model'
+import type { ImportTimeline, TimelineClip, TimelineSource } from './timeline'
 
 interface Element {
   tag: string
@@ -14,41 +14,16 @@ interface Element {
   line: number
 }
 
-interface Asset {
-  ref: string
-  path: string
+interface Asset extends TimelineSource {
   start: ExactTime
   duration: ExactTime
   hasAudio: boolean
-  audioChannels?: number
-  audioRate?: number
 }
 
 interface Format {
   width: number
   height: number
   frameDuration: ExactTime
-}
-
-interface Clip {
-  label?: string
-  asset: Asset
-  firstFrame: number
-  endFrame: number
-  sourceIn: ExactTime
-  sourceOut: ExactTime
-  audioRole: 'dialogue' | 'music' | 'sfx'
-  markers: { label: string; frame: number; source: ExactTime }[]
-  location: string
-}
-
-export interface FcpxmlTimeline {
-  name?: string
-  width: number
-  height: number
-  fps: Rational
-  durationFrames: number
-  clips: Clip[]
 }
 
 const US_PER_SECOND = { num: 1_000_000, den: 1 }
@@ -204,7 +179,7 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
   return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration, hasAudio, audioChannels, audioRate }
 }
 
-export function parseFcpxml(xml: string): FcpxmlTimeline {
+export function parseFcpxml(xml: string): ImportTimeline {
   try { return parseDocument(readXml(xml)) }
   catch (error) {
     if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
@@ -212,7 +187,7 @@ export function parseFcpxml(xml: string): FcpxmlTimeline {
   }
 }
 
-function parseDocument(root: Element): FcpxmlTimeline {
+function parseDocument(root: Element): ImportTimeline {
   check(root, ['version'], ['resources', 'project', 'library', 'event'])
   if (!/^1\.(?:[6-9]|1[0-3])$/.test(required(root, 'version'))) fail(root, 'Use an FCPXML document version 1.6 through 1.13')
   const resources = one(root, 'resources')
@@ -254,7 +229,7 @@ function parseDocument(root: Element): FcpxmlTimeline {
   if (!fps) fail(seq, 'Choose a supported WeftCut timeline frame rate')
   const spine = one(seq, 'spine')
   check(spine, [], ['gap', 'asset-clip'])
-  const clips: Clip[] = []
+  const clips: TimelineClip[] = []
   const assets = new Map<string, Asset>()
   let lastEnd = 0
   for (const el of spine.children) {
@@ -305,11 +280,11 @@ function parseDocument(root: Element): FcpxmlTimeline {
         source: subtractTime(at, asset.start) }
     })
     clips.push({ label: a.name || assetNode.attrs.name, asset, firstFrame, endFrame, sourceIn, sourceOut,
-      audioRole: audioRole === 'effects' ? 'sfx' : audioRole, markers, location: location(el) })
+      audioRole: !asset.hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole, markers, location: location(el) })
   }
   const durationFrames = seq.attrs.duration === undefined ? lastEnd : frames(time(seq, 'duration'), format, seq, 'duration')
   if (durationFrames < lastEnd) fail(seq, 'Declared duration ends before the last storyline item')
   if (clips.length === 0) fail(spine, 'The primary storyline needs at least one asset clip')
-  return { name: project.attrs.name, width: format.width, height: format.height,
+  return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
     fps: { num: fps.num, den: fps.den }, durationFrames, clips }
 }

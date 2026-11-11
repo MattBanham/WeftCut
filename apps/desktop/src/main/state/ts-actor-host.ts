@@ -41,7 +41,7 @@ import type { RecentsStore } from '../recents'
 import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
-import { prepareFcpxmlProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
+import { prepareTimelineProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
 
 export interface TsActorHostDeps {
   exportJobs?: import("../exportJobs").ExportJobs
@@ -896,7 +896,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         const dir = timelineDestination(args.destination)
         if (deps.fs.exists(dir)) throw new Error('That project folder already exists. Choose a new name or location')
         const assertCurrent = captureImportSession(hybridDeps)
-        const project = await prepareFcpxmlProject(args.path, dir, idGen, hybridDeps, assertCurrent)
+        const project = await prepareTimelineProject(args.path, dir, args.edl, idGen, hybridDeps, assertCurrent)
         assertCurrent()
         if (quitting) throw new Error('WeftCut is closing. Open it again to import the timeline')
         return replaceWorkspace(async () => {

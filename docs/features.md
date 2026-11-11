@@ -7,11 +7,11 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 
 ## Timeline import
 
-On the start screen, choose **Import FCPXML…**, select a timeline document,
-then name the new project folder. Keep the original files accessible until
-WeftCut finishes copying them into the project's media pool.
+On the start screen, choose **Import timeline…**, select an FCPXML or CMX
+3600 EDL document, then name the new project folder. Keep the original files
+accessible until WeftCut finishes copying them into the project's media pool.
 
-The importer accepts one sequence with a primary storyline of straight cuts,
+FCPXML import accepts one sequence with a primary storyline of straight cuts,
 gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline
 with 48 kHz stereo output and a WeftCut frame rate. Each clip must refer to
 one local original video matching the sequence dimensions and frame rate.
@@ -23,6 +23,14 @@ The source trim accounts for the asset's own start time. Video and markers
 land on exact timeline frames. Linked audio edges land on the nearest 48 kHz
 sample, with the final edge kept inside the sequence duration. Clip markers
 follow the imported clip when it moves. A trailing gap extends the duration.
+
+EDL import reads non-drop-frame straight cuts on a single video track,
+including black filler and linked mono or stereo audio when explicitly
+selected by the event. It matches exact filenames in \`SOURCE FILE\` or
+\`FROM CLIP NAME\` comments against the selected media folder. Supply the
+export frame rate, record start timecode, and the start timecode shared by
+all originals. The supplied record origin becomes the WeftCut timeline's
+zero. Source media must share one canvas size and the selected frame rate.
 
 An unsupported edit, missing media or occupied destination folder stops the
 import. Follow the reported element or asset to simplify the timeline or

@@ -13,7 +13,7 @@ import { PROJECT_FILE } from '../persistence'
 import { AUDIO_GRID, isCanonicalOnGrid } from '../snap'
 import { validate } from '../validate'
 import { parseFcpxml } from './fcpxml'
-import { prepareFcpxmlProject, publishTimelineProject } from './project'
+import { prepareTimelineProject, publishTimelineProject } from './project'
 
 const fixture = (url = 'file:///fictional/Harbor%20Lights.mov') => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -115,7 +115,7 @@ describe('timeline import transaction', () => {
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
     const assertCurrent = vi.fn()
-    const prepare = () => prepareFcpxmlProject(document, destination, idGen, {
+    const prepare = () => prepareTimelineProject(document, destination, undefined, idGen, {
       compute: { probeMedia, hashMediaSource },
       statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
     }, assertCurrent)

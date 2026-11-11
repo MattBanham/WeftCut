@@ -1,6 +1,6 @@
 import { open, mkdir, rmdir, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path'
-import { validateProjectName } from '../../../shared/newProject'
+import { canvasSizeError, validateProjectName } from '../../../shared/newProject'
 import { compareTime, exactTime, floorTime, multiplyTime, roundTime } from '../../../renderer/timeMapping'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
 import { createActor } from '../actor'
@@ -14,11 +14,12 @@ import { PROJECT_FILE, serializeProjectToJson } from '../persistence'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import type { OrchestratorDeps } from '../workspace-orchestrator'
-import { parseFcpxml, type FcpxmlTimeline } from './fcpxml'
+import { parseEdl } from './edl'
+import { parseFcpxml } from './fcpxml'
+import type { TimelineClip } from './timeline'
 
 type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'>
-type Clip = FcpxmlTimeline['clips'][number]
-const MAX_XML_BYTES = 16 * 1024 * 1024
+const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 
 export function timelineDestination(value: unknown): string {
   if (typeof value !== 'string' || !isAbsolute(value)) throw new Error('Choose an absolute path for a new project folder')
@@ -30,15 +31,13 @@ export function timelineDestination(value: unknown): string {
   return path
 }
 
-async function readFcpxml(path: unknown, deps: MediaDeps): Promise<string> {
-  if (typeof path !== 'string' || !isAbsolute(path) || extname(path).toLowerCase() !== '.fcpxml')
-    throw new Error('Choose a local .fcpxml file')
+async function readTimelineDocument(path: string, deps: MediaDeps): Promise<string> {
   const facts = deps.statPath(path)
-  if (facts?.kind !== 'file' || !facts.readable) throw new Error('The selected FCPXML file is missing or unreadable')
+  if (facts?.kind !== 'file' || !facts.readable) throw new Error('The selected timeline file is missing or unreadable')
   const file = await open(path, 'r')
   try {
     const stat = await file.stat()
-    if (!stat.isFile() || stat.size > MAX_XML_BYTES) throw new Error('Choose a regular FCPXML file up to 16 MiB')
+    if (!stat.isFile() || stat.size > MAX_DOCUMENT_BYTES) throw new Error('Choose a regular timeline file up to 16 MiB')
     const data = Buffer.alloc(stat.size + 1)
     let read = 0
     while (read < data.length) {
@@ -46,19 +45,24 @@ async function readFcpxml(path: unknown, deps: MediaDeps): Promise<string> {
       if (result.bytesRead === 0) break
       read += result.bytesRead
     }
-    if (read !== stat.size) throw new Error('The FCPXML file changed during import. Try again after the file is ready')
+    if (read !== stat.size) throw new Error('The timeline file changed during import. Try again after the file is ready')
     try { return new TextDecoder('utf-8', { fatal: true }).decode(data.subarray(0, read)) }
-    catch { throw new Error('Export the FCPXML document as UTF-8 and try again') }
+    catch { throw new Error('Export the timeline document as UTF-8 and try again') }
   } finally { await file.close() }
 }
 
-export async function prepareFcpxmlProject(
-  path: unknown, destination: string, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
+export async function prepareTimelineProject(
+  path: unknown, destination: string, edlOptions: unknown, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
 ): Promise<Project> {
-  const timeline = parseFcpxml(await readFcpxml(path, deps))
+  const extension = typeof path === 'string' && isAbsolute(path) ? extname(path).toLowerCase() : ''
+  if (typeof path !== 'string' || (extension !== '.fcpxml' && extension !== '.edl')) {
+    throw new Error('Choose a local .fcpxml or .edl file')
+  }
+  const document = await readTimelineDocument(path, deps)
+  const timeline = extension === '.edl' ? parseEdl(document, edlOptions) : parseFcpxml(document)
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(destination))
-  Object.assign(rootComposition(initial), { width: timeline.width, height: timeline.height, fps: timeline.fps })
+  rootComposition(initial).fps = timeline.fps
   const actor = createActor({ initial, idGen, clock: () => new Date().toISOString() })
   // The standard importer deduplicates and hashes in a private actor. Opening
   // the finished project starts the usual workspace copies and derivatives.
@@ -88,7 +92,12 @@ export async function prepareFcpxmlProject(
   assertCurrent()
   const snapshot = actor.snapshot()
   const root = rootComposition(snapshot)
-  const target = { ...root, tracks: root.tracks.map((track) => ({ ...track, layers: [] as Layer[] })),
+  const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.path)!]!
+  const video = itemOf(timeline.clips[0]!).metadata.video
+  const width = timeline.canvas?.width ?? video?.width ?? 0
+  const height = timeline.canvas?.height ?? video?.height ?? 0
+  if (canvasSizeError(width, height)) throw new Error('The original media must have a supported even-sized WeftCut canvas')
+  const target = { ...root, width, height, tracks: root.tracks.map((track) => ({ ...track, layers: [] as Layer[] })),
     links: [...root.links], markers: [...root.markers] }
   const track = target.tracks[0]!
   const boundary = (frame: number) => timeUsAtFrame(frame, target.fps.num, target.fps.den)
@@ -103,12 +112,12 @@ export async function prepareFcpxmlProject(
     return nearest <= sequenceEnd ? nearest : timeUsAtGridIndex(floorTime(sample), AUDIO_GRID)
   }
   for (const clip of timeline.clips) {
-    const item = snapshot.media_pool[mediaIds.get(clip.asset.path)!]!
-    validateSource(timeline, clip, item)
+    const item = itemOf(clip)
+    validateSource(target, clip, item)
     const t0 = boundary(clip.firstFrame), t1 = boundary(clip.endFrame)
     const video = newLayer(idGen, clip, t0, t1, videoClipParams(item.id, 0, 0, target))
     track.layers.push(video)
-    if (clip.asset.hasAudio) {
+    if (clip.audioRole) {
       const a0 = sampleBoundary(clip.firstFrame), a1 = sampleBoundary(clip.endFrame)
       const audio = newLayer(idGen, clip, a0, a1, { ...audioParams(item.id, 0, 0), role: clip.audioRole })
       track.layers.push(audio)
@@ -134,20 +143,20 @@ export async function prepareFcpxmlProject(
   return project
 }
 
-function newLayer(idGen: IdGen, clip: Clip, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' }> | AudioParams): Layer {
+function newLayer(idGen: IdGen, clip: TimelineClip, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' }> | AudioParams): Layer {
   writeSourceWindow(params, clip.sourceIn, clip.sourceOut)
   return { id: idGen(), label: clip.label ?? null, t_start_us: start, t_end_us: end,
     enabled: true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(timeline: FcpxmlTimeline, clip: Clip, item: MediaItem): void {
+function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'width' | 'height' | 'fps'>, clip: TimelineClip, item: MediaItem): void {
   const { video, audio, duration_us: duration } = item.metadata
-  const fail = (message: string): never => { throw new Error(`FCPXML ${clip.location}, asset ${clip.asset.ref}: ${message}`) }
+  const fail = (message: string): never => { throw new Error(`${clip.location}, source ${clip.asset.ref}: ${message}`) }
   if (item.kind !== 'Video' || !video || video.width !== timeline.width || video.height !== timeline.height ||
       !video.fps_num || !video.fps_den || video.fps_num * timeline.fps.den !== video.fps_den * timeline.fps.num) {
     fail('The original must be a video with the sequence size and frame rate. Relink or render conforming media')
   }
-  if (Boolean(audio) !== clip.asset.hasAudio || (audio && (
+  if ((clip.asset.hasAudio !== undefined && Boolean(audio) !== clip.asset.hasAudio) || (clip.audioRole && audio && (
     !audio.channels || ![1, 2].includes(audio.channels) || !audio.sample_rate ||
     (clip.asset.audioChannels !== undefined && clip.asset.audioChannels !== audio.channels) ||
     (clip.asset.audioRate !== undefined && clip.asset.audioRate !== audio.sample_rate)))) {

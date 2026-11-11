@@ -5,6 +5,14 @@ import { pathToFileURL } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { invokeCmd, launchApp, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
 
+function encodeSource(media: string) {
+  execFileSync('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', "nullsrc=s=320x240:r=30000/1001,geq=lum='if(eq(N,7),235,16)':cb=128:cr=128",
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1.001',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'pcm_s16le', '-ac', '2', media,
+  ], { windowsHide: true })
+}
+
 test('imports FCPXML from startup as an editable project and refuses missing media', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-')
@@ -40,17 +48,13 @@ test('imports FCPXML from startup as an editable project and refuses missing med
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: destination })
     }, { source, destination })
-    const importButton = page.getByRole('button', { name: 'Import FCPXML…' })
+    const importButton = page.getByRole('button', { name: 'Import timeline…' })
     await importButton.click()
     await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
     expect(existsSync(destination)).toBe(false)
     expect(await invokeCmd(page, 'project_open_state')).toBeNull()
 
-    execFileSync('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', "nullsrc=s=320x240:r=30000/1001,geq=lum='if(eq(N,7),235,16)':cb=128:cr=128",
-      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1.001',
-      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'pcm_s16le', '-ac', '2', media,
-    ], { windowsHide: true })
+    encodeSource(media)
 
     await importButton.click()
     await expect(importButton).toHaveCount(0)
@@ -79,5 +83,49 @@ test('imports FCPXML from startup as an editable project and refuses missing med
     expect(readFileSync(projectFile, 'utf8')).toContain('Glass edit')
     await invokeCmd(page, 'project_open', { path: destination })
     expect(await rootSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
+  } finally { await app.close() }
+})
+
+test('imports CMX 3600 cuts with explicit origins and selected audio channels', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-edl-')
+  const source = join(folder, 'Lantern Alley.edl')
+  const media = join(folder, 'Lantern Take.mov')
+  const destination = join(folder, 'Imported Lantern')
+  encodeSource(media)
+  writeFileSync(source, [
+    'TITLE: Lantern Alley',
+    'FCM: NON-DROP FRAME',
+    '001 AX V C 10:00:00:02 10:00:00:05 01:00:00:00 01:00:00:03',
+    '* FROM CLIP NAME: Lantern Take.mov',
+    '002 BL V C 00:00:00:00 00:00:00:01 01:00:00:03 01:00:00:04',
+    '003 AX AA/V C 10:00:00:06 10:00:00:08 01:00:00:04 01:00:00:06',
+    '* SOURCE FILE: Lantern Take.mov',
+  ].join('\n'))
+
+  const { app, page } = await launchApp()
+  try {
+    await app.evaluate(({ dialog }, { source, destination, folder }) => {
+      let opens = 0
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [opens++ === 0 ? source : folder] })
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: destination })
+    }, { source, destination, folder })
+    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Import CMX 3600 EDL' })
+    const submit = dialog.getByRole('button', { name: 'Import', exact: true })
+    await expect(submit).toBeDisabled()
+    await dialog.getByRole('combobox', { name: 'Frame rate' }).click()
+    await page.getByRole('option', { name: /29\.97/ }).click()
+    await dialog.getByRole('textbox', { name: 'Timeline start timecode' }).fill('01:00:00:00')
+    await dialog.getByRole('textbox', { name: 'Source start timecode' }).fill('10:00:00:00')
+    await dialog.getByRole('button', { name: 'Choose…' }).click()
+    await submit.click()
+    await expect(dialog).toHaveCount(0)
+    await waitForHook(page, 'getSelectedLayerIds')
+    const imported = await rootSummary<ProjectSummary>(page)
+    expect(imported).toMatchObject({ fps_num: 30000, fps_den: 1001, duration_us: 200200, layer_count: 3 })
+    expect(imported.media).toHaveLength(1)
+    expect(imported.links).toHaveLength(1)
+    expect(imported.tracks[0]!.layers.filter((layer) => layer.params.kind === 'Audio')).toHaveLength(1)
   } finally { await app.close() }
 })

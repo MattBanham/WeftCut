@@ -1,4 +1,5 @@
 import { parseManifestIsland } from '../../shared/motifs/catalog';
+import type { EdlImportOptions } from '../../shared/timelineImport'
 import type { TimingFields } from '../../shared/timeMapping'
 import type { CropRect } from '../../shared/crop';
 // Renderer-side IPC surface: typed `invoke` wrappers plus the wire shapes the
@@ -900,8 +901,8 @@ export async function projectSaveAs(path: string): Promise<void> {
   return invoke<void>("project_save_as", { path });
 }
 
-export function projectImportTimeline(path: string, destination: string): Promise<string> {
-  return invoke<string>("project_import_timeline", { path, destination });
+export function projectImportTimeline(path: string, destination: string, edl?: EdlImportOptions): Promise<string> {
+  return invoke<string>("project_import_timeline", { path, destination, edl });
 }
 
 export async function projectOpen(path: string): Promise<void> {

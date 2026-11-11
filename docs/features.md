@@ -5,6 +5,29 @@ rules, and the edge cases. Subsystem mechanics live in the linked docs; the
 record shapes in [data-model.md](data-model.md); the agent surface in
 [mcp.md](mcp.md).
 
+## Timeline import
+
+On the start screen, choose **Import FCPXML…**, select a timeline document,
+then name the new project folder. Keep the original files accessible until
+WeftCut finishes copying them into the project's media pool.
+
+The importer accepts one sequence with a primary storyline of straight cuts,
+gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline
+with 48 kHz stereo output and a WeftCut frame rate. Each clip must refer to
+one local original video matching the sequence dimensions and frame rate.
+Clips can carry one linked mono or stereo audio stream. The importer supports
+ordinary UTF-8 \`.fcpxml\` documents from versions 1.6 through 1.13 and both
+asset URL forms.
+
+The source trim accounts for the asset's own start time. Video and markers
+land on exact timeline frames. Linked audio edges land on the nearest 48 kHz
+sample, with the final edge kept inside the sequence duration. Clip markers
+follow the imported clip when it moves. A trailing gap extends the duration.
+
+An unsupported edit, missing media or occupied destination folder stops the
+import. Follow the reported element or asset to simplify the timeline or
+relink its source, then export it again.
+
 ## Undo-stack scope
 
 A state mutation records a `HistoryEntry` iff it changes the timeline

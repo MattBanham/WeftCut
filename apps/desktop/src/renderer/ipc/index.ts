@@ -900,6 +900,10 @@ export async function projectSaveAs(path: string): Promise<void> {
   return invoke<void>("project_save_as", { path });
 }
 
+export function projectImportTimeline(path: string, destination: string): Promise<string> {
+  return invoke<string>("project_import_timeline", { path, destination });
+}
+
 export async function projectOpen(path: string): Promise<void> {
   return invoke<void>("project_open", { path });
 }

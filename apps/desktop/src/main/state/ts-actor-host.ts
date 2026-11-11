@@ -41,6 +41,7 @@ import type { RecentsStore } from '../recents'
 import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
+import { prepareFcpxmlProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
 
 export interface TsActorHostDeps {
   exportJobs?: import("../exportJobs").ExportJobs
@@ -889,6 +890,21 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       case 'open': return persistence.open((args as { path: string }).path)
       case 'saveAs': return persistence.saveAs((args as { path: string }).path)
       case 'newWorkspace': return persistence.newWorkspace(args as never)
+      case 'importTimeline': {
+        if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
+        deps.exportJobs?.assertWritable()
+        const dir = timelineDestination(args.destination)
+        if (deps.fs.exists(dir)) throw new Error('That project folder already exists. Choose a new name or location')
+        const assertCurrent = captureImportSession(hybridDeps)
+        const project = await prepareFcpxmlProject(args.path, dir, idGen, hybridDeps, assertCurrent)
+        assertCurrent()
+        if (quitting) throw new Error('WeftCut is closing. Open it again to import the timeline')
+        return replaceWorkspace(async () => {
+          await publishTimelineProject(orchestratorDeps, dir, project)
+          opens(dir)
+          return dir
+        })
+      }
       case 'save': return persistence.save()
       case 'close': return persistence.close()
       case 'tacks': return runTackIpc(agent.tacks, channel, args)

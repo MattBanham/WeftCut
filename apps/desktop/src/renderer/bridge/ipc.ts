@@ -62,7 +62,7 @@ function invokeBackend<T>(cmd: string, args?: Record<string, unknown>): Promise<
       // Startup opens the workspace before App mounts its mirror. The initial
       // seed owns readiness there; ordinary edits always require a live owner.
       try { await awaitProjectPublication(result.publication,
-        nextCmd === 'project_open' || nextCmd === 'project_new_workspace' || nextCmd === 'project_startup_open',
+        nextCmd === 'project_open' || nextCmd === 'project_new_workspace' || nextCmd === 'project_startup_open' || nextCmd === 'project_import_timeline',
         editTraceId(nextArgs?.[EDIT_TRACE_ARG])) }
       catch (error) { throw new CommandPublicationError(nextCmd, error) }
     }

@@ -1,4 +1,4 @@
-import { open as openDialog } from "@/bridge/dialog";
+import { open as openDialog, save as saveDialog } from "@/bridge/dialog";
 import { documentDir } from "@/bridge/path";
 import type { TFunction } from "i18next";
 import {
@@ -37,6 +37,7 @@ import {
   BugIcon,
   ChevronUpIcon,
   FolderOpenIcon,
+  ListVideoIcon,
   GlobeIcon,
   PlusIcon,
   SettingsIcon,
@@ -44,6 +45,7 @@ import {
 } from "lucide-react";
 import {
   keybindingsGet,
+  projectImportTimeline,
   projectNewWorkspace,
   projectOpen,
   recentsLastNewProjectParent,
@@ -190,6 +192,23 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
     );
   }, [t, runProtected, onWorkspaceReady]);
 
+  const importTimeline = useCallback(() => runProtected(async () => {
+    const source = await openDialog({
+      title: t("startup.import_timeline_title"),
+      filters: [{ name: "FCPXML", extensions: ["fcpxml"] }],
+    });
+    if (typeof source !== "string") return;
+    const name = source.split(/[\\/]/).pop()!.replace(/\.fcpxml$/i, "");
+    const destination = await saveDialog({
+      title: t("startup.import_timeline_destination"),
+      defaultPath: t("startup.import_timeline_folder", { name }),
+    });
+    if (!destination) return;
+    await projectImportTimeline(source, destination);
+    onWorkspaceReady();
+  }, (error) => t("startup.import_timeline_failed", { detail: cleanIpcDetail(error) })),
+  [t, runProtected, onWorkspaceReady]);
+
   const openRecent = useCallback(
     async (entry: RecentEntry) => {
       await runProtected(
@@ -308,6 +327,15 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
           >
             <AppIcon icon={FolderOpenIcon} size="display" strokeWidth={1.5} aria-hidden />
             <span className="startup-action-label">{t("startup.open_project")}</span>
+          </button>
+          <button
+            type="button"
+            className="startup-action"
+            onClick={importTimeline}
+            disabled={busy}
+          >
+            <AppIcon icon={ListVideoIcon} size="display" strokeWidth={1.5} aria-hidden />
+            <span className="startup-action-label">{t("startup.import_timeline")}</span>
           </button>
         </div>
 

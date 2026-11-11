@@ -8,21 +8,32 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 ## Timeline import
 
 On the start screen, choose **Import timeline…**, select an FCPXML or CMX
-3600 EDL document, then name the new project folder. Keep the original files
-accessible until WeftCut finishes copying them into the project's media pool.
+3600 EDL document, then name the new project folder. The review shows the
+canvas, duration, clip and media counts, and any changes to the source edit
+before the project is created. Keep the original files accessible until
+WeftCut finishes copying them into the project's media pool.
 
 FCPXML import accepts one sequence with a primary storyline of straight cuts,
 gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline
-with 48 kHz stereo output and a WeftCut frame rate. Each clip must refer to
-one local original video matching the sequence dimensions and frame rate.
-Clips can carry one linked mono or stereo audio stream. The importer supports
-ordinary UTF-8 \`.fcpxml\` documents from versions 1.6 through 1.13 and both
-asset URL forms.
+with 48 kHz stereo output and a WeftCut frame rate. Video must use a local
+original matching the sequence dimensions and frame rate. Audio can be
+standalone or linked to its video from the same mono or stereo stream.
+The importer supports ordinary UTF-8 \`.fcpxml\` documents from versions 1.6
+through 1.13 and both asset URL forms.
+
+A primary clip or gap can carry one level of connected asset clips. Positive
+lanes hold video and negative lanes hold standalone audio. The lane numbers
+set the bottom-to-top track order. The review tells you that the connected
+clips become independently editable at their mapped positions. Moving a
+former anchor in WeftCut leaves those clips in place. Choose **All Tracks**
+to show every imported lane. Collisions within the same lane stop the import.
 
 The source trim accounts for the asset's own start time. Video and markers
 land on exact timeline frames. Linked audio edges land on the nearest 48 kHz
 sample, with the final edge kept inside the sequence duration. Clip markers
 follow the imported clip when it moves. A trailing gap extends the duration.
+If an exact fractional source out rounds down to the probed end of the
+file, the review reports the sub-microsecond adjustment.
 
 EDL import reads non-drop-frame straight cuts on a single video track,
 including black filler and linked mono or stereo audio when explicitly

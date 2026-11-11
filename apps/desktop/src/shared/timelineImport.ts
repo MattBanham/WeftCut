@@ -5,3 +5,23 @@ export interface EdlImportOptions {
   recordOrigin: string
   sourceOrigin: string
 }
+
+export interface TimelineImportReport {
+  name: string
+  destination: string
+  width: number
+  height: number
+  fps: { num: number; den: number }
+  durationFrames: number
+  videoClips: number
+  audioClips: number
+  markers: number
+  media: number
+  lanes: number[]
+  connectedClips: number
+  roundedEnds: number
+}
+
+export interface TimelineImportPreview extends TimelineImportReport {
+  id: string
+}

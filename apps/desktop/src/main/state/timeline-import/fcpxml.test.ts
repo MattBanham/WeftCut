@@ -62,6 +62,16 @@ describe('FCPXML subset', () => {
     expect(parseFcpxml(xml).clips).toHaveLength(2)
   })
 
+  it('translates connected offsets from the trimmed parent clock and validates lane collisions', () => {
+    const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href
+    const child = '<asset-clip ref="take" name="Overlay" lane="2" offset="108003003/30000s" start="108006006/30000s" duration="2002/30000s"/>'
+    const xml = fixture(url).replace('<marker ', child + '<marker ')
+    const parsed = parseFcpxml(xml)
+    expect(parsed.clips.map((clip) => [clip.lane, clip.firstFrame, clip.endFrame])).toEqual([[0, 0, 3], [0, 4, 6], [2, 1, 3]])
+    expect(() => parseFcpxml(xml.replace(child, child + child))).toThrow(/same connected lane/)
+    expect(() => parseFcpxml(xml.replace('offset="108003003/30000s"', 'offset="0s"'))).toThrow(/before the timeline origin/)
+  })
+
   it.each([
     ['malformed XML', (xml: string) => xml.replace('</sequence>', '</clip>'), /Malformed FCPXML/],
     ['an external DTD', (xml: string) => xml.replace('DOCTYPE fcpxml', 'DOCTYPE fcpxml SYSTEM "file:///fictional/other.dtd"'), /plain.*DOCTYPE/],
@@ -115,11 +125,12 @@ describe('timeline import transaction', () => {
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
     const assertCurrent = vi.fn()
-    const prepare = () => prepareTimelineProject(document, destination, undefined, idGen, {
+    const prepareReview = () => prepareTimelineProject(document, destination, undefined, idGen, {
       compute: { probeMedia, hashMediaSource },
       statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
     }, assertCurrent)
-    return { prepare, deps, before, actor, probeMedia, hashMediaSource, commitWorkspace, pushRecent, enqueueDerivatives }
+    const prepare = async () => (await prepareReview()).project
+    return { prepare, prepareReview, deps, before, actor, probeMedia, hashMediaSource, commitWorkspace, pushRecent, enqueueDerivatives }
   }
 
   it('publishes a validated editable project with exact trims, sample-aligned audio and clip markers', async () => {
@@ -148,6 +159,20 @@ describe('timeline import transaction', () => {
     expect(run.actor.snapshot()).toBe(project)
     expect(readFileSync(join(destination, PROJECT_FILE), 'utf8')).toContain('Signal seen')
     expect(run.actor.command('update_layer', { layerId: video[0]!.id, patch: { label: 'Signal edited' } }).ok).toBe(true)
+  })
+
+  it('keeps the last frame when the exact source out rounds down to the probed file end', async () => {
+    await writeFile(media, 'Fictional video')
+    const run = setup(166833)
+    const url = pathToFileURL(media).href
+    const xml = fixture(url).replace(/        <gap[^\n]+\n        <asset-clip[^]*?audioRole="music"\/>\n/, '')
+    await writeFile(document, xml)
+    const { project, report } = await run.prepareReview()
+    expect(report.roundedEnds).toBe(1)
+    const video = rootComposition(project).tracks[0]!.layers.find((layer) => layer.params.kind === 'VideoClip')!
+    expect(sourceOut(video)).toEqual({ num: 166833, den: 1 })
+    expect(video.t_end_us).toBe(100100)
+    expect(() => validate(project)).not.toThrow()
   })
 
   it('preflights missing media before probing or creating any project folder', async () => {

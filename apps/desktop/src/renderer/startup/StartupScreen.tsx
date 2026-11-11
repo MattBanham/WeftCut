@@ -46,6 +46,8 @@ import {
 import {
   keybindingsGet,
   projectImportTimeline,
+  projectPreviewTimeline,
+  projectDiscardTimelinePreview,
   projectNewWorkspace,
   projectOpen,
   recentsLastNewProjectParent,
@@ -63,7 +65,7 @@ import {
   resolutionLabel,
 } from "./canvasPresets";
 import { LogoPulsePaths } from "./LogoPulsePaths";
-import type { EdlImportOptions } from "../../shared/timelineImport";
+import type { EdlImportOptions, TimelineImportPreview } from "../../shared/timelineImport";
 import { validateProjectName } from "../../shared/newProject";
 import {
   cleanIpcDetail,
@@ -89,6 +91,7 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
   const [busy, setBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [edlImport, setEdlImport] = useState<{ source: string; destination: string } | null>(null);
+  const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [keybindings, setKeybindings] = useState<KeybindingsMap>({});
@@ -210,10 +213,9 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
       setEdlImport({ source, destination });
       return;
     }
-    await projectImportTimeline(source, destination);
-    onWorkspaceReady();
+    setTimelinePreview(await projectPreviewTimeline(source, destination));
   }, (error) => t("startup.import_timeline_failed", { detail: cleanIpcDetail(error) })),
-  [t, runProtected, onWorkspaceReady]);
+  [t, runProtected]);
 
   const openRecent = useCallback(
     async (entry: RecentEntry) => {
@@ -433,7 +435,21 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
         <EdlImportForm
           onCancel={() => setEdlImport(null)}
           onImport={async (options) => {
-            await projectImportTimeline(edlImport.source, edlImport.destination, options);
+            const preview = await projectPreviewTimeline(edlImport.source, edlImport.destination, options);
+            setEdlImport(null);
+            setTimelinePreview(preview);
+          }}
+        />
+      )}
+      {timelinePreview && (
+        <TimelineImportReview
+          preview={timelinePreview}
+          onCancel={() => {
+            void projectDiscardTimelinePreview(timelinePreview.id).catch(() => {});
+            setTimelinePreview(null);
+          }}
+          onImport={async () => {
+            await projectImportTimeline(timelinePreview.id);
             onWorkspaceReady();
           }}
         />
@@ -483,6 +499,54 @@ function joinPath(parent: string, name: string): string {
   const sep = parent.includes("\\") ? "\\" : parent.includes("/") ? "/" : "\\";
   const trimmed = parent.replace(/[\\/]+$/, "");
   return `${trimmed}${sep}${name}`;
+}
+
+function TimelineImportReview({ preview, onImport, onCancel }: {
+  preview: TimelineImportPreview;
+  onImport: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setBusy(true);
+    try { await onImport(); }
+    catch (cause) {
+      setError(cleanIpcDetail(cause));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <AppDialog title={t("startup.timeline_review")} onClose={busy ? undefined : onCancel} panelClassName="new-project-panel">
+      <p>{preview.name}</p>
+      <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>
+      <p>{t("startup.timeline_review_format", {
+        width: preview.width, height: preview.height, rate: fpsLabel(preview.fps, t), frames: preview.durationFrames,
+      })}</p>
+      <p>{t("startup.timeline_review_contents", {
+        video: preview.videoClips, audio: preview.audioClips, markers: preview.markers, media: preview.media,
+      })}</p>
+      {preview.connectedClips > 0 && (
+        <>
+          <p>{t("startup.timeline_review_lanes", { lanes: preview.lanes.join(", ") })}</p>
+          <p>{t("startup.timeline_review_connections", { count: preview.connectedClips })}</p>
+          {(preview.lanes.length > 2 || preview.lanes.some((lane) => lane < 0)) &&
+            <p>{t("startup.timeline_review_all_tracks")}</p>}
+        </>
+      )}
+      {preview.roundedEnds > 0 && <p>{t("startup.timeline_review_rounding")}</p>}
+      {error && <p className="new-project-error" role="alert">{error}</p>}
+      <footer className="new-project-actions">
+        <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
+        <Button size="lg" onClick={submit} disabled={busy || error !== null}>
+          {t(busy ? "startup.import_timeline_busy" : "startup.import_timeline_submit")}
+        </Button>
+      </footer>
+    </AppDialog>
+  );
 }
 
 function EdlImportForm({ onImport, onCancel }: {
@@ -550,7 +614,7 @@ function EdlImportForm({ onImport, onCancel }: {
       <footer className="new-project-actions">
         <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
         <Button size="lg" onClick={submit} disabled={!canImport}>
-          {t(busy ? "startup.import_timeline_busy" : "startup.import_timeline_submit")}
+          {t(busy ? "startup.timeline_review_preparing" : "startup.timeline_review_continue")}
         </Button>
       </footer>
     </AppDialog>

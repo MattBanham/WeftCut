@@ -146,9 +146,13 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
   check(el, ['id', 'name', 'uid', 'src', 'start', 'duration', 'hasVideo', 'hasAudio', 'format',
     'audioSources', 'audioChannels', 'audioRate', 'videoSources'], ['media-rep'])
   const a = el.attrs
-  if (a.hasVideo !== '1' || (a.videoSources ?? '1') !== '1') fail(el, 'Only a single video stream per asset is supported')
+  if (a.hasVideo !== undefined && a.hasVideo !== '0' && a.hasVideo !== '1') fail(el, 'Invalid "hasVideo" flag')
+  const hasVideo = a.hasVideo === '1'
+  if (a.videoSources !== undefined && a.videoSources !== (hasVideo ? '1' : '0'))
+    fail(el, 'Only a single video stream per asset is supported')
   if (a.hasAudio !== undefined && a.hasAudio !== '0' && a.hasAudio !== '1') fail(el, 'Invalid "hasAudio" flag')
   const hasAudio = a.hasAudio === '1'
+  if (!hasVideo && !hasAudio) fail(el, 'The asset must declare video or audio')
   if (a.audioSources !== undefined && a.audioSources !== (hasAudio ? '1' : '0'))
     fail(el, 'Only one embedded audio stream per asset is supported')
   const audioChannels = a.audioChannels === undefined ? undefined : integer(el, 'audioChannels')
@@ -158,6 +162,7 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
     fail(el, 'Use a video-only asset or a video with one mono or stereo audio stream')
   }
   if (a.format !== undefined) {
+    if (!hasVideo) fail(el, 'Audio-only assets must not refer to a video format')
     const source = parseFormat(lookup(a.format, 'format', el))
     if (source.width !== format.width || source.height !== format.height ||
         compareTime(source.frameDuration, format.frameDuration) !== 0) {
@@ -176,7 +181,7 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
   }
   const duration = time(el, 'duration')
   if (duration.num === 0) fail(el, 'Asset duration must be positive')
-  return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration, hasAudio, audioChannels, audioRate }
+  return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration, hasVideo, hasAudio, audioChannels, audioRate }
 }
 
 export function parseFcpxml(xml: string): ImportTimeline {
@@ -231,22 +236,41 @@ function parseDocument(root: Element): ImportTimeline {
   check(spine, [], ['gap', 'asset-clip'])
   const clips: TimelineClip[] = []
   const assets = new Map<string, Asset>()
+  let primaryEnd = 0
   let lastEnd = 0
-  for (const el of spine.children) {
+  const connected: { element: Element; clip: TimelineClip }[] = []
+
+  function readClip(el: Element, parent?: { offset: ExactTime; start: ExactTime }) {
     const a = el.attrs
-    check(el, el.tag === 'gap'
+    const gap = el.tag === 'gap'
+    check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
       : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat'],
-    el.tag === 'gap' ? [] : ['marker'])
-    if ((a.lane ?? '0') !== '0') fail(el, 'Connected clips and secondary storylines are unsupported')
-    const offset = time(el, 'offset', ZERO_TIME)
+    parent ? ['marker'] : gap ? ['asset-clip'] : ['marker', 'asset-clip'])
+    const lane = Number(a.lane ?? '0')
+    if (parent) {
+      if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
+        fail(el, 'A connected clip needs a nonzero integer lane')
+    } else if ((a.lane ?? '0') !== '0') {
+      fail(el, 'Connected clips must be nested inside their primary clip or gap')
+    }
+    const localOffset = parent ? time(el, 'offset') : time(el, 'offset', ZERO_TIME)
+    const offset = parent ? addTime(parent.offset, subtractTime(localOffset, parent.start)) : localOffset
+    if (offset.num < 0) fail(el, 'The clip starts before the timeline origin')
     const firstFrame = frames(offset, format, el, 'offset')
     const duration = time(el, 'duration')
     const endFrame = frames(addTime(offset, duration), format, el, 'end')
-    if (firstFrame < lastEnd) fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
     if (endFrame <= firstFrame) fail(el, 'Duration must span at least one video frame')
-    lastEnd = endFrame
-    if (el.tag === 'gap') continue
+    if (!parent) {
+      if (firstFrame < primaryEnd) fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
+      primaryEnd = endFrame
+    }
+    lastEnd = Math.max(lastEnd, endFrame)
+    const start = time(el, 'start', ZERO_TIME)
+    for (const child of el.children) {
+      if (child.tag === 'asset-clip') readClip(child, { offset, start })
+    }
+    if (gap) return
     if ((a.enabled ?? '1') !== '1' || (a.tcFormat ?? 'NDF') !== 'NDF' || (a.videoRole ?? 'video') !== 'video') {
       fail(el, 'Disabled clips, drop-frame clip timecode and custom video roles are unsupported')
     }
@@ -257,19 +281,20 @@ function parseDocument(root: Element): ImportTimeline {
       asset = parseAsset(assetNode, format, lookup)
       assets.set(ref, asset)
     }
+    if ((lane < 0 && asset.hasVideo) || (lane > 0 && !asset.hasVideo))
+      fail(el, 'Place connected video in positive lanes and connected audio-only clips in negative lanes')
     if (a.format !== undefined && a.format !== assetNode.attrs.format && a.format !== seq.attrs.format) {
       fail(el, 'Clip format differs from both the asset and sequence format')
     }
     const audioRole = a.audioRole ?? 'dialogue'
     if (audioRole !== 'dialogue' && audioRole !== 'music' && audioRole !== 'effects')
       fail(el, 'Use the standard dialogue, music or effects audio role')
-    const start = time(el, 'start', ZERO_TIME)
     const sourceIn = subtractTime(start, asset.start)
     const sourceOut = addTime(sourceIn, duration)
     if (sourceIn.num < 0 || compareTime(sourceOut, asset.duration) > 0)
-      fail(el, `Trim lies outside the declared source range of asset "${ref}"`)
-    frames(sourceIn, format, el, 'source in')
-    const markers = el.children.map((mark) => {
+      fail(el, 'Trim lies outside the declared source range of the asset')
+    if (asset.hasVideo) frames(sourceIn, format, el, 'source in')
+    const markers = el.children.filter((child) => child.tag === 'marker').map((mark) => {
       check(mark, ['start', 'duration', 'value'])
       if (compareTime(time(mark, 'duration', format.frameDuration), format.frameDuration) !== 0)
         fail(mark, 'Only single-frame clip markers are supported')
@@ -279,8 +304,20 @@ function parseDocument(root: Element): ImportTimeline {
       return { label: required(mark, 'value'), frame: firstFrame + frames(local, format, mark, 'start'),
         source: subtractTime(at, asset.start) }
     })
-    clips.push({ label: a.name || assetNode.attrs.name, asset, firstFrame, endFrame, sourceIn, sourceOut,
-      audioRole: !asset.hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole, markers, location: location(el) })
+    const clip: TimelineClip = { label: a.name || assetNode.attrs.name, asset, lane, firstFrame, endFrame, sourceIn, sourceOut,
+      audioRole: !asset.hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole, markers, location: location(el) }
+    if (parent) connected.push({ element: el, clip })
+    else clips.push(clip)
+  }
+
+  for (const el of spine.children) readClip(el)
+  const laneEnds = new Map<number, number>()
+  connected.sort((a, b) => a.clip.lane - b.clip.lane || a.clip.firstFrame - b.clip.firstFrame)
+  for (const { element, clip } of connected) {
+    if (clip.firstFrame < (laneEnds.get(clip.lane) ?? 0))
+      fail(element, 'Overlaps another clip on the same connected lane. Move one clip to a different lane')
+    laneEnds.set(clip.lane, clip.endFrame)
+    clips.push(clip)
   }
   const durationFrames = seq.attrs.duration === undefined ? lastEnd : frames(time(seq, 'duration'), format, seq, 'duration')
   if (durationFrames < lastEnd) fail(seq, 'Declared duration ends before the last storyline item')

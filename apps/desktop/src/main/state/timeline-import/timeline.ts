@@ -4,6 +4,7 @@ import type { AudioRole, Rational } from '../model'
 export interface TimelineSource {
   ref: string
   path: string
+  hasVideo: boolean
   hasAudio?: boolean
   audioChannels?: number
   audioRate?: number
@@ -12,6 +13,7 @@ export interface TimelineSource {
 export interface TimelineClip {
   label?: string
   asset: TimelineSource
+  lane: number
   firstFrame: number
   endFrame: number
   sourceIn: ExactTime

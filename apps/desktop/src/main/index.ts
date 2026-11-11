@@ -1609,7 +1609,8 @@ app.whenReady().then(async () => {
         case 'export_job_suggest_name': return suggestExportName(a.path);
       }
     }
-    if (channel === 'project_import_timeline' && _e.sender !== mainWindow?.webContents)
+    if (['project_preview_timeline', 'project_discard_timeline_preview', 'project_import_timeline'].includes(channel)
+      && _e.sender !== mainWindow?.webContents)
       throw new Error('Timeline import requires the editor window')
     if (channel === 'project_open_state') return tsHost!.openedProject();
     if (channel === 'project_startup_open') {

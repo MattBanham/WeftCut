@@ -42,6 +42,7 @@ import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
 import { prepareTimelineProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
+import type { TimelineImportPreview } from '../../shared/timelineImport'
 
 export interface TsActorHostDeps {
   exportJobs?: import("../exportJobs").ExportJobs
@@ -465,12 +466,22 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
 
   // Serialize all cache-root/session changes, including Save As and Close.
   let persistenceTail: Promise<unknown> = Promise.resolve()
+  let timelineReviewId: string | null = null
+  let timelineReview: {
+    preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
+    assertCurrent: () => void
+  } | null = null
+  function discardTimelineReview() {
+    timelineReviewId = null
+    timelineReview = null
+  }
   /** `keepsEdits`: the replacement writes the whole current state elsewhere
    *  (Save As), so the old folder's flush may fail without losing an edit —
    *  which is when Save As is the way out (the save-failure card offers it). */
   const replaceWorkspace = <T>(replace: () => Promise<T>, closing = false, keepsEdits = false): Promise<T> => {
     deps.exportJobs?.assertWritable()
     // Invalidate immediately, before a flush or another lifecycle call yields.
+    discardTimelineReview()
     importGeneration++
     workspaceTransitions++
     deps.onWorkspaceChanging?.()
@@ -890,19 +901,50 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       case 'open': return persistence.open((args as { path: string }).path)
       case 'saveAs': return persistence.saveAs((args as { path: string }).path)
       case 'newWorkspace': return persistence.newWorkspace(args as never)
+      case 'previewTimeline': {
+        if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
+        const dir = timelineDestination(args.destination)
+        if (deps.fs.exists(dir)) throw new Error('That project folder already exists. Choose a new name or location')
+        const id = idGen()
+        timelineReviewId = id
+        timelineReview = null
+        const assertSession = captureImportSession(hybridDeps)
+        const assertCurrent = () => {
+          assertSession()
+          if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
+        }
+        const preparation = await prepareTimelineProject(args.path, dir, args.edl, idGen, hybridDeps, assertCurrent)
+        assertCurrent()
+        timelineReview = { preparation, assertCurrent }
+        return { id, ...preparation.report } satisfies TimelineImportPreview
+      }
+      case 'discardTimelinePreview':
+        if (args.id === timelineReviewId) discardTimelineReview()
+        return null
       case 'importTimeline': {
         if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
         deps.exportJobs?.assertWritable()
-        const dir = timelineDestination(args.destination)
-        if (deps.fs.exists(dir)) throw new Error('That project folder already exists. Choose a new name or location')
-        const assertCurrent = captureImportSession(hybridDeps)
-        const project = await prepareTimelineProject(args.path, dir, args.edl, idGen, hybridDeps, assertCurrent)
+        const review = timelineReview
+        if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
+        timelineReview = null
+        const { preparation: { project, report }, assertCurrent } = review
         assertCurrent()
-        if (quitting) throw new Error('WeftCut is closing. Open it again to import the timeline')
+        for (const item of Object.values(project.media_pool)) {
+          let hash: string | undefined
+          try { hash = await deps.compute.hashMediaSource(item.path_abs) } catch { /* a missing or unreadable original */ }
+          assertCurrent()
+          if (hash !== item.file_hash_blake3)
+            throw new Error('Original media changed or became unreadable after review. Review the timeline again')
+        }
         return replaceWorkspace(async () => {
-          await publishTimelineProject(orchestratorDeps, dir, project)
-          opens(dir)
-          return dir
+          for (const item of Object.values(project.media_pool)) {
+            const stamp = deps.poolFs.stat(item.path_abs)
+            if (!stamp || stamp.size !== item.file_size || stamp.mtimeSecs !== item.file_mtime)
+              throw new Error('Original media changed or became unreadable after review. Review the timeline again')
+          }
+          await publishTimelineProject(orchestratorDeps, report.destination, project)
+          opens(report.destination)
+          return report.destination
         })
       }
       case 'save': return persistence.save()

@@ -56,9 +56,9 @@ export function parseEdl(text: string, options: unknown): ImportTimeline {
     if (cut.sourceIn < sourceStart) throw new Error(cut.location + ': source in precedes the supplied media origin')
     clips.push({
       label: cut.clipName ?? file,
-      asset: { ref: cut.reel, path: join(folder, file),
+      asset: { ref: cut.reel, path: join(folder, file), hasVideo: true,
         ...(cut.channels > 0 ? { hasAudio: true, audioChannels: cut.channels } : {}) },
-      firstFrame: cut.firstFrame, endFrame: cut.endFrame,
+      lane: 0, firstFrame: cut.firstFrame, endFrame: cut.endFrame,
       sourceIn: sourceTime(cut.sourceIn - sourceStart), sourceOut: sourceTime(cut.sourceOut - sourceStart),
       audioRole: cut.channels > 0 ? 'dialogue' : null,
       markers: [], location: cut.location,

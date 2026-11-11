@@ -161,12 +161,24 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
       (audioRate !== undefined && (hasAudio ? audioRate === 0 : audioRate !== 0))) {
     fail(el, 'Use a video-only asset or a video with one mono or stereo audio stream')
   }
+  const duration = time(el, 'duration')
+  // Still-image assets in FCPXML describe zero source duration: the enclosing
+  // <video> gives the duration on the edit. Do not impose video-frame/source
+  // duration checks on PNG artwork (including VoiceScript viseme overlays).
+  const stillImage = hasVideo && !hasAudio && duration.num === 0
   if (a.format !== undefined) {
     if (!hasVideo) fail(el, 'Audio-only assets must not refer to a video format')
-    const source = parseFormat(lookup(a.format, 'format', el))
-    if (source.width !== format.width || source.height !== format.height ||
-        compareTime(source.frameDuration, format.frameDuration) !== 0) {
-      fail(el, 'Source size and frame rate must match the sequence. Render conforming media and export again')
+    const formatNode = lookup(a.format, 'format', el)
+    if (stillImage) {
+      check(formatNode, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
+      if (integer(formatNode, 'width') === 0 || integer(formatNode, 'height') === 0)
+        fail(formatNode, 'Still-image dimensions must be positive')
+    } else {
+      const source = parseFormat(formatNode)
+      if (source.width !== format.width || source.height !== format.height ||
+          compareTime(source.frameDuration, format.frameDuration) !== 0) {
+        fail(el, 'Source size and frame rate must match the sequence. Render conforming media and export again')
+      }
     }
   }
   let path: string
@@ -179,9 +191,8 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
     if ((rep.attrs.kind ?? 'original-media') !== 'original-media') fail(rep, 'Relink the original media and export again')
     path = localPath(rep)
   }
-  const duration = time(el, 'duration')
-  if (duration.num === 0) fail(el, 'Asset duration must be positive')
-  return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration, hasVideo, hasAudio, audioChannels, audioRate }
+  if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
+  return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration, hasVideo, hasAudio, stillImage, audioChannels, audioRate }
 }
 
 export function parseFcpxml(xml: string): ImportTimeline {
@@ -213,8 +224,10 @@ function parseDocument(root: Element): ImportTimeline {
   if ((seq.attrs.tcFormat ?? 'NDF') !== 'NDF' || time(seq, 'tcStart', ZERO_TIME).num !== 0) {
     fail(seq, 'Set the sequence to zero-start non-drop-frame timecode and export again')
   }
-  if ((seq.attrs.audioLayout ?? 'stereo') !== 'stereo' || (seq.attrs.audioRate ?? '48k') !== '48k') {
-    fail(seq, 'Set the sequence to 48 kHz stereo audio and export again')
+  const audioLayout = seq.attrs.audioLayout ?? 'stereo'
+  const audioRate = seq.attrs.audioRate ?? '48k'
+  if (!['mono', 'stereo'].includes(audioLayout) || audioRate !== '48k') {
+    fail(seq, `Only 48 kHz mono or stereo sequence audio is supported (found ${audioLayout}, ${audioRate})`)
   }
 
   const byId = new Map<string, Element>()
@@ -246,7 +259,7 @@ function parseDocument(root: Element): ImportTimeline {
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
       : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat'],
-    parent ? ['marker'] : gap ? ['asset-clip'] : ['marker', 'asset-clip'])
+    parent ? ['marker'] : gap ? ['asset-clip', 'video'] : ['marker', 'asset-clip', 'video'])
     const lane = Number(a.lane ?? '0')
     if (parent) {
       if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
@@ -268,7 +281,7 @@ function parseDocument(root: Element): ImportTimeline {
     lastEnd = Math.max(lastEnd, endFrame)
     const start = time(el, 'start', ZERO_TIME)
     for (const child of el.children) {
-      if (child.tag === 'asset-clip') readClip(child, { offset, start })
+      if (child.tag === 'asset-clip' || child.tag === 'video') readClip(child, { offset, start })
     }
     if (gap) return
     if ((a.enabled ?? '1') !== '1' || (a.tcFormat ?? 'NDF') !== 'NDF' || (a.videoRole ?? 'video') !== 'video') {
@@ -281,6 +294,8 @@ function parseDocument(root: Element): ImportTimeline {
       asset = parseAsset(assetNode, format, lookup)
       assets.set(ref, asset)
     }
+    if (asset.stillImage && el.tag !== 'video')
+      fail(el, 'Still-image assets must be placed with a <video> clip')
     if ((lane < 0 && asset.hasVideo) || (lane > 0 && !asset.hasVideo))
       fail(el, 'Place connected video in positive lanes and connected audio-only clips in negative lanes')
     if (a.format !== undefined && a.format !== assetNode.attrs.format && a.format !== seq.attrs.format) {
@@ -291,8 +306,10 @@ function parseDocument(root: Element): ImportTimeline {
       fail(el, 'Use the standard dialogue, music or effects audio role')
     const sourceIn = subtractTime(start, asset.start)
     const sourceOut = addTime(sourceIn, duration)
-    if (sourceIn.num < 0 || compareTime(sourceOut, asset.duration) > 0)
+    if (sourceIn.num < 0 || (!asset.stillImage && compareTime(sourceOut, asset.duration) > 0))
       fail(el, 'Trim lies outside the declared source range of the asset')
+    if (asset.stillImage && sourceIn.num !== 0)
+      fail(el, 'Still-image clips must start at 0s in the source')
     if (asset.hasVideo) frames(sourceIn, format, el, 'source in')
     const markers = el.children.filter((child) => child.tag === 'marker').map((mark) => {
       check(mark, ['start', 'duration', 'value'])

@@ -39,6 +39,31 @@ const fixture = (url = 'file:///fictional/Harbor%20Lights.mov') => `<?xml versio
   </project>
 </fcpxml>`
 
+const voiceScriptStillFixture = (audioUrl: string, imageUrl: string) => `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="f" frameDuration="1/60s" width="320" height="240"/>
+    <format id="still" name="FFVideoFormatRateUndefined" width="120" height="130"/>
+    <asset id="narration" name="Narration" start="0s" duration="2s" hasAudio="1" audioSources="1" audioChannels="1">
+      <media-rep kind="original-media" src="${audioUrl}"/>
+    </asset>
+    <asset id="mouth" name="Mouth A" start="0s" duration="0s" hasVideo="1" videoSources="1" format="still">
+      <media-rep kind="original-media" src="${imageUrl}"/>
+    </asset>
+  </resources>
+  <library><event name="VoiceScript"><project name="VoiceScript test">
+    <sequence format="f" duration="120/60s" tcStart="0s" tcFormat="NDF" audioLayout="mono" audioRate="48k">
+      <spine>
+        <gap offset="0s" start="0s" duration="120/60s">
+          <asset-clip ref="narration" lane="-1" offset="0s" start="0s" duration="120/60s" audioRole="dialogue"/>
+          <video ref="mouth" lane="1" name="A" offset="30/60s" start="0s" duration="60/60s"/>
+        </gap>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>`
+
 describe('FCPXML subset', () => {
   it('keeps fractional frames, source timecode origin and marker time distinct', () => {
     const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href
@@ -70,6 +95,27 @@ describe('FCPXML subset', () => {
     expect(parsed.clips.map((clip) => [clip.lane, clip.firstFrame, clip.endFrame])).toEqual([[0, 0, 3], [0, 4, 6], [2, 1, 3]])
     expect(() => parseFcpxml(xml.replace(child, child + child))).toThrow(/same connected lane/)
     expect(() => parseFcpxml(xml.replace('offset="108003003/30000s"', 'offset="0s"'))).toThrow(/before the timeline origin/)
+  })
+
+  it('accepts VoiceScript mono narration and still PNG visemes as connected image clips', () => {
+    const xml = voiceScriptStillFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
+    const parsed = parseFcpxml(xml)
+    expect(parsed).toMatchObject({
+      name: 'VoiceScript test', fps: { num: 60, den: 1 }, durationFrames: 120,
+    })
+    expect(parsed.clips).toHaveLength(2)
+    expect(parsed.clips.map((clip) => [clip.lane, clip.firstFrame, clip.endFrame])).toEqual([
+      [-1, 0, 120],
+      [1, 30, 90],
+    ])
+    expect(parsed.clips[0]!.asset).toMatchObject({ hasAudio: true, audioChannels: 1, stillImage: false })
+    expect(parsed.clips[1]!.asset).toMatchObject({ hasVideo: true, hasAudio: false, stillImage: true })
+    expect(() => parseFcpxml(xml.replace('audioLayout="mono"', 'audioLayout="surround"')))
+      .toThrow(/Only 48 kHz mono or stereo/)
+    expect(() => parseFcpxml(xml.replace('audioRate="48k"', 'audioRate="44.1k"')))
+      .toThrow(/Only 48 kHz mono or stereo/)
+    expect(() => parseFcpxml(xml.replace('<video ref="mouth"', '<asset-clip ref="mouth"')))
+      .toThrow(/Still-image assets must be placed with a <video>/)
   })
 
   it.each([
@@ -214,5 +260,51 @@ describe('timeline import transaction', () => {
     expect(run.actor.snapshot()).toBe(run.before)
     expect(run.pushRecent).not.toHaveBeenCalled()
     expect(existsSync(destination)).toBe(false)
+  })
+})
+
+describe('VoiceScript still-image import transaction', () => {
+  it('places a mono audio clip and an image overlay on independent editable lanes', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'weftcut-voicescript-still-'))
+    try {
+      const document = join(folder, 'VoiceScript.fcpxml')
+      const narration = join(folder, 'Narration.wav')
+      const image = join(folder, 'Mouth A.png')
+      await writeFile(document, voiceScriptStillFixture(pathToFileURL(narration).href, pathToFileURL(image).href))
+      await writeFile(narration, 'synthetic mono-audio file')
+      await writeFile(image, 'synthetic still-image file')
+      const probeMedia = vi.fn(async (filepath: string) => {
+        const isImage = filepath === image
+        const id = isImage ? '00000000-0000-0000-0000-0000000000a1' : '00000000-0000-0000-0000-0000000000a2'
+        return JSON.stringify({
+          ...mediaItemTemplate(id, isImage ? 'Image' : 'Audio', isImage ? null : 2_000_000),
+          path_abs: filepath, file_hash_blake3: `pending-${id}`,
+          metadata: {
+            duration_us: isImage ? null : 2_000_000,
+            video: isImage ? { width: 120, height: 130, fps_num: 0, fps_den: 0 } : null,
+            audio: isImage ? null : { sample_rate: 48000, channels: 1, codec: 'pcm_s16le' },
+          },
+        })
+      })
+      const { project, report } = await prepareTimelineProject(
+        document, join(folder, 'Imported project'), undefined, seededGen(),
+        {
+          compute: { probeMedia, hashMediaSource: async (filepath: string) => filepath === image ? 'a'.repeat(64) : 'b'.repeat(64) },
+          statPath: (filepath) => existsSync(filepath) && statSync(filepath).isFile() ? { kind: 'file', readable: true } : null,
+        },
+        () => {},
+      )
+      expect(report).toMatchObject({ videoClips: 1, audioClips: 1, connectedClips: 2, durationFrames: 120 })
+      const root = rootComposition(project)
+      const images = root.tracks.flatMap((track) => track.layers.filter((layer) => layer.params.kind === 'ImageOverlay'))
+      const audio = root.tracks.flatMap((track) => track.layers.filter((layer) => layer.params.kind === 'Audio'))
+      expect(images).toHaveLength(1)
+      expect(audio).toHaveLength(1)
+      expect(images[0]).toMatchObject({ t_start_us: 500000, t_end_us: 1500000 })
+      expect(audio[0]).toMatchObject({ t_start_us: 0, t_end_us: 2000000 })
+      expect(() => validate(project)).not.toThrow()
+    } finally {
+      await rm(folder, { recursive: true, force: true })
+    }
   })
 })

@@ -15,14 +15,18 @@ WeftCut finishes copying them into the project's media pool.
 
 FCPXML import accepts one sequence with a primary storyline of straight cuts,
 gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline
-with 48 kHz stereo output and a WeftCut frame rate. Video must use a local
-original matching the sequence dimensions and frame rate. Audio can be
-standalone or linked to its video from the same mono or stereo stream.
+with 48 kHz mono or stereo audio and a WeftCut frame rate. Moving video must
+use a local original matching the sequence dimensions and frame rate. Mono or
+stereo audio can be standalone or linked to a video clip. FCPXML still-image
+assets (zero source duration) can be placed through connected `<video>` clips
+as editable ImageOverlay layers. They may use an independent source size and
+an image format without a frame duration, as VoiceScript viseme exports do.
 The importer supports ordinary UTF-8 \`.fcpxml\` documents from versions 1.6
 through 1.13 and both asset URL forms.
 
-A primary clip or gap can carry one level of connected asset clips. Positive
-lanes hold video and negative lanes hold standalone audio. The lane numbers
+A primary clip or gap can carry one level of connected asset clips or `<video>`
+still-image overlays. Positive lanes hold video/images and negative lanes hold
+standalone audio. The lane numbers
 set the bottom-to-top track order. The review tells you that the connected
 clips become independently editable at their mapped positions. Moving a
 former anchor in WeftCut leaves those clips in place. Choose **All Tracks**

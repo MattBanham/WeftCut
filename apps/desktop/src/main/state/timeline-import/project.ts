@@ -9,7 +9,7 @@ import { type IdGen } from '../ids'
 import { createMediaImporter, type MediaImportDeps } from '../mediaImport'
 import { blankProject, rootComposition, type AudioParams, type Layer, type MediaItem, type Project } from '../model'
 import { applyAddTrack, DEFAULT_MARKER_COLOR } from '../mutations/add'
-import { audioParams, videoClipParams } from '../mutations/media'
+import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/media'
 import { applyDurationAutofit } from '../mutations/helpers'
 import { PROJECT_FILE, serializeProjectToJson } from '../persistence'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
@@ -133,20 +133,24 @@ export async function prepareTimelineProject(
     const sourceOut = validateSource(target, clip, item)
     if (sourceOut !== clip.sourceOut) roundedEnds++
     const track = tracks.get(laneIds.get(clip.lane)!)!
-    const video = clip.asset.hasVideo
+    const video = clip.asset.hasVideo && !clip.asset.stillImage
       ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame), videoClipParams(item.id, 0, 0, target))
+      : null
+    const image = clip.asset.stillImage
+      ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
+        imageOverlayParams(item.id, { width, height }) as Extract<Layer['params'], { kind: 'ImageOverlay' }>)
       : null
     const audio = clip.audioRole
       ? newLayer(idGen, clip, sourceOut, sampleBoundary(clip.firstFrame), sampleBoundary(clip.endFrame), { ...audioParams(item.id, 0, 0), role: clip.audioRole })
       : null
-    if (video) { track.layers.push(video); videoClips++ }
+    if (video || image) { track.layers.push((video ?? image)!); videoClips++ }
     if (audio) { track.layers.push(audio); audioClips++ }
     if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
     for (const mark of clip.markers) {
       const { whole, fraction } = splitExact(mark.source)
       target.markers.push({
         id: idGen(), t_us: boundary(mark.frame), end_t_us: null, label: mark.label, note: '',
-        color: DEFAULT_MARKER_COLOR, anchor: { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
+        color: DEFAULT_MARKER_COLOR, anchor: { layer: (video ?? image ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
       })
     }
   }
@@ -165,8 +169,10 @@ export async function prepareTimelineProject(
   } }
 }
 
-function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' }> | AudioParams): Layer {
-  writeSourceWindow(params, clip.sourceIn, sourceOut)
+function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }> | AudioParams): Layer {
+  // A still image has no moving source clock. Its authored span is on the
+  // composition timeline, not a range within a zero-duration image asset.
+  if (params.kind !== 'ImageOverlay') writeSourceWindow(params, clip.sourceIn, sourceOut)
   return { id: idGen(), label: clip.label ?? null, t_start_us: start, t_end_us: end,
     enabled: true, locked: false, metadata: {}, params, effects: [] }
 }
@@ -174,6 +180,15 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start:
 function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'width' | 'height' | 'fps'>, clip: TimelineClip, item: MediaItem): ExactTime {
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(`${clip.location}, source ${clip.asset.ref}: ${message}`) }
+  if (clip.asset.stillImage) {
+    // The normal image probe may report width/height in metadata.video even
+    // though the media is an Image, not a moving VideoClip. Image kind is the
+    // authoritative distinction; a real audio stream remains unsupported.
+    if (item.kind !== 'Image' || audio) {
+      fail('A zero-duration FCPXML still image must reference original image media without audio')
+    }
+    return clip.sourceOut
+  }
   if (clip.asset.hasVideo) {
     if (item.kind !== 'Video' || !video || video.width !== timeline.width || video.height !== timeline.height ||
         !video.fps_num || !video.fps_den || video.fps_num * timeline.fps.den !== video.fps_den * timeline.fps.num) {

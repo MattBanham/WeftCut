@@ -5,6 +5,8 @@ export interface TimelineSource {
   ref: string
   path: string
   hasVideo: boolean
+  /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */
+  stillImage?: boolean
   hasAudio?: boolean
   audioChannels?: number
   audioRate?: number

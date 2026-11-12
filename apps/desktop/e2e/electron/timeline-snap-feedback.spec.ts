@@ -30,7 +30,7 @@ test("the single timeline magnet opens its settings, which toggle snapping", asy
     await expect(magnet).toHaveAttribute("data-active", "false");
     await enabled.click();
     await expect(magnet).toHaveAttribute("data-active", "true");
-    const strength = dialog.getByLabel("Snap strength", { exact: true });
+    const strength = dialog.getByLabel("Timeline snap strength", { exact: true });
     await strength.fill("28");
     await strength.press("Enter");
     await expect.poll(async () => {

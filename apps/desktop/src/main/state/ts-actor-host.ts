@@ -42,6 +42,8 @@ import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
 import { ExportJobError } from '../exportJobs'
+import { listTimelineSequences, prepareTimelineProject } from './timeline-import/project'
+import type { TimelineImportPreview } from '../../shared/timelineImport'
 
 export interface TsActorHostDeps {
   exportJobs?: import("../exportJobs").ExportJobs
@@ -481,6 +483,16 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
 
   // Serialize all cache-root/session changes, including Save As and Close.
   let persistenceTail: Promise<unknown> = Promise.resolve()
+  let timelineReviewId: string | null = null
+  let timelineReview: {
+    preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
+    assertCurrent: () => void
+    original: ReturnType<typeof actor.snapshot>
+  } | null = null
+  function discardTimelineReview() {
+    timelineReviewId = null
+    timelineReview = null
+  }
   /** The outgoing project's flush may fail without blocking the replacement:
    *  `keepsEdits` (Save As writes the whole current state elsewhere, which is
    *  the way out the save-failure card offers), or its folder is gone (a
@@ -518,6 +530,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           throw error
         }
       }
+      discardTimelineReview()
       importGeneration++
       deps.onWorkspaceChanging?.()
       replacementOccurred = false
@@ -916,6 +929,75 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       case 'open': return persistence.open((args as { path: string }).path)
       case 'saveAs': return persistence.saveAs((args as { path: string }).path)
       case 'newWorkspace': return persistence.newWorkspace(args as never)
+      case 'listTimelineSequences': {
+        if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
+        return listTimelineSequences(args.path, hybridDeps)
+      }
+      case 'previewTimeline': {
+        if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
+        if (!opened) throw new Error('Open a project before importing FCPXML')
+        const dir = opened.dir
+        const original = actor.snapshot()
+        const id = idGen()
+        timelineReviewId = id
+        timelineReview = null
+        const assertSession = captureImportSession(hybridDeps)
+        const assertCurrent = () => {
+          assertSession()
+          if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
+        }
+        const preparation = await prepareTimelineProject(args.path, dir, idGen, hybridDeps, assertCurrent, args.relinkDirectory, args.sequenceIndex, original)
+        assertCurrent()
+        if (actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
+        timelineReview = { preparation, assertCurrent, original }
+        const current = rootComposition(original)
+        return { id, ...preparation.report, current: {
+          width: current.width, height: current.height, fps: current.fps,
+          sampleRate: current.sample_rate, channels: current.channels,
+        } } satisfies TimelineImportPreview
+      }
+      case 'discardTimelinePreview':
+        if (args.id === timelineReviewId) discardTimelineReview()
+        return null
+      case 'importTimeline': {
+        if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
+        deps.exportJobs?.assertWritable()
+        const review = timelineReview
+        if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
+        timelineReview = null
+        const { preparation: { project }, assertCurrent, original } = review
+        assertCurrent()
+        if (actor.snapshot() !== original) {
+          throw new Error('The current project changed during review. Review the import again')
+        }
+        for (const item of Object.values(project.media_pool)) {
+          let hash: string | undefined
+          try { hash = await deps.compute.hashMediaSource(item.path_abs) } catch { /* a missing or unreadable original */ }
+          assertCurrent()
+          if (hash !== item.file_hash_blake3)
+            throw new Error('Original media changed or became unreadable after review. Review the timeline again')
+        }
+        if (actor.snapshot() !== original) throw new Error('The current project changed during confirmation. Review the import again')
+        deps.exportJobs?.assertWritable()
+        {
+          if (args.canvas !== undefined && !['fit', 'fill', 'original'].includes(args.canvas as string)) {
+            throw new Error('Choose how the imported canvas should fit')
+          }
+          const canvas = args.canvas ?? 'fit'
+          const result = actor.dispatch('import_timeline_group', {
+            imported: project, expectedProjectId: original.project_id, canvas,
+          })
+          if (!result.ok) throw new Error(JSON.stringify(result.error))
+          const addedMedia = Object.values(project.media_pool).filter(item => !original.media_pool[item.id])
+          for (const item of addedMedia.filter(item => item.path_rel === null)) {
+            void deps.enqueueWorkspaceCopy(item.id, item.path_abs).catch(error =>
+              console.warn('[timeline import] Workspace media copy failed', error))
+          }
+          void Promise.resolve(deps.napi.enqueueJobsForMedia(JSON.stringify(addedMedia)))
+            .catch(error => console.warn('[timeline import] Derivative enqueue failed', error))
+          return opened!.dir
+        }
+      }
       case 'save': return persistence.save()
       case 'close': return persistence.close()
       case 'tacks': return runTackIpc(agent.tacks, channel, args)

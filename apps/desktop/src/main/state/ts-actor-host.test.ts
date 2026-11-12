@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import nodePath from 'node:path'
 import { mapChangeEvent, createTsActorHost } from './ts-actor-host'
@@ -104,6 +105,100 @@ describe('createTsActorHost — persistence-route integration', () => {
 
     return { deps, vfs, napiCalls, sent }
   }
+
+  function timelineFixture() {
+    const fixture = makeInMemoryDeps()
+    const folder = mkdtempSync(nodePath.join(tmpdir(), 'weftcut-review-'))
+    const path = nodePath.join(folder, 'Lantern.fcpxml')
+    const source = nodePath.join(folder, 'Lantern.mov')
+    writeFileSync(source, 'Fictional source bytes')
+    writeFileSync(path, `<fcpxml version="1.10"><resources>
+      <format id="f" width="320" height="240" frameDuration="1/30s"/>
+      <asset id="a" format="f" hasVideo="1" duration="1s" src="${pathToFileURL(source).href}"/>
+      </resources><project name="Lantern"><sequence format="f" duration="1s"><spine>
+      <asset-clip ref="a" start="0s" duration="1s"/>
+      </spine></sequence></project></fcpxml>`)
+    fixture.deps.compute.probeMedia = async () => JSON.stringify({
+      ...mediaItemTemplate('00000000-0000-0000-0000-0000000000ab', 'Video', 1_000_000),
+      path_abs: source,
+      metadata: { duration_us: 1_000_000,
+        video: { width: 320, height: 240, fps_num: 30, fps_den: 1 }, audio: null },
+    })
+    const copy = vi.fn(async () => {})
+    fixture.deps.enqueueWorkspaceCopy = copy
+    const host = createTsActorHost(fixture.deps)
+    const close = () => { host.stop(); rmSync(folder, { recursive: true, force: true }) }
+    return { ...fixture, host, path, source, copy, close }
+  }
+
+  describe('FCPXML actor import', () => {
+    it('reviews without writes, cancels without edits, and imports a reusable composition in one undo', async () => {
+      const f = timelineFixture()
+      try {
+        await f.host.handleInvoke('project_new_workspace', { parentFolder: '/projects', name: 'Existing',
+          width: 320, height: 240, fpsNum: 30, fpsDen: 1 })
+        const before = f.host.actor.snapshot()
+        const bytes = readFileSync(f.source)
+        const review = await f.host.handleInvoke('project_preview_timeline', { path: f.path }) as { id: string }
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.copy).not.toHaveBeenCalled()
+        await f.host.handleInvoke('project_discard_timeline_preview', { id: review.id })
+        await expect(f.host.handleInvoke('project_import_timeline', { id: review.id })).rejects.toThrow(/expired/)
+        expect(f.host.actor.snapshot()).toBe(before)
+        const ready = await f.host.handleInvoke('project_preview_timeline', { path: f.path }) as { id: string }
+        await f.host.handleInvoke('project_import_timeline', { id: ready.id })
+        expect(Object.keys(f.host.actor.snapshot().compositions)).toHaveLength(2)
+        expect(f.copy).toHaveBeenCalledOnce()
+        expect(readFileSync(f.source)).toEqual(bytes)
+        const first = f.host.actor.snapshot()
+        const reuse = await f.host.handleInvoke('project_preview_timeline', { path: f.path }) as { id: string }
+        await f.host.handleInvoke('project_import_timeline', { id: reuse.id })
+        expect(Object.keys(f.host.actor.snapshot().compositions)).toHaveLength(3)
+        expect(f.host.actor.snapshot().media_pool).toEqual(first.media_pool)
+        expect(f.copy).toHaveBeenCalledOnce()
+        expect(f.host.actor.dispatch('undo', {}).ok).toBe(true)
+        expect(f.host.actor.snapshot()).toEqual(first)
+        expect(f.host.actor.dispatch('undo', {}).ok).toBe(true)
+        expect(f.host.actor.snapshot()).toEqual(before)
+      } finally { f.close() }
+    })
+
+    it('refuses a review if an edit lands while source bytes are rechecked', async () => {
+      const f = timelineFixture()
+      try {
+        await f.host.handleInvoke('project_new_workspace', { parentFolder: '/projects', name: 'Existing',
+          width: 320, height: 240, fpsNum: 30, fpsDen: 1 })
+        const review = await f.host.handleInvoke('project_preview_timeline', { path: f.path }) as { id: string }
+        f.deps.compute.hashMediaSource = async () => {
+          f.host.actor.dispatch('add_marker', { t_us: 0, label: 'Keep this marker' })
+          return 'h'
+        }
+        await expect(f.host.handleInvoke('project_import_timeline', { id: review.id }))
+          .rejects.toThrow(/changed during confirmation/)
+        expect(Object.keys(f.host.actor.snapshot().compositions)).toHaveLength(1)
+        expect(Object.values(f.host.actor.snapshot().media_pool)).toEqual([])
+        expect(rootComposition(f.host.actor.snapshot()).markers).toMatchObject([{ label: 'Keep this marker' }])
+        expect(f.copy).not.toHaveBeenCalled()
+      } finally { f.close() }
+    })
+
+    it('refuses changed source bytes and malformed XML without modifying project content', async () => {
+      const f = timelineFixture()
+      try {
+        await f.host.handleInvoke('project_new_workspace', { parentFolder: '/projects', name: 'Existing',
+          width: 320, height: 240, fpsNum: 30, fpsDen: 1 })
+        const before = f.host.actor.snapshot()
+        const review = await f.host.handleInvoke('project_preview_timeline', { path: f.path }) as { id: string }
+        f.deps.compute.hashMediaSource = async () => 'changed'
+        await expect(f.host.handleInvoke('project_import_timeline', { id: review.id })).rejects.toThrow(/Original media changed/)
+        expect(f.host.actor.snapshot()).toBe(before)
+        writeFileSync(f.path, '<fcpxml>')
+        await expect(f.host.handleInvoke('project_preview_timeline', { path: f.path })).rejects.toThrow(/Malformed/)
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.copy).not.toHaveBeenCalled()
+      } finally { f.close() }
+    })
+  })
 
   const publicationProject = { parentFolder: '/projects', name: 'Publication', width: 1920, height: 1080, fpsNum: 30, fpsDen: 1 }
 

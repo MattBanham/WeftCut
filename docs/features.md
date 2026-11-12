@@ -5,6 +5,124 @@ rules, and the edge cases. Subsystem mechanics live in the linked docs; the
 record shapes in [data-model.md](data-model.md); the agent surface in
 [mcp.md](mcp.md).
 
+## Timeline import
+
+Choose **File → Import FCPXML…** (Mod+Shift+I) in an open project, then choose
+a file or bundle to review and import a sequence as a separate editable Group. Confirmation adds
+one Group on a new track after the current timeline through the validated
+actor edit path. Existing clips and settings are unchanged; Undo removes the
+import in one step. Cancellation and failed validation leave the project
+unchanged. Media uses the normal import pipeline and workspace copies; keep
+original files accessible until copying finishes.
+
+The imported composition retains its own canvas and internal tracks. For a
+canvas mismatch, choose **Fit**, **Fill** (may crop), or **Original size**
+(may crop) for the parent Group, without rewriting its member transforms.
+The destination project rate stays locked. A sequence-rate mismatch blocks
+confirmation with instructions to export at the destination rate. Source
+footage can have a different frame rate, as described below.
+
+FCPXML import accepts one selected sequence with a primary storyline of
+straight cuts, gaps and single-frame clip markers at a supported WeftCut frame
+rate. Documents containing multiple projects across one or more Final Cut
+events display a picker naming each event and project. Only the selected
+project is parsed and imported; other projects remain untouched even if
+they contain unsupported edits. The sequence selection survives media
+relinking. A
+sequence `<format>` can define explicit dimensions and frame duration, or
+omit fields supplied by a recognized progressive Apple `FFVideoFormat…`
+preset (explicit values override named values). Unknown names without
+all required fields are rejected instead of guessed. Progressive Rec. 709
+square-pixel sequence canvases are required. Non-square source pixels
+are corrected using the source format pixel aspect before spatial conform.
+HDR, unverified alternate colour transfers, interlaced sources and
+non-square sequence canvases remain explicitly unsupported.
+
+Nonzero sequence `tcStart` is normalized to WeftCut's zero-based timeline
+when clip offsets are in the source timecode domain. FCPXML
+`tcFormat="DF"` at 30000/1001 and 60000/1001 fps is treated as display
+metadata; edit positions remain exact rational frames. The review
+discloses named-format fallback and timecode normalization. Source
+time-remapping remains unsupported.
+
+Video-only timelines are supported. Sequence audio may declare mono,
+stereo or surround at a valid sample rate; decodable audio is conformed
+to 48 kHz and at most two channels. The review reports resampling and
+stereo downmixing. Moving FCPXML video may have a different source
+resolution and frame rate from the destination sequence. The original
+source in/out times are preserved independently of the sequence frame grid;
+the decoder selects frames by source presentation timestamp, potentially
+repeating or skipping frames without altering playback speed. Sources with
+different dimensions can be fitted (letterbox), filled (crop), or
+retained at original source pixel size (potential crop), according to the
+source clip's spatial conform adjustment. The review lists converted
+source files, source sizes/rates, pixel-aspect corrections, and affected
+clip counts. The review also classifies each imported source clip as exact,
+converted, or approximated (for example frame repeats/skips or surround
+downmixing), with an element location and conversion details. Unsupported
+elements block import and are never silently omitted. If the FCPXML asset declares
+a video format, it must match the probed original. Otherwise the probed
+FPS determines whether the source in-point is aligned to an actual frame.
+Unknown or contradictory source metadata is refused, never silently
+reinterpreted. Mono or stereo audio may be
+standalone or linked. A zero-duration still-image asset placed through a
+connected `<video>` clip becomes an editable ImageOverlay; its source
+dimensions may differ from the sequence.
+
+The importer supports UTF-8 `.fcpxml` documents from FCPXML 1.6–1.13
+and both asset URL forms. The supported subset is exercised with invented FCPXML 1.6
+through 1.13 headers and synthetic media. The tests do not certify exports
+from specific Final Cut Pro or DaVinci Resolve releases. Modern Final Cut `.fcpxmld` bundles are read
+through a regular root `Info.fcpxml`; metadata-only `<import-options>`
+are accepted without affecting the edit. Symlinked documents, bundle roots and Info files are rejected. XML is bounded to 16 MiB, 24 levels of nesting,
+50,000 elements, 64 attributes per element and 16,384 characters per attribute.
+A sequence may reference up to 2,048 original files.
+External DTDs/entities, invalid UTF-8/Unicode and media URL traversal are refused.
+
+If a referenced source is missing, **Find original media in a folder…**
+looks in the chosen folder for exact filenames (not recursively). Windows drive
+and POSIX file URLs are accepted. Media paths from a different platform need
+relinking. Network file URLs, UNC shares referenced by XML, device paths and
+Windows alternate data streams are refused. The
+review shows each original → replacement path and requires confirmation.
+Ambiguous filename mappings and unreadable or symlinked files are
+refused; every replacement undergoes the normal source-format, duration
+and trim checks. Neither the interchange document nor original media
+is rewritten.
+
+Moving video and still images use Fit by default and support explicit Fit/Fill/None.
+Video or still-image clips can carry static position, scale, rotation and
+normal blend opacity, retained as editable WeftCut properties. The position
+is converted from FCPXML's percentage-of-sequence-height coordinate system
+(Y up) to WeftCut canvas pixels (Y down); positive FCPXML rotation is
+counterclockwise and translated to WeftCut's rotation sign. Nonzero pivot
+anchors and keyframed transforms are rejected. Clips with audio support
+one static dB gain adjustment in WeftCut's -30dB to +20dB editing range.
+Multicam/compound/synchronized clips, transitions, Motion titles,
+third-party filters, source speed ramps, and non-normal blend effects
+require further conversion or rendering support and are rejected.
+
+A primary clip or gap can carry one level of connected asset clips or `<video>`
+still-image overlays. Positive lanes hold video/images and negative lanes hold
+standalone audio. The lane numbers
+set the bottom-to-top track order. The review tells you that the connected
+clips become independently editable at their mapped positions. Moving a
+former anchor in WeftCut leaves those clips in place. Choose **All Tracks**
+to show every imported lane. Collisions within the same lane stop the import.
+
+The source trim accounts for the asset's own start time. Video and markers
+land on exact timeline frames. Linked audio edges land on the nearest 48 kHz
+sample, with the final edge kept inside the sequence duration. The review gives the audio boundary adjustments in microseconds and identifies
+single-frame markers converted to point markers. Imported markers follow their
+clips. Named gaps keep their span and lose their labels. The review lists source
+metadata and import options the edit does not carry over. A trailing gap extends the duration.
+If an exact fractional source out rounds down to the probed end of the
+file, the review reports the sub-microsecond adjustment.
+
+An unsupported edit or missing media stops the
+import. Follow the reported element or asset to simplify the timeline or
+relink its source, then export it again.
+
 ## Undo-stack scope
 
 A state mutation records a `HistoryEntry` iff it changes the timeline

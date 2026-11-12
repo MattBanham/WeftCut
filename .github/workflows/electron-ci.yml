@@ -354,6 +354,14 @@ jobs:
         shell: bash
         run: npm run mcp:catalog:check
 
+      # The importer exercises the runner filesystem and native path rules.
+      - name: FCPXML importer on the runner filesystem
+        if: matrix.part == 'e2e-1' || matrix.part == 'all'
+        shell: bash
+        run: |
+          npx vitest run src/main/state/timeline-import
+          npx vitest run src/main/state/ts-actor-host.test.ts -t 'FCPXML actor import'
+
       # Build the renderer + main bundles with the E2E hook compiled in.
       # build:e2e sets VITE_WEFTCUT_E2E itself, so this needs no bash shell for
       # an inline env-var prefix and cannot drift from what a developer runs —

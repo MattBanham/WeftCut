@@ -38,6 +38,7 @@ import { applyCompositionsDelete, applyGroupsAddMembers, applyGroupsCreate, appl
 import { applyMoveLayersToComposition } from './mutations/moveToComposition'
 import { applySetLayerFlags, applySetLayersEnabled, applyUpdateLayer, type LayerPatch } from './mutations/update'
 import { applyFitComposition } from './mutations/composition'
+import { applyImportedTimelineGroup, type ImportedCanvasPlacement } from './timeline-import/merge'
 import { applyDurationAutofit, compositionOf, locateLayer, locateTrack, requireLayer, requireSameComposition, requireTrack, scopeComposition } from './mutations/helpers'
 import { applyAttachMarker, applyDetachMarker, applyUpdateMarker, applyRemoveMarker, type MarkerPatch } from './mutations/markers'
 import { applyDeleteTrack, applyMoveTrack, applyRenameTrack } from './mutations/tracks'
@@ -964,6 +965,13 @@ export function createActor(opts: ActorOptions): ActorHandle {
         }
         // Creation ops take `composition_id?` (root by default) — the ONLY ops
         // that carry a scope; everything layer-addressed derives it (ADR 0052).
+        case 'import_timeline_group': {
+          if (a.expectedProjectId !== current().project_id)
+            throw new CommandFailure({ error: 'InvalidArgument', field: 'expectedProjectId', detail: 'The current project changed during import review' })
+          const id = commit(HISTORY_SUMMARY.timelineImportGroup, layerRef, { kind: 'Coarse' },
+            draft => applyImportedTimelineGroup(draft, a.imported as Project, idGen, a.canvas as ImportedCanvasPlacement))
+          return { ok: true, value: id }
+        }
         case 'add_track': { const comp = compositionArg(a); return { ok: true, value: commit(HISTORY_SUMMARY.trackAdd, trackRef, { kind: 'Coarse' }, (d) => applyAddTrack(d, idGen, (a.label as string) ?? null, undefined, comp)) } }
         // `anchor` rides the ADD for the same reason `add_markers` takes one per
         // row: the mark and its tie are one gesture, and splitting them into an

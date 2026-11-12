@@ -2365,12 +2365,13 @@ app.whenReady().then(async () => {
       title?: string
       multiple?: boolean
       directory?: boolean
+      allowDirectories?: boolean
       filters?: { name: string; extensions: string[] }[]
       defaultPath?: string
     }
     const properties: Array<'openFile' | 'openDirectory' | 'multiSelections'> = o.directory
       ? ['openDirectory']
-      : ['openFile']
+      : o.allowDirectories ? ['openFile', 'openDirectory'] : ['openFile']
     if (o.multiple) properties.push('multiSelections')
     const res = await dialog.showOpenDialog(mainWindow!, {
       title: o.title,

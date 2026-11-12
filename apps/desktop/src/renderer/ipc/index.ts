@@ -901,8 +901,8 @@ export async function projectSaveAs(path: string): Promise<void> {
   return invoke<void>("project_save_as", { path });
 }
 
-export function projectPreviewTimeline(path: string, destination: string, edl?: EdlImportOptions, mode: 'new' | 'current' = 'new'): Promise<TimelineImportPreview> {
-  return invoke<TimelineImportPreview>("project_preview_timeline", { path, destination, edl, mode });
+export function projectPreviewTimeline(path: string, destination: string, edl?: EdlImportOptions, mode: 'new' | 'current' = 'new', relinkDirectory?: string): Promise<TimelineImportPreview> {
+  return invoke<TimelineImportPreview>("project_preview_timeline", { path, destination, edl, mode, relinkDirectory });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {

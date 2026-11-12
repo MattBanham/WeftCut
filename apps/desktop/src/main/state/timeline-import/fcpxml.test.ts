@@ -78,6 +78,51 @@ describe('FCPXML subset', () => {
     expect(parsed.clips[1]).toMatchObject({ firstFrame: 4, endFrame: 6, audioRole: 'music' })
   })
 
+  it('reads Apple predefined format names without inventing width, height or FPS', () => {
+    const named = fixture().replace(
+      '<format id="format" frameDuration="1001/30000s" width="320" height="240"/>',
+      '<format id="format" name="FFVideoFormat1080p2997"/>',
+    )
+    const parsed = parseFcpxml(named)
+    expect(parsed).toMatchObject({
+      canvas: { width: 1920, height: 1080 },
+      fps: { num: 30000, den: 1001 },
+      namedFormatDefaults: true,
+    })
+    const overridden = named.replace('name="FFVideoFormat1080p2997"',
+      'name="FFVideoFormat1080p2997" width="320" height="240"')
+    expect(parseFcpxml(overridden).canvas).toEqual({ width: 320, height: 240 })
+    expect(() => parseFcpxml(named.replace('FFVideoFormat1080p2997', 'MysteryFormat')))
+      .toThrow(/Format needs width, height and frameDuration/)
+    expect(() => parseFcpxml(named.replace('FFVideoFormat1080p2997', 'FFVideoFormat1080i5994')))
+      .toThrow(/Format needs width, height and frameDuration/)
+  })
+
+  it('normalizes nonzero sequence timecode and accepts DF display metadata without shifting edits', () => {
+    const displaced = fixture()
+      .replace('tcStart="0s" tcFormat="NDF"', 'tcStart="3600s" tcFormat="DF"')
+      .replace('offset="3003/30000s"', 'offset="108003003/30000s"')
+      .replace('offset="4004/30000s"', 'offset="108004004/30000s"')
+    const parsed = parseFcpxml(displaced)
+    const original = parseFcpxml(fixture())
+    expect(parsed.clips).toEqual(original.clips)
+    expect(parsed.durationFrames).toBe(original.durationFrames)
+    expect(parsed).toMatchObject({ normalizedTimecode: true, dropFrameTimecode: true })
+    expect(() => parseFcpxml(fixture()
+      .replace('frameDuration="1001/30000s"', 'frameDuration="1/25s"')
+      .replace('tcFormat="NDF"', 'tcFormat="DF"')))
+      .toThrow(/Drop-frame display timecode requires/)
+  })
+
+  it('ignores Final Cut import-options metadata without treating it as a second project', () => {
+    const xml = fixture().replace('<resources>', `<import-options>
+      <option key="library location" value="file:///fictional/Test.fcpbundle"/>
+    </import-options><resources>`)
+    expect(parseFcpxml(xml).clips).toHaveLength(2)
+    expect(() => parseFcpxml(xml.replace('</import-options>', '<option unexpected="1"/></import-options>')))
+      .toThrow(/Unsupported attribute/)
+  })
+
   it('accepts legacy asset URLs and a single library/event/project wrapper', () => {
     const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href
     const xml = fixture(url).replace('version="1.10"', 'version="1.8"')
@@ -141,8 +186,8 @@ describe('FCPXML subset', () => {
   it.each([
     ['malformed XML', (xml: string) => xml.replace('</sequence>', '</clip>'), /Malformed FCPXML/],
     ['an external DTD', (xml: string) => xml.replace('DOCTYPE fcpxml', 'DOCTYPE fcpxml SYSTEM "file:///fictional/other.dtd"'), /plain.*DOCTYPE/],
-    ['drop-frame timecode', (xml: string) => xml.replace('tcFormat="NDF"', 'tcFormat="DF"'), /zero-start non-drop-frame/],
-    ['non-zero sequence timecode', (xml: string) => xml.replace('tcStart="0s"', 'tcStart="3600s"'), /zero-start non-drop-frame/],
+    ['unknown timecode display mode', (xml: string) => xml.replace('tcFormat="NDF"', 'tcFormat="BAD"'), /tcFormat must be NDF or DF/],
+    ['source before the nonzero timeline origin', (xml: string) => xml.replace('tcStart="0s"', 'tcStart="3600s"'), /before the timeline origin/],
     ['a connected clip', (xml: string) => xml.replace('name="Dock"', 'name="Dock" lane="1"'), /Connected clips/],
     ['a transition', (xml: string) => xml.replace('<gap ', '<transition '), /<transition>.*Unsupported/],
     ['a retime', (xml: string) => xml.replace('<marker ', '<timeMap/><marker '), /<timeMap>.*Unsupported/],
@@ -191,13 +236,34 @@ describe('timeline import transaction', () => {
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
     const assertCurrent = vi.fn()
-    const prepareReview = () => prepareTimelineProject(document, destination, undefined, idGen, {
+    const prepareReview = (relinkDirectory?: string) => prepareTimelineProject(document, destination, undefined, idGen, {
       compute: { probeMedia, hashMediaSource },
       statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
-    }, assertCurrent)
+    }, assertCurrent, relinkDirectory)
     const prepare = async () => (await prepareReview()).project
     return { prepare, prepareReview, deps, before, actor, probeMedia, hashMediaSource, commitWorkspace, pushRecent, enqueueDerivatives }
   }
+
+  it('loads a regular FCPXML bundle with Info.fcpxml at its root', async () => {
+    const bundle = join(parent, 'Illustrated Story.fcpxmld')
+    await mkdir(bundle)
+    await writeFile(join(bundle, 'Info.fcpxml'), fixture(pathToFileURL(media).href))
+    await writeFile(media, 'Fictional video')
+    document = bundle
+    const { project, report } = await setup().prepareReview()
+    expect(report).toMatchObject({ bundleSource: true, videoClips: 2, audioClips: 2 })
+    expect(() => validate(project)).not.toThrow()
+  })
+
+  it('refuses missing or nonregular bundle Info.fcpxml without publishing a project', async () => {
+    const bundle = join(parent, 'Empty.fcpxmld')
+    await mkdir(bundle)
+    document = bundle
+    await expect(setup().prepareReview()).rejects.toThrow(/regular Info.fcpxml/)
+    expect(existsSync(destination)).toBe(false)
+    await mkdir(join(bundle, 'Info.fcpxml'))
+    await expect(setup().prepareReview()).rejects.toThrow(/regular Info.fcpxml/)
+  })
 
   it('publishes a validated editable project with exact trims, sample-aligned audio and clip markers', async () => {
     await writeFile(media, 'Fictional video')
@@ -247,6 +313,47 @@ describe('timeline import transaction', () => {
     expect(run.probeMedia).not.toHaveBeenCalled()
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)
+  })
+
+  it('relinks an explicitly selected folder by exact filename and reports the original mapping', async () => {
+    const folder = join(parent, 'Moved Originals')
+    await mkdir(folder)
+    const replacement = join(folder, 'Harbor Lights.mov')
+    await writeFile(replacement, 'Fictional replacement video')
+    const run = setup()
+    run.probeMedia.mockImplementation(async () => JSON.stringify({
+      ...mediaItemTemplate(id, 'Video', 10_000_000, true),
+      path_abs: replacement, file_hash_blake3: `pending-${id}`,
+      metadata: { duration_us: 10_000_000,
+        video: { width: 320, height: 240, fps_num: 30000, fps_den: 1001 },
+        audio: { channels: 2, sample_rate: 48000 } },
+    }))
+    const { project, report } = await run.prepareReview(folder)
+    expect(report.relinkedMedia).toEqual([{ from: media, to: replacement }])
+    expect(run.probeMedia).toHaveBeenCalledWith(replacement)
+    expect(Object.values(project.media_pool)[0]?.path_abs).toBe(replacement)
+    expect(() => validate(project)).not.toThrow()
+    expect(run.actor.snapshot()).toBe(run.before)
+  })
+
+  it('rejects ambiguous replacement filenames without touching disk or project state', async () => {
+    const folder = join(parent, 'Moved Originals')
+    await mkdir(folder)
+    await writeFile(join(folder, 'Harbor Lights.mov'), 'Fictional video')
+    const secondSource = join(parent, 'Other Location', 'Harbor Lights.mov')
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('</resources>', `<asset id="take2" hasVideo="1" hasAudio="1"
+        audioSources="1" audioChannels="2" audioRate="48000" format="format"
+        start="3600s" duration="10s">
+        <media-rep kind="original-media" src="${pathToFileURL(secondSource).href}"/>
+      </asset></resources>`)
+      .replace('ref="take" name="Dock"', 'ref="take2" name="Dock"')
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview(folder)).rejects.toThrow(/Ambiguous media relink/)
+    expect(run.actor.snapshot()).toBe(run.before)
+    expect(existsSync(destination)).toBe(false)
+    expect(run.probeMedia).not.toHaveBeenCalled()
   })
 
   it('leaves the current project and disk untouched on a hash or source-range failure', async () => {

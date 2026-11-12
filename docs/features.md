@@ -31,20 +31,43 @@ the active project. Media copies are scheduled into the current workspace
 once the import commits.
 
 FCPXML import accepts one sequence with a primary storyline of straight cuts,
-gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline
-with a WeftCut frame rate. Video-only timelines are supported. FCPXML
-sequence audio may declare mono, stereo or surround at a valid sample rate;
-decodable source audio is conformed to 48 kHz and at most two channels for
-editing. The review warns how many audio clips require resampling and how
-many will lose discrete channels through stereo downmixing. Original media
-is preserved. Moving video must
-use a local original matching the sequence dimensions and frame rate. Mono or
-stereo audio can be standalone or linked to a video clip. FCPXML still-image
-assets (zero source duration) can be placed through connected `<video>` clips
-as editable ImageOverlay layers. They may use an independent source size and
-an image format without a frame duration, as VoiceScript viseme exports do.
-The importer supports ordinary UTF-8 \`.fcpxml\` documents from versions 1.6
-through 1.13 and both asset URL forms.
+gaps and single-frame clip markers at a supported WeftCut frame rate. A
+sequence `<format>` can define explicit dimensions and frame duration, or
+omit fields supplied by a recognized progressive Apple `FFVideoFormat…`
+preset (explicit values override named values). Unknown names without
+all required fields are rejected instead of guessed. Progressive Rec. 709
+square-pixel video is required; non-square pixels, HDR and interlaced
+formats remain unsupported.
+
+Nonzero sequence `tcStart` is normalized to WeftCut's zero-based timeline
+when clip offsets are in the source timecode domain. FCPXML
+`tcFormat="DF"` at 30000/1001 and 60000/1001 fps is treated as display
+metadata; edit positions remain exact rational frames. The review
+discloses named-format fallback and timecode normalization. Source
+time-remapping remains unsupported.
+
+Video-only timelines are supported. Sequence audio may declare mono,
+stereo or surround at a valid sample rate; decodable audio is conformed
+to 48 kHz and at most two channels. The review reports resampling and
+stereo downmixing. Moving video must still reference an original matching
+the sequence dimensions and frame rate. Mono or stereo audio may be
+standalone or linked. A zero-duration still-image asset placed through a
+connected `<video>` clip becomes an editable ImageOverlay; its source
+dimensions may differ from the sequence.
+
+The importer supports UTF-8 `.fcpxml` documents from FCPXML 1.6–1.13
+and both asset URL forms. Modern Final Cut `.fcpxmld` bundles are read
+through a regular root `Info.fcpxml`; metadata-only `<import-options>`
+are accepted without affecting the edit. Symlinked bundle roots or
+Info files are rejected.
+
+If a referenced source is missing, **Find original media in a folder…**
+looks in the chosen folder for exact filenames (not recursively). The
+review shows each original → replacement path and requires confirmation.
+Ambiguous filename mappings and unreadable or symlinked files are
+refused; every replacement undergoes the normal source-format, duration
+and trim checks. Neither the interchange document nor original media
+is rewritten.
 
 A primary clip or gap can carry one level of connected asset clips or `<video>`
 still-image overlays. Positive lanes hold video/images and negative lanes hold

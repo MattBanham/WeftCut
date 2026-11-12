@@ -22,28 +22,39 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
   const [error, setError] = useState<string | null>(null);
   const [edlImport, setEdlImport] = useState<{ source: string; destination: string; mode: 'new' | 'current' } | null>(null);
   const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
-  const [sourceFile, setSourceFile] = useState<{ path: string; edl?: EdlImportOptions } | null>(null);
+  const [sourceFile, setSourceFile] = useState<{ path: string; edl?: EdlImportOptions; relinkDirectory?: string } | null>(null);
+  const [relinkRequest, setRelinkRequest] = useState<{ source: string; destination: string; mode: 'new' | 'current' } | null>(null);
 
   const begin = useCallback(async (mode: 'new' | 'current' = 'new') => {
     if (busy || edlImport !== null || timelinePreview !== null) return;
     setBusy(true);
     setError(null);
     onError?.(null);
+    setRelinkRequest(null);
     try {
       const source = await openDialog({
         title: t("startup.import_timeline_title"),
-        filters: [{ name: "Timeline interchange", extensions: ["fcpxml", "edl"] }],
+        filters: [{ name: "Timeline interchange", extensions: ["fcpxml", "fcpxmld", "edl"] }],
+        allowDirectories: true,
       });
       if (typeof source !== "string") return;
       setSourceFile({ path: source });
-      const name = source.split(/[\/]/).pop()!.replace(/\.(fcpxml|edl)$/i, "");
+      const name = source.split(/[\/]/).pop()!.replace(/\.(fcpxml|fcpxmld|edl)$/i, "");
       const destination = mode === 'new' ? await saveDialog({
         title: t("startup.import_timeline_destination"),
         defaultPath: t("startup.import_timeline_folder", { name }),
       }) : '';
       if (destination === null) return;
       if (/\.edl$/i.test(source)) setEdlImport({ source, destination, mode });
-      else setTimelinePreview(await projectPreviewTimeline(source, destination, undefined, mode));
+      else {
+        try { setTimelinePreview(await projectPreviewTimeline(source, destination, undefined, mode)); }
+        catch (cause) {
+          if (cleanIpcDetail(cause).includes("Missing or unreadable original media")) {
+            setRelinkRequest({ source, destination, mode });
+          }
+          throw cause;
+        }
+      }
     } catch (cause) {
       const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
       if (onError) onError(message);
@@ -53,6 +64,27 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
     }
   }, [busy, edlImport, timelinePreview, t, onError]);
 
+  const relink = useCallback(async () => {
+    if (!relinkRequest || busy) return;
+    const folder = await openDialog({ title: t("startup.import_choose_relink_folder"), directory: true });
+    if (typeof folder !== "string") return;
+    setBusy(true);
+    setError(null);
+    onError?.(null);
+    try {
+      const preview = await projectPreviewTimeline(
+        relinkRequest.source, relinkRequest.destination, undefined, relinkRequest.mode, folder,
+      );
+      setSourceFile({ path: relinkRequest.source, relinkDirectory: folder });
+      setTimelinePreview(preview);
+      setRelinkRequest(null);
+    } catch (cause) {
+      const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
+      if (onError) onError(message);
+      else setError(message);
+    } finally { setBusy(false); }
+  }, [relinkRequest, busy, t, onError]);
+
   const dialogs = (
     <>
       {error && (
@@ -60,6 +92,9 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
           <p className="new-project-error" role="alert">{error}</p>
           <footer className="new-project-actions">
             <Button onClick={() => setError(null)}>{t("new_project.cancel")}</Button>
+            {relinkRequest && <Button onClick={() => void relink()} disabled={busy}>
+              {t("startup.import_choose_relink_folder")}
+            </Button>}
           </footer>
         </AppDialog>
       )}
@@ -79,13 +114,13 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
           preview={timelinePreview}
           onNewProject={async () => {
             if (!sourceFile) throw new Error('Choose a timeline source again');
-            const name = sourceFile.path.split(/[\\/]/).pop()!.replace(/\.(fcpxml|edl)$/i, '');
+            const name = sourceFile.path.split(/[\\/]/).pop()!.replace(/\.(fcpxml|fcpxmld|edl)$/i, '');
             const destination = await saveDialog({
               title: t('startup.import_timeline_destination'),
               defaultPath: t('startup.import_timeline_folder', { name }),
             });
             if (!destination) return;
-            const next = await projectPreviewTimeline(sourceFile.path, destination, sourceFile.edl, 'new');
+            const next = await projectPreviewTimeline(sourceFile.path, destination, sourceFile.edl, 'new', sourceFile.relinkDirectory);
             setTimelinePreview(next);
           }}
           onCancel={() => {
@@ -102,7 +137,7 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
       )}
     </>
   );
-  return { begin, busy, dialogs };
+  return { begin, relink, canRelink: relinkRequest !== null, busy, dialogs };
 }
 
 function TimelineImportReview({ preview, onImport, onCancel, onNewProject }: {
@@ -188,6 +223,20 @@ function TimelineImportReview({ preview, onImport, onCancel, onNewProject }: {
             current: current.sampleRate / 1000 + " kHz / " + current.channels,
             imported: "48 kHz / stereo",
           })}</p>
+        </section>
+      )}
+      {preview.namedFormatDefaults && <p role="status">{t("startup.timeline_review_named_format")}</p>}
+      {preview.normalizedTimecode && <p role="status">{t("startup.timeline_review_timecode_origin")}</p>}
+      {preview.dropFrameTimecode && <p role="status">{t("startup.timeline_review_timecode_df")}</p>}
+      {preview.bundleSource && <p role="status">{t("startup.timeline_review_bundle")}</p>}
+      {preview.relinkedMedia.length > 0 && (
+        <section aria-label={t("startup.import_relinked_media")}>
+          <p><strong>{t("startup.import_relinked_media")}</strong></p>
+          {preview.relinkedMedia.map(({ from, to }) => (
+            <p key={from} className="new-project-preview" title={from + " → " + to}>
+              {from} → {to}
+            </p>
+          ))}
         </section>
       )}
       {preview.roundedEnds > 0 && <p>{t("startup.timeline_review_rounding")}</p>}

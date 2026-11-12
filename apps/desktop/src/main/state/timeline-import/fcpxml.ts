@@ -24,6 +24,7 @@ interface Format {
   width: number
   height: number
   frameDuration: ExactTime
+  namedDefaults: boolean
 }
 
 const US_PER_SECOND = { num: 1_000_000, den: 1 }
@@ -129,6 +130,22 @@ function audioSampleRate(el: Element, key: string, zeroAllowed = false): number 
   return rate
 }
 
+// Apple's predefined FFVideoFormat names carry the fields omitted from a
+// <format>. Only progressive square-pixel presets with a known WeftCut rate
+// are decoded here; guessing other names would silently change an edit.
+function predefinedFormat(name: string | undefined): Omit<Format, 'namedDefaults'> | null {
+  const match = /^FFVideoFormat(?:(1080|720)|(\d{3,5})x(\d{3,5}))p(2398|24|25|2997|30|50|5994|60)$/.exec(name ?? '')
+  if (!match) return null
+  const width = match[1] === '1080' ? 1920 : match[1] === '720' ? 1280 : Number(match[2])
+  const height = match[1] ? Number(match[1]) : Number(match[3])
+  const rate = match[4]!
+  const fps = rate === '2398' ? { num: 24_000, den: 1001 }
+    : rate === '2997' ? { num: 30_000, den: 1001 }
+      : rate === '5994' ? { num: 60_000, den: 1001 }
+        : { num: Number(rate), den: 1 }
+  return { width, height, frameDuration: exactTime(1_000_000 * fps.den, fps.num) }
+}
+
 function parseFormat(el: Element): Format {
   check(el, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
   const a = el.attrs
@@ -137,9 +154,17 @@ function parseFormat(el: Element): Format {
       (a.paspH ?? '1') !== (a.paspV ?? '1')) {
     fail(el, 'Use progressive Rec. 709 video with square pixels')
   }
-  const width = integer(el, 'width'), height = integer(el, 'height')
+  const preset = predefinedFormat(a.name)
+  const namedDefaults = a.width === undefined || a.height === undefined || a.frameDuration === undefined
+  if (namedDefaults && !preset) {
+    fail(el, 'Format needs width, height and frameDuration, or a supported predefined progressive FFVideoFormat name. Do not guess missing settings')
+  }
+  const width = a.width === undefined ? preset!.width : integer(el, 'width')
+  const height = a.height === undefined ? preset!.height : integer(el, 'height')
   if (canvasSizeError(width, height)) fail(el, 'The canvas must be an even-sized WeftCut canvas within the supported resolution range')
-  return { width, height, frameDuration: time(el, 'frameDuration') }
+  const frameDuration = a.frameDuration === undefined ? preset!.frameDuration : time(el, 'frameDuration')
+  if (frameDuration.num <= 0) fail(el, 'Video frameDuration must be positive')
+  return { width, height, frameDuration, namedDefaults }
 }
 
 function localPath(el: Element): string {
@@ -218,10 +243,16 @@ export function parseFcpxml(xml: string): ImportTimeline {
 }
 
 function parseDocument(root: Element): ImportTimeline {
-  check(root, ['version'], ['resources', 'project', 'library', 'event'])
+  check(root, ['version'], ['resources', 'import-options', 'project', 'library', 'event'])
   if (!/^1\.(?:[6-9]|1[0-3])$/.test(required(root, 'version'))) fail(root, 'Use an FCPXML document version 1.6 through 1.13')
   const resources = one(root, 'resources')
-  const story = root.children.filter((child) => child !== resources)
+  const importOptions = root.children.filter(child => child.tag === 'import-options')
+  if (importOptions.length > 1) fail(root, 'More than one <import-options> element')
+  for (const optionSet of importOptions) {
+    check(optionSet, [], ['option'])
+    for (const option of optionSet.children) check(option, ['key', 'value'])
+  }
+  const story = root.children.filter((child) => child !== resources && child.tag !== 'import-options')
   if (story.length !== 1) fail(root, 'Export exactly one project')
   let project = story[0]!
   if (project.tag === 'library') {
@@ -235,9 +266,9 @@ function parseDocument(root: Element): ImportTimeline {
   check(project, ['name', 'uid', 'modDate'], ['sequence'])
   const seq = one(project, 'sequence')
   check(seq, ['format', 'tcStart', 'tcFormat', 'duration', 'audioLayout', 'audioRate'], ['spine'])
-  if ((seq.attrs.tcFormat ?? 'NDF') !== 'NDF' || time(seq, 'tcStart', ZERO_TIME).num !== 0) {
-    fail(seq, 'Set the sequence to zero-start non-drop-frame timecode and export again')
-  }
+  const tcFormat = seq.attrs.tcFormat ?? 'NDF'
+  if (tcFormat !== 'NDF' && tcFormat !== 'DF') fail(seq, 'Sequence tcFormat must be NDF or DF')
+  const sequenceOrigin = time(seq, 'tcStart', ZERO_TIME)
   const audioLayout = seq.attrs.audioLayout ?? 'stereo'
   if (!['mono', 'stereo', 'surround'].includes(audioLayout))
     fail(seq, `Unsupported sequence audio layout "${audioLayout}"`)
@@ -260,6 +291,9 @@ function parseDocument(root: Element): ImportTimeline {
   const fps = FPS_OPTIONS.find(({ num, den }) =>
     compareTime(format.frameDuration, exactTime(1_000_000 * den, num)) === 0)
   if (!fps) fail(seq, 'Choose a supported WeftCut timeline frame rate')
+  if (tcFormat === 'DF' && !(fps.den === 1001 && [30_000, 60_000].includes(fps.num))) {
+    fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
+  }
   const spine = one(seq, 'spine')
   check(spine, [], ['gap', 'asset-clip'])
   const clips: TimelineClip[] = []
@@ -282,8 +316,10 @@ function parseDocument(root: Element): ImportTimeline {
     } else if ((a.lane ?? '0') !== '0') {
       fail(el, 'Connected clips must be nested inside their primary clip or gap')
     }
-    const localOffset = parent ? time(el, 'offset') : time(el, 'offset', ZERO_TIME)
-    const offset = parent ? addTime(parent.offset, subtractTime(localOffset, parent.start)) : localOffset
+    const localOffset = parent ? time(el, 'offset') : time(el, 'offset', sequenceOrigin)
+    const offset = parent
+      ? addTime(parent.offset, subtractTime(localOffset, parent.start))
+      : subtractTime(localOffset, sequenceOrigin)
     if (offset.num < 0) fail(el, 'The clip starts before the timeline origin')
     const firstFrame = frames(offset, format, el, 'offset')
     const duration = time(el, 'duration')
@@ -299,8 +335,9 @@ function parseDocument(root: Element): ImportTimeline {
       if (child.tag === 'asset-clip' || child.tag === 'video') readClip(child, { offset, start })
     }
     if (gap) return
-    if ((a.enabled ?? '1') !== '1' || (a.tcFormat ?? 'NDF') !== 'NDF' || (a.videoRole ?? 'video') !== 'video') {
-      fail(el, 'Disabled clips, drop-frame clip timecode and custom video roles are unsupported')
+    if ((a.enabled ?? '1') !== '1' || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||
+        (a.videoRole ?? 'video') !== 'video') {
+      fail(el, 'Disabled clips, invalid clip timecode and custom video roles are unsupported')
     }
     const ref = required(el, 'ref')
     const assetNode = lookup(ref, 'asset', el)
@@ -355,5 +392,7 @@ function parseDocument(root: Element): ImportTimeline {
   if (durationFrames < lastEnd) fail(seq, 'Declared duration ends before the last storyline item')
   if (clips.length === 0) fail(spine, 'The primary storyline needs at least one asset clip')
   return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
-    fps: { num: fps.num, den: fps.den }, durationFrames, clips }
+    fps: { num: fps.num, den: fps.den }, durationFrames, clips,
+    normalizedTimecode: sequenceOrigin.num !== 0, dropFrameTimecode: tcFormat === 'DF',
+    namedFormatDefaults: format.namedDefaults }
 }

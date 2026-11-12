@@ -22,6 +22,11 @@ export interface TimelineImportReport {
   roundedEnds: number
   resampledAudioClips: number
   downmixedAudioClips: number
+  normalizedTimecode: boolean
+  dropFrameTimecode: boolean
+  namedFormatDefaults: boolean
+  bundleSource: boolean
+  relinkedMedia: { from: string; to: string }[]
 }
 
 export interface TimelineImportPreview extends TimelineImportReport {

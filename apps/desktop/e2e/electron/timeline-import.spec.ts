@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, test } from '@playwright/test'
@@ -103,6 +103,100 @@ test('imports FCPXML from startup as an editable project and refuses missing med
     expect(readFileSync(projectFile, 'utf8')).toContain('Glass edit')
     await invokeCmd(page, 'project_open', { path: destination })
     expect(await rootSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
+  } finally { await app.close() }
+})
+
+test('imports a Final Cut bundle with Info.fcpxml and reports its source', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-bundle-')
+  const bundle = join(folder, 'Fictional Scene.fcpxmld')
+  const media = join(folder, 'Scene.mov')
+  const destination = join(folder, 'Imported Scene')
+  mkdirSync(bundle)
+  encodeSource(media)
+  writeFileSync(join(bundle, 'Info.fcpxml'), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <import-options><option key="library location" value="file:///fictional/Library.fcpbundle"/></import-options>
+  <resources>
+    <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+      audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="${pathToFileURL(media).href}"/>
+    </asset>
+  </resources>
+  <project name="Fictional Scene">
+    <sequence format="f" duration="3003/30000s">
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
+    </sequence>
+  </project>
+</fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await app.evaluate(({ dialog }, args) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [args.bundle] })
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: args.destination })
+    }, { bundle, destination })
+    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Source: FCPXML bundle')
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    expect(existsSync(join(destination, 'project.json'))).toBe(true)
+  } finally { await app.close() }
+})
+
+test('relinks missing FCPXML media only after explicit folder selection and review', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-relink-flow-')
+  const source = join(folder, 'Offline.fcpxml')
+  const lost = join(folder, 'Old Disk', 'Scene.mov')
+  const relocatedFolder = join(folder, 'Found Media')
+  const actual = join(relocatedFolder, 'Scene.mov')
+  const destination = join(folder, 'Relinked Edit')
+  mkdirSync(relocatedFolder)
+  encodeSource(actual)
+  writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+      audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="${pathToFileURL(lost).href}"/>
+    </asset>
+  </resources>
+  <project name="Offline">
+    <sequence format="f" duration="3003/30000s">
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
+    </sequence>
+  </project>
+</fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await app.evaluate(({ dialog }, input) => {
+      dialog.showOpenDialog = async (_window, options) => {
+        const pickingDirectory = options.properties?.length === 1 &&
+          options.properties.includes('openDirectory')
+        return { canceled: false, filePaths: [pickingDirectory ? input.relocatedFolder : input.source] }
+      }
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
+    }, { source, relocatedFolder, destination })
+    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
+    await page.getByRole('button', { name: 'Find original media in a folder…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Check media replacements')
+    await expect(review).toContainText(lost)
+    await expect(review).toContainText(actual)
+    expect(existsSync(destination)).toBe(false)
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const record = Object.values(project.media_pool)[0] as { path_abs: string }
+    expect(record.path_abs).toBe(actual)
   } finally { await app.close() }
 })
 

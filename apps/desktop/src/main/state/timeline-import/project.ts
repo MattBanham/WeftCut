@@ -1,5 +1,5 @@
-import { open, mkdir, rmdir, unlink } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, resolve } from 'node:path'
+import { lstat, open, mkdir, rmdir, unlink } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { canvasSizeError, validateProjectName } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { compareTime, exactTime, floorTime, multiplyTime, roundTime } from '../../../renderer/timeMapping'
@@ -55,12 +55,25 @@ async function readTimelineDocument(path: string, deps: MediaDeps): Promise<stri
 
 export async function prepareTimelineProject(
   path: unknown, destination: string, edlOptions: unknown, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
+  relinkDirectory?: unknown,
 ): Promise<{ project: Project; report: TimelineImportReport }> {
   const extension = typeof path === 'string' && isAbsolute(path) ? extname(path).toLowerCase() : ''
-  if (typeof path !== 'string' || (extension !== '.fcpxml' && extension !== '.edl')) {
-    throw new Error('Choose a local .fcpxml or .edl file')
+  if (typeof path !== 'string' || !['.fcpxml', '.fcpxmld', '.edl'].includes(extension)) {
+    throw new Error('Choose a local .fcpxml, .fcpxmld bundle, or .edl file')
   }
-  const document = await readTimelineDocument(path, deps)
+  let inputFile = path
+  if (extension === '.fcpxmld') {
+    const bundle = await lstat(path).catch(() => null)
+    if (!bundle?.isDirectory() || bundle.isSymbolicLink()) {
+      throw new Error('The FCPXML bundle must be an accessible .fcpxmld directory')
+    }
+    inputFile = join(path, 'Info.fcpxml')
+    const info = await lstat(inputFile).catch(() => null)
+    if (!info?.isFile() || info.isSymbolicLink()) {
+      throw new Error('The FCPXML bundle needs a regular Info.fcpxml file at its root')
+    }
+  }
+  const document = await readTimelineDocument(inputFile, deps)
   const timeline = extension === '.edl' ? parseEdl(document, edlOptions) : parseFcpxml(document)
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(destination))
@@ -72,16 +85,50 @@ export async function prepareTimelineProject(
     ...deps, actor, workspaceDir: () => null,
     enqueueDerivatives: async () => {}, enqueueWorkspaceCopy: async () => {},
   })
-  const paths = new Map(timeline.clips.map((clip) => [clip.asset.path, clip.asset.ref]))
+  if (relinkDirectory !== undefined) {
+    if (extension === '.edl') throw new Error('Use the EDL media-directory option for source matching')
+    if (typeof relinkDirectory !== 'string' || !isAbsolute(relinkDirectory)) {
+      throw new Error('Choose an absolute media folder for relinking')
+    }
+    const directory = await lstat(relinkDirectory).catch(() => null)
+    if (!directory?.isDirectory() || directory.isSymbolicLink()) {
+      throw new Error('The selected media folder is missing or is not a regular directory')
+    }
+  }
+  const sourcePaths = new Map(timeline.clips.map((clip) => [clip.asset.path, clip.asset.ref]))
   const missing: string[] = []
-  for (const [mediaPath, ref] of paths) {
-    try { importer.checkPath(mediaPath) }
-    catch { missing.push(`${ref} (${mediaPath})`) }
+  const substitutions = new Map<string, string>()
+  const claimed = new Map<string, string>()
+  for (const [mediaPath, ref] of sourcePaths) {
+    let actual = mediaPath
+    try { importer.checkPath(actual) }
+    catch {
+      if (typeof relinkDirectory === 'string') {
+        const candidate = join(relinkDirectory, basename(mediaPath))
+        const candidateInfo = await lstat(candidate).catch(() => null)
+        if (candidateInfo?.isFile() && !candidateInfo.isSymbolicLink()) {
+          try { actual = importer.checkPath(candidate) } catch { /* leave missing below */ }
+        }
+      }
+      if (actual === mediaPath) missing.push(`${ref} (${mediaPath})`)
+      else substitutions.set(mediaPath, actual)
+    }
+    const previous = claimed.get(actual)
+    if (previous !== undefined && previous !== mediaPath) {
+      throw new Error(`Ambiguous media relink: ${previous} and ${mediaPath} resolve to ${actual}. Choose distinct originals and review again`)
+    }
+    claimed.set(actual, mediaPath)
   }
   if (missing.length) {
     const extra = missing.length > 5 ? ` and ${missing.length - 5} more` : ''
-    throw new Error(`Missing or unreadable original media: ${missing.slice(0, 5).join(', ')}${extra}. Relink in the source editor and export again`)
+    throw new Error(`Missing or unreadable original media: ${missing.slice(0, 5).join(', ')}${extra}. Choose a folder containing the original filenames, or relink in the source editor`)
   }
+  for (const clip of timeline.clips) {
+    const replacement = substitutions.get(clip.asset.path)
+    if (replacement) clip.asset.path = replacement
+  }
+  const paths = new Map(timeline.clips.map((clip) => [clip.asset.path, clip.asset.ref]))
+  const relinkedMedia = [...substitutions].map(([from, to]) => ({ from, to }))
 
   const mediaIds = new Map<string, string>()
   for (const [mediaPath, ref] of paths) {
@@ -173,6 +220,10 @@ export async function prepareTimelineProject(
     videoClips, audioClips, markers: target.markers.length, media: Object.keys(snapshot.media_pool).length,
     lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
     resampledAudioClips, downmixedAudioClips,
+    normalizedTimecode: timeline.normalizedTimecode ?? false,
+    dropFrameTimecode: timeline.dropFrameTimecode ?? false,
+    namedFormatDefaults: timeline.namedFormatDefaults ?? false,
+    bundleSource: extension === '.fcpxmld', relinkedMedia,
   } }
 }
 

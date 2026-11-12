@@ -31,4 +31,7 @@ export interface ImportTimeline {
   fps: Rational
   durationFrames: number
   clips: TimelineClip[]
+  normalizedTimecode?: boolean
+  dropFrameTimecode?: boolean
+  namedFormatDefaults?: boolean
 }

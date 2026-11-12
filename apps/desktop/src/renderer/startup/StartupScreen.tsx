@@ -324,6 +324,11 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
         </div>
 
         {error && <p className="startup-error">{error}</p>}
+        {error && timelineImport.canRelink && (
+          <button type="button" onClick={() => void timelineImport.relink()} disabled={timelineImport.busy}>
+            {t("startup.import_choose_relink_folder")}
+          </button>
+        )}
 
         <section className="startup-recent" style={RECENT_BODY_STYLE}>
           <div className="startup-recent-header">

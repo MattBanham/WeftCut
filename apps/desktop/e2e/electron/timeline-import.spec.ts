@@ -131,6 +131,64 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
   } finally { await app.close() }
 })
 
+test('imports from the startup screen into a new editable project at the sequence rate', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-startup-import-')
+  const source = join(folder, 'Harbour Lights.fcpxml')
+  const media = join(folder, 'Harbour.mov')
+  const target = join(folder, 'Harbour Lights')
+  encodeSource(media)
+  writeFileSync(source, `<fcpxml version="1.10"><resources>
+    <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000" src="${pathToFileURL(media).href}"/>
+    </resources><project name="Harbour Lights"><sequence format="f" duration="1001/10000s"><spine>
+    <asset-clip ref="a" duration="1001/10000s"/>
+    </spine></sequence></project></fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await app.evaluate(({ dialog }, { source, folder }) => {
+      dialog.showOpenDialog = async (_window, options) => ({
+        canceled: false, filePaths: [options?.properties?.includes('openDirectory') ? folder : source],
+      })
+    }, { source, folder })
+    const startupImport = page.getByRole('button', { name: 'Import timeline…', exact: true })
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    const create = page.getByRole('dialog', { name: 'Create project from timeline' })
+    const reviewAndChooseLocation = async () => {
+      await startupImport.click()
+      await page.getByRole('button', { name: 'Choose FCPXML file…' }).click()
+      await expect(review.getByText(/Video clips 1.*Media files 1/)).toBeVisible()
+      await review.getByRole('button', { name: 'Choose project location…' }).click()
+      await expect(create.getByRole('textbox', { name: 'Project name' })).toHaveValue('Harbour Lights')
+      await create.getByRole('button', { name: 'Choose…', exact: true }).click()
+    }
+    await reviewAndChooseLocation()
+    await create.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(startupImport).toBeVisible()
+    expect(existsSync(target)).toBe(false)
+    expect(await invokeCmd(page, 'project_open_state')).toBeNull()
+
+    await newProject(page, { parentFolder: folder, name: 'Other Project',
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
+    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+    await page.getByRole('menuitem', { name: 'Save and Close' }).click()
+    await expect(startupImport).toBeVisible()
+
+    await reviewAndChooseLocation()
+    await create.getByRole('button', { name: 'Create', exact: true }).click()
+    await waitForHook(page, 'getSelectedLayerIds')
+    await expect(startupImport).toHaveCount(0)
+    expect(await rootSummary<ProjectSummary>(page)).toMatchObject({ fps_num: 30000, fps_den: 1001 })
+    expect(await importedSummary(page)).toMatchObject({ fps_num: 30000, fps_den: 1001, layer_count: 2 })
+    expect(readFileSync(join(target, 'project.json'), 'utf8')).toContain('Harbour Lights')
+    await invokeCmd(page, 'project_undo')
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    await invokeCmd(page, 'project_redo')
+    expect((await importedSummary(page)).layer_count).toBe(2)
+  } finally { await app.close() }
+})
+
 test('conforms 25 fps 640×360 camera footage into a 30 fps 320×240 edit with correct preview fit', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-mixed-camera-')

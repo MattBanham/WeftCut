@@ -391,6 +391,8 @@ const enUS = {
     new_project: "New project",
     open_project: "Open project…",
     import_timeline: "Import timeline…",
+    import_timeline_location: "Choose project location…",
+    import_timeline_project: "Create project from timeline",
     import_timeline_title: "Choose an FCPXML timeline",
     import_fcpxml_file: "Choose FCPXML file…",
     import_fcpxml_bundle: "Choose FCPXML bundle…",

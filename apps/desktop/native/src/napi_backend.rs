@@ -443,6 +443,34 @@ impl Backend {
         Ok(hash)
     }
 
+    /// Read an original for timeline review before a workspace exists.
+    /// Use the same bounded probe and hash as media import without reopening
+    /// the last project's cancelled job session or writing to its cache.
+    #[napi]
+    #[cfg(feature = "jobs")]
+    pub async fn inspect_timeline_media(&self, path: String, hash_only: bool) -> napi::Result<String> {
+        let result: anyhow::Result<String> = async {
+            let permit = crate::resources::import_preparation().await?;
+            let path = std::path::PathBuf::from(path);
+            if hash_only {
+                let facts = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::io::probe::hash_and_stat_scoped(&path, None)
+                })
+                .await??;
+                return Ok(facts.blake3_hex);
+            }
+            let _permit = permit;
+            let scope = CacheLayout::new(std::env::temp_dir());
+            let metadata = crate::io::probe::probe_metadata_scoped(&path, &scope).await?;
+            let item = crate::commands::media::media_item_from_metadata(path, metadata)
+                .map_err(anyhow::Error::msg)?;
+            Ok(serde_json::to_string(&item)?)
+        }
+        .await;
+        result.map_err(|e| Error::from_reason(format!("{e:#}")))
+    }
+
     /// auto_split_by_shot hybrid compute: the WHOLE-source shot report for
     /// `media` under `opts_json` detection settings, from the VSHOT cache
     /// (`jobs::shot::cached_source_report` — computed + written through on a

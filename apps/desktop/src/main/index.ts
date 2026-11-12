@@ -841,6 +841,7 @@ app.whenReady().then(async () => {
     readFile: (p: string) => fs.readFileSync(p, 'utf8'),
     writeFile: (p: string, t: string) => writeFileAtomic(nodeAtomicWriteIo, p, t),
     mkdirp: (d: string) => { fs.mkdirSync(d, { recursive: true }) },
+    mkdirExclusive: (d: string) => { fs.mkdirSync(d) },
     copyFile: (s: string, d: string) => fs.copyFileSync(s, d),
     readdir: (d: string) => fs.readdirSync(d) as string[],
     rm: (p: string) => { fs.rmSync(p, { force: true }) },
@@ -1111,6 +1112,10 @@ app.whenReady().then(async () => {
     join: path.join,
     napi: napiFacadeWithCache,
     compute: computeFacade,
+    timelineReviewCompute: {
+      probeMedia: (p) => backend!.inspectTimelineMedia(p, false),
+      hashMediaSource: (p) => backend!.inspectTimelineMedia(p, true),
+    },
     enqueueWorkspaceCopy: (id, p) => backend!.enqueueWorkspaceCopy(id, p, workspaceEvents.requireCurrent()),
     readFile: (p) => fs.readFileSync(p, 'utf8'),
     rasterizeSvg: (p) => rasterizeSvg(p, path.join(dataRoot.cacheDir, 'svg-import')),

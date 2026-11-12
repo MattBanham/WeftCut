@@ -1,11 +1,3 @@
-export interface EdlImportOptions {
-  mediaDirectory: string
-  fpsNum: number
-  fpsDen: number
-  recordOrigin: string
-  sourceOrigin: string
-}
-
 export type TimelineCompatibilityStatus = 'exact' | 'converted' | 'approximated' | 'unsupported'
 export interface TimelineCompatibilityItem {
   location: string

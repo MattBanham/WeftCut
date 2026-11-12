@@ -15,7 +15,6 @@ import { PROJECT_FILE, serializeProjectToJson } from '../persistence'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import type { OrchestratorDeps } from '../workspace-orchestrator'
-import { parseEdl } from './edl'
 import { listFcpxmlSequences, parseFcpxml, type FcpxmlSequenceChoice } from './fcpxml'
 import type { TimelineClip } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem } from '../../../shared/timelineImport'
@@ -55,8 +54,8 @@ async function readTimelineDocument(path: string, deps: MediaDeps): Promise<stri
 
 async function resolveTimelineInput(path: unknown): Promise<{ inputFile: string; extension: string }> {
   const extension = typeof path === 'string' && isAbsolute(path) ? extname(path).toLowerCase() : ''
-  if (typeof path !== 'string' || !['.fcpxml', '.fcpxmld', '.edl'].includes(extension)) {
-    throw new Error('Choose a local .fcpxml, .fcpxmld bundle, or .edl file')
+  if (typeof path !== 'string' || !['.fcpxml', '.fcpxmld'].includes(extension)) {
+    throw new Error('Choose a local .fcpxml, .fcpxmld bundle')
   }
   let inputFile = path
   if (extension === '.fcpxmld') {
@@ -74,22 +73,21 @@ async function resolveTimelineInput(path: unknown): Promise<{ inputFile: string;
 }
 
 export async function listTimelineSequences(path: unknown, deps: MediaDeps): Promise<FcpxmlSequenceChoice[]> {
-  const { inputFile, extension } = await resolveTimelineInput(path)
-  if (extension === '.edl') throw new Error('EDL has one edit; choose import with EDL options instead')
+  const { inputFile } = await resolveTimelineInput(path)
   return listFcpxmlSequences(await readTimelineDocument(inputFile, deps))
 }
 
 export async function prepareTimelineProject(
-  path: unknown, destination: string, edlOptions: unknown, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
+  path: unknown, destination: string, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
   relinkDirectory?: unknown, sequenceIndex?: unknown,
 ): Promise<{ project: Project; report: TimelineImportReport }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
-      (!Number.isSafeInteger(sequenceIndex) || (sequenceIndex as number) < 0 || extension === '.edl')) {
+      (!Number.isSafeInteger(sequenceIndex) || (sequenceIndex as number) < 0)) {
     throw new Error('Choose a valid FCPXML sequence index')
   }
   const document = await readTimelineDocument(inputFile, deps)
-  const timeline = extension === '.edl' ? parseEdl(document, edlOptions) : parseFcpxml(document, sequenceIndex as number | undefined)
+  const timeline = parseFcpxml(document, sequenceIndex as number | undefined)
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(destination))
   rootComposition(initial).fps = timeline.fps
@@ -101,7 +99,6 @@ export async function prepareTimelineProject(
     enqueueDerivatives: async () => {}, enqueueWorkspaceCopy: async () => {},
   })
   if (relinkDirectory !== undefined) {
-    if (extension === '.edl') throw new Error('Use the EDL media-directory option for source matching')
     if (typeof relinkDirectory !== 'string' || !isAbsolute(relinkDirectory)) {
       throw new Error('Choose an absolute media folder for relinking')
     }
@@ -201,7 +198,7 @@ export async function prepareTimelineProject(
     const notes: string[] = []
     let approximation = false
     let converted = false
-    const sourceOut = validateSource(target, clip, item, extension !== '.edl')
+    const sourceOut = validateSource(clip, item)
     if (sourceOut !== clip.sourceOut) {
       roundedEnds++
       converted = true
@@ -365,8 +362,7 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start:
     enabled: true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'width' | 'height' | 'fps'>,
-  clip: TimelineClip, item: MediaItem, allowMixedVideo: boolean): ExactTime {
+function validateSource(clip: TimelineClip, item: MediaItem): ExactTime {
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(`${clip.location}, source ${clip.asset.ref}: ${message}`) }
   if (clip.asset.stillImage) {
@@ -388,10 +384,6 @@ function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'widt
     const v = video!
     const sourceWidth = v.width!, sourceHeight = v.height!
     const sourceFpsNum = v.fps_num!, sourceFpsDen = v.fps_den!
-    if (!allowMixedVideo && (sourceWidth !== timeline.width || sourceHeight !== timeline.height ||
-        sourceFpsNum * timeline.fps.den !== sourceFpsDen * timeline.fps.num)) {
-      fail('EDL originals must match the selected canvas and frame rate')
-    }
     const declared = clip.asset.videoFormat
     const probeFrame = exactTime(1_000_000 * sourceFpsDen, sourceFpsNum)
     if (declared) {
@@ -399,7 +391,7 @@ function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'widt
           compareTime(probeFrame, declared.frameDuration) !== 0) {
         fail('The original dimensions or frame rate differ from its FCPXML asset format. Relink the matching media')
       }
-    } else if (allowMixedVideo && divideTime(clip.sourceIn, probeFrame).den !== 1) {
+    } else if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
       fail('The source in-point falls between frames at the probed source frame rate. Choose a source-frame boundary')
     }
   } else if (item.kind !== 'Audio' || video) {

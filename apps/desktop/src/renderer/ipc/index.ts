@@ -1,5 +1,5 @@
 import { parseManifestIsland } from '../../shared/motifs/catalog';
-import type { EdlImportOptions, TimelineImportPreview, TimelineSequenceChoice } from '../../shared/timelineImport'
+import type { TimelineImportPreview, TimelineSequenceChoice } from '../../shared/timelineImport'
 import type { TimingFields } from '../../shared/timeMapping'
 import type { CropRect } from '../../shared/crop';
 // Renderer-side IPC surface: typed `invoke` wrappers plus the wire shapes the
@@ -905,8 +905,8 @@ export function projectListTimelineSequences(path: string): Promise<TimelineSequ
   return invoke<TimelineSequenceChoice[]>("project_list_timeline_sequences", { path });
 }
 
-export function projectPreviewTimeline(path: string, destination: string, edl?: EdlImportOptions, mode: 'new' | 'current' = 'new', relinkDirectory?: string, sequenceIndex?: number): Promise<TimelineImportPreview> {
-  return invoke<TimelineImportPreview>("project_preview_timeline", { path, destination, edl, mode, relinkDirectory, sequenceIndex });
+export function projectPreviewTimeline(path: string, destination: string, mode: 'new' | 'current' = 'new', relinkDirectory?: string, sequenceIndex?: number): Promise<TimelineImportPreview> {
+  return invoke<TimelineImportPreview>("project_preview_timeline", { path, destination, mode, relinkDirectory, sequenceIndex });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {

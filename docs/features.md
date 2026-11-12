@@ -9,7 +9,7 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 
 Choose **Import timeline…** on the start screen or **File → Import
 timeline as new project…** (Mod+Shift+I) to create a new project from an
-FCPXML or CMX 3600 EDL. If a project is already open, its edits are saved
+FCPXML. If a project is already open, its edits are saved
 before the imported project replaces it in the window; the old project
 remains on disk and in Recent. The review shows canvas, duration, clips,
 media, and conversions before publishing. Keep source files accessible until
@@ -72,8 +72,7 @@ elements block import and are never silently omitted. If the FCPXML asset declar
 a video format, it must match the probed original. Otherwise the probed
 FPS determines whether the source in-point is aligned to an actual frame.
 Unknown or contradictory source metadata is refused, never silently
-reinterpreted. EDL import still requires media matching the chosen
-composition format. Mono or stereo audio may be
+reinterpreted. Mono or stereo audio may be
 standalone or linked. A zero-duration still-image asset placed through a
 connected `<video>` clip becomes an editable ImageOverlay; its source
 dimensions may differ from the sequence.
@@ -118,14 +117,6 @@ sample, with the final edge kept inside the sequence duration. Clip markers
 follow the imported clip when it moves. A trailing gap extends the duration.
 If an exact fractional source out rounds down to the probed end of the
 file, the review reports the sub-microsecond adjustment.
-
-EDL import reads non-drop-frame straight cuts on a single video track,
-including black filler and linked mono or stereo audio when explicitly
-selected by the event. It matches exact filenames in \`SOURCE FILE\` or
-\`FROM CLIP NAME\` comments against the selected media folder. Supply the
-export frame rate, record start timecode, and the start timecode shared by
-all originals. The supplied record origin becomes the WeftCut timeline's
-zero. Source media must share one canvas size and the selected frame rate.
 
 An unsupported edit, missing media or occupied destination folder stops the
 import. Follow the reported element or asset to simplify the timeline or

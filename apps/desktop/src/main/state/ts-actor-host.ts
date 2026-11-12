@@ -922,7 +922,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           assertSession()
           if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
         }
-        const preparation = await prepareTimelineProject(args.path, dir, args.edl, idGen, hybridDeps, assertCurrent, args.relinkDirectory, args.sequenceIndex)
+        const preparation = await prepareTimelineProject(args.path, dir, idGen, hybridDeps, assertCurrent, args.relinkDirectory, args.sequenceIndex)
         assertCurrent()
         if (original !== null && actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
         timelineReview = { preparation, assertCurrent, mode, original }

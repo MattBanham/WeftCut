@@ -389,7 +389,7 @@ describe('timeline import transaction', () => {
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
     const assertCurrent = vi.fn()
-    const prepareReview = (relinkDirectory?: string) => prepareTimelineProject(document, destination, undefined, idGen, {
+    const prepareReview = (relinkDirectory?: string) => prepareTimelineProject(document, destination, idGen, {
       compute: { probeMedia, hashMediaSource },
       statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
     }, assertCurrent, relinkDirectory)
@@ -487,7 +487,7 @@ describe('timeline import transaction', () => {
     await writeFile(document, mixedVideoFixture(pathToFileURL(file).href))
     const itemId = '00000000-0000-0000-0000-0000000000bc'
     const { project, report } = await prepareTimelineProject(
-      document, destination, undefined, seededGen(),
+      document, destination, seededGen(),
       {
         compute: {
           probeMedia: async () => JSON.stringify({
@@ -544,12 +544,12 @@ describe('timeline import transaction', () => {
     expect(parsed.clips[0]!.sourceIn).toEqual({ num: 40000, den: 1 })
     expect(parsed.clips[0]!.asset.videoFormat).toBeUndefined()
     const { project, report } = await prepareTimelineProject(document, destination,
-      undefined, seededGen(), deps, () => {})
+      seededGen(), deps, () => {})
     expect(report.rateConformedVideoClips).toBe(1)
     expect(() => validate(project)).not.toThrow()
 
     await writeFile(document, xml.replace('start="1/25s"', 'start="1/30s"'))
-    await expect(prepareTimelineProject(document, destination, undefined, seededGen(), deps, () => {}))
+    await expect(prepareTimelineProject(document, destination, seededGen(), deps, () => {}))
       .rejects.toThrow(/source in-point falls between frames/)
   })
 
@@ -559,7 +559,7 @@ describe('timeline import transaction', () => {
     await writeFile(document, mixedVideoFixture(pathToFileURL(file).href)
       .replace('width="640" height="360"', 'width="640" height="360" paspH="8" paspV="9"'))
     const mediaId = '00000000-0000-0000-0000-0000000000bd'
-    const { project, report } = await prepareTimelineProject(document, destination, undefined, seededGen(), {
+    const { project, report } = await prepareTimelineProject(document, destination, seededGen(), {
       compute: {
         probeMedia: async () => JSON.stringify({
           ...mediaItemTemplate(mediaId, 'Video', 1_000_000, false),
@@ -585,7 +585,7 @@ describe('timeline import transaction', () => {
     await writeFile(file, 'Wrong camera video')
     await writeFile(document, mixedVideoFixture(pathToFileURL(file).href))
     const id = '00000000-0000-0000-0000-0000000000be'
-    await expect(prepareTimelineProject(document, destination, undefined, seededGen(), {
+    await expect(prepareTimelineProject(document, destination, seededGen(), {
       compute: {
         probeMedia: async () => JSON.stringify({
           ...mediaItemTemplate(id, 'Video', 1_000_000), path_abs: file,
@@ -731,7 +731,7 @@ describe('VoiceScript still-image import transaction', () => {
         })
       })
       const { project, report } = await prepareTimelineProject(
-        document, join(folder, 'Imported project'), undefined, seededGen(),
+        document, join(folder, 'Imported project'), seededGen(),
         {
           compute: { probeMedia, hashMediaSource: async (filepath: string) => filepath === image ? 'a'.repeat(64) : 'b'.repeat(64) },
           statPath: (filepath) => existsSync(filepath) && statSync(filepath).isFile() ? { kind: 'file', readable: true } : null,

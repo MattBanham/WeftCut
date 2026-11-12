@@ -717,51 +717,6 @@ test('discloses 96 kHz surround resampling and stereo downmix before import', as
   } finally { await app.close() }
 })
 
-test('imports CMX 3600 cuts with explicit origins and selected audio channels', async () => {
-  test.setTimeout(90_000)
-  const folder = tmpDir('weftcut-edl-')
-  const source = join(folder, 'Lantern Alley.edl')
-  const media = join(folder, 'Lantern Take.mov')
-  const destination = join(folder, 'Imported Lantern')
-  encodeSource(media)
-  writeFileSync(source, [
-    'TITLE: Lantern Alley',
-    'FCM: NON-DROP FRAME',
-    '001 AX V C 10:00:00:02 10:00:00:05 01:00:00:00 01:00:00:03',
-    '* FROM CLIP NAME: Lantern Take.mov',
-    '002 BL V C 00:00:00:00 00:00:00:01 01:00:00:03 01:00:00:04',
-    '003 AX AA/V C 10:00:00:06 10:00:00:08 01:00:00:04 01:00:00:06',
-    '* SOURCE FILE: Lantern Take.mov',
-  ].join('\n'))
-
-  const { app, page } = await launchApp()
-  try {
-    await app.evaluate(({ dialog }, { source, destination, folder }) => {
-      let opens = 0
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [opens++ === 0 ? source : folder] })
-      dialog.showSaveDialog = async () => ({ canceled: false, filePath: destination })
-    }, { source, destination, folder })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Import CMX 3600 EDL' })
-    const submit = dialog.getByRole('button', { name: 'Review import', exact: true })
-    await expect(submit).toBeDisabled()
-    await dialog.getByRole('combobox', { name: 'Frame rate' }).click()
-    await page.getByRole('option', { name: /29\.97/ }).click()
-    await dialog.getByRole('textbox', { name: 'Timeline start timecode' }).fill('01:00:00:00')
-    await dialog.getByRole('textbox', { name: 'Source start timecode' }).fill('10:00:00:00')
-    await dialog.getByRole('button', { name: 'Choose…' }).click()
-    await submit.click()
-    await expect(dialog).toHaveCount(0)
-    await page.getByRole('dialog', { name: 'Review timeline import' }).getByRole('button', { name: 'Import', exact: true }).click()
-    await waitForHook(page, 'getSelectedLayerIds')
-    const imported = await rootSummary<ProjectSummary>(page)
-    expect(imported).toMatchObject({ fps_num: 30000, fps_den: 1001, duration_us: 200200, layer_count: 3 })
-    expect(imported.media).toHaveLength(1)
-    expect(imported.links).toHaveLength(1)
-    expect(imported.tracks[0]!.layers.filter((layer) => layer.params.kind === 'Audio')).toHaveLength(1)
-  } finally { await app.close() }
-})
-
 test('reviews and imports connected FCPXML video and audio lanes in stacking order', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-stacked-')

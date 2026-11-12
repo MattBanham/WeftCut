@@ -595,8 +595,10 @@ const enUS = {
     markers_hidden_hint: "Timeline markers hidden. Click to show.",
     // Same two-state shape for the three toggles that joined the section: the
     // pressed border says which state, the hint says what a click does.
-    snap_on_hint: "Timeline snapping on. Click to disable.",
-    snap_off_hint: "Timeline snapping off. Click to enable.",
+    snap_on_hint: "Clip snapping on. Click to disable.",
+    snap_off_hint: "Clip snapping off. Click to enable.",
+    timeline_snap_options: "Timeline snapping options",
+    timeline_snap_ctrl_hint: "Hold Ctrl during a drag to suspend magnetic snapping. Frame and sample grids remain active.",
     snapping_options: "Canvas snapping and grid",
     snapping_canvas: "Canvas",
     snapping_grid: "Grid",

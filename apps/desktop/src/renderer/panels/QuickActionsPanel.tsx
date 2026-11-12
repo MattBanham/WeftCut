@@ -47,6 +47,7 @@ import {
 } from "./quickActions";
 import { AppIcon } from "@/components/AppIcon";
 import { SnappingPopover } from "./SnappingPopover";
+import { TimelineSnapPopover } from "./TimelineSnapPopover";
 
 /// Which way the strip runs. Single row or single column, never wrapped —
 /// overflow scrolls instead.
@@ -390,25 +391,33 @@ export function QuickActionsPanel({
         >
           {section.resolved.map(({ item, command }) => {
             const own = ++index;
-            const popupIndex = item.id === "toggleTailSnap" ? ++index : null;
-            return (
+            const gridIndex = item.id === "toggleTailSnap" ? ++index : null;
+            // In the integrated fork, canvas grid and timeline magnet each
+            // occupy their own Quick Action. The snap command remains available
+            // in the command palette, while the magnet opens its settings.
+            return gridIndex !== null ? (
               <Fragment key={item.id}>
-                <QuickActionButton
-                  item={item}
-                  command={command}
-                  state={state}
-                  mode={section.mode}
+                <TimelineSnapPopover
+                  orientation={orientation}
                   tabbable={own === focusIndex}
                   onFocus={() => setFocusIndex(own)}
                 />
-                {popupIndex !== null && (
-                  <SnappingPopover
-                    orientation={orientation}
-                    tabbable={popupIndex === focusIndex}
-                    onFocus={() => setFocusIndex(popupIndex)}
-                  />
-                )}
+                <SnappingPopover
+                  orientation={orientation}
+                  tabbable={gridIndex === focusIndex}
+                  onFocus={() => setFocusIndex(gridIndex)}
+                />
               </Fragment>
+            ) : (
+              <QuickActionButton
+                key={item.id}
+                item={item}
+                command={command}
+                state={state}
+                mode={section.mode}
+                tabbable={own === focusIndex}
+                onFocus={() => setFocusIndex(own)}
+              />
             );
           })}
         </div>

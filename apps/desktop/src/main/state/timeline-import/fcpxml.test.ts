@@ -13,7 +13,7 @@ import { PROJECT_FILE } from '../persistence'
 import { AUDIO_GRID, isCanonicalOnGrid } from '../snap'
 import { validate } from '../validate'
 import { listFcpxmlSequences, parseFcpxml } from './fcpxml'
-import { prepareTimelineProject, publishTimelineProject } from './project'
+import { prepareTimelineProject } from './project'
 
 const fixture = (url = 'file:///fictional/Harbor%20Lights.mov') => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -56,7 +56,7 @@ const mixedVideoFixture = (url: string) => `<?xml version="1.0" encoding="UTF-8"
   </project>
 </fcpxml>`
 
-const voiceScriptStillFixture = (audioUrl: string, imageUrl: string) => `<?xml version="1.0" encoding="UTF-8"?>
+const illustratedStoryFixture = (audioUrl: string, imageUrl: string) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.10">
   <resources>
@@ -69,7 +69,7 @@ const voiceScriptStillFixture = (audioUrl: string, imageUrl: string) => `<?xml v
       <media-rep kind="original-media" src="${imageUrl}"/>
     </asset>
   </resources>
-  <library><event name="VoiceScript"><project name="VoiceScript test">
+  <library><event name="Illustrated Story"><project name="Illustrated Story test">
     <sequence format="f" duration="120/60s" tcStart="0s" tcFormat="NDF" audioLayout="mono" audioRate="48k">
       <spine>
         <gap offset="0s" start="0s" duration="120/60s">
@@ -295,11 +295,11 @@ describe('FCPXML subset', () => {
       .toThrow(/"source in" is between frames/)
   })
 
-  it('accepts VoiceScript mono narration and still PNG visemes as connected image clips', () => {
-    const xml = voiceScriptStillFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
+  it('accepts Illustrated Story mono narration and still PNG visemes as connected image clips', () => {
+    const xml = illustratedStoryFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
     const parsed = parseFcpxml(xml)
     expect(parsed).toMatchObject({
-      name: 'VoiceScript test', fps: { num: 60, den: 1 }, durationFrames: 120,
+      name: 'Illustrated Story test', fps: { num: 60, den: 1 }, durationFrames: 120,
     })
     expect(parsed.clips).toHaveLength(2)
     expect(parsed.clips.map((clip) => [clip.lane, clip.firstFrame, clip.endFrame])).toEqual([
@@ -375,11 +375,8 @@ describe('timeline import transaction', () => {
   function setup(duration = 10_000_000, audio: { channels: number; sample_rate: number } | null = { channels: 2, sample_rate: 48000 }) {
     const idGen = seededGen()
     const before = blankProject(idGen, 'Existing Project')
+    rootComposition(before).fps = { num: 30000, den: 1001 }
     const actor = createActor({ idGen, initial: before })
-    const commitWorkspace = vi.fn(async (_dir: string) => {})
-    const pushRecent = vi.fn()
-    const enqueueDerivatives = vi.fn()
-    const deps = { actor, join, napi: { commitWorkspace, pushRecent }, enqueueDerivatives }
     const probeMedia = vi.fn(async () => JSON.stringify({
       ...mediaItemTemplate(id, 'Video', duration, true), path_abs: media, file_hash_blake3: `pending-${id}`,
       metadata: {
@@ -394,7 +391,7 @@ describe('timeline import transaction', () => {
       statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
     }, assertCurrent, relinkDirectory)
     const prepare = async () => (await prepareReview()).project
-    return { prepare, prepareReview, deps, before, actor, probeMedia, hashMediaSource, commitWorkspace, pushRecent, enqueueDerivatives }
+    return { prepare, prepareReview, before, actor, probeMedia, hashMediaSource }
   }
 
   it('loads a regular FCPXML bundle with Info.fcpxml at its root', async () => {
@@ -439,7 +436,7 @@ describe('timeline import transaction', () => {
     expect(() => validate(project)).not.toThrow()
   })
 
-  it('publishes a validated editable project with exact trims, sample-aligned audio and clip markers', async () => {
+  it('inserts a validated editable composition with exact trims, sample-aligned audio and clip markers', async () => {
     await writeFile(media, 'Fictional video')
     const run = setup()
     const project = await run.prepare()
@@ -459,11 +456,15 @@ describe('timeline import transaction', () => {
     expect(audio[1]!.t_end_us).toBeLessThanOrEqual(root.duration_us)
     expect(root.links.map((link) => link.members)).toEqual(video.map((layer, i) => [layer.id, audio[i]!.id].sort()))
     expect(root.markers[0]).toMatchObject({ t_us: 33367, label: 'Signal seen', anchor: { layer: video[0]!.id, src_us: 100100 } })
-    await publishTimelineProject(run.deps, destination, project)
-    expect(run.commitWorkspace).toHaveBeenCalledWith(destination)
-    expect(run.enqueueDerivatives).toHaveBeenCalledWith(project)
-    expect(run.actor.snapshot()).toBe(project)
-    expect(readFileSync(join(destination, PROJECT_FILE), 'utf8')).toContain('Signal seen')
+    const result = run.actor.dispatch('import_timeline_group', {
+      imported: project, expectedProjectId: run.before.project_id, canvas: 'fit',
+    })
+    expect(result.ok).toBe(true)
+    expect(run.actor.snapshot().compositions[project.root_id]).toBeDefined()
+    expect(existsSync(destination)).toBe(false)
+    expect(run.actor.dispatch('undo', {}).ok).toBe(true)
+    expect(run.actor.snapshot()).toEqual(run.before)
+    expect(run.actor.dispatch('redo', {}).ok).toBe(true)
     expect(run.actor.command('update_layer', { layerId: video[0]!.id, patch: { label: 'Signal edited' } }).ok).toBe(true)
   })
 
@@ -689,32 +690,21 @@ describe('timeline import transaction', () => {
     const project = await run.prepare()
     await mkdir(destination)
     await writeFile(join(destination, PROJECT_FILE), 'other project')
-    await expect(publishTimelineProject(run.deps, destination, project)).rejects.toThrow(/folder already exists/)
+    expect(() => validate(project)).not.toThrow()
     expect(readFileSync(join(destination, PROJECT_FILE), 'utf8')).toBe('other project')
-    expect(run.commitWorkspace).not.toHaveBeenCalled()
     expect(run.actor.snapshot()).toBe(run.before)
   })
 
-  it('rolls back the new folder when the workspace cannot be opened', async () => {
-    await writeFile(media, 'Fictional video')
-    const run = setup()
-    const project = await run.prepare()
-    run.commitWorkspace.mockRejectedValueOnce(new Error('cache is unavailable'))
-    await expect(publishTimelineProject(run.deps, destination, project)).rejects.toThrow(/cache is unavailable/)
-    expect(run.actor.snapshot()).toBe(run.before)
-    expect(run.pushRecent).not.toHaveBeenCalled()
-    expect(existsSync(destination)).toBe(false)
-  })
 })
 
-describe('VoiceScript still-image import transaction', () => {
+describe('Illustrated Story still-image import transaction', () => {
   it('places a mono audio clip and an image overlay on independent editable lanes', async () => {
-    const folder = await mkdtemp(join(tmpdir(), 'weftcut-voicescript-still-'))
+    const folder = await mkdtemp(join(tmpdir(), 'weftcut-illustrated-story-'))
     try {
-      const document = join(folder, 'VoiceScript.fcpxml')
+      const document = join(folder, 'Illustrated Story.fcpxml')
       const narration = join(folder, 'Narration.wav')
       const image = join(folder, 'Mouth A.png')
-      await writeFile(document, voiceScriptStillFixture(pathToFileURL(narration).href, pathToFileURL(image).href))
+      await writeFile(document, illustratedStoryFixture(pathToFileURL(narration).href, pathToFileURL(image).href))
       await writeFile(narration, 'synthetic mono-audio file')
       await writeFile(image, 'synthetic still-image file')
       const probeMedia = vi.fn(async (filepath: string) => {

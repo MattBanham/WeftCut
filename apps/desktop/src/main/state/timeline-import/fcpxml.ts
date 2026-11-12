@@ -29,6 +29,14 @@ interface Format {
   namedDefaults: boolean
 }
 
+export const FCPXML_LIMITS = {
+  bytes: 16 * 1024 * 1024,
+  depth: 24,
+  elements: 50_000,
+  attributes: 64,
+  attributeLength: 16_384,
+} as const
+
 const US_PER_SECOND = { num: 1_000_000, den: 1 }
 
 function location(el: Element): string {
@@ -41,6 +49,11 @@ function fail(el: Element, message: string): never {
 }
 
 function readXml(xml: string): Element {
+  if (Buffer.byteLength(xml, 'utf8') > FCPXML_LIMITS.bytes) {
+    throw new Error('FCPXML exceeds the 16 MiB document limit. Export a smaller sequence')
+  }
+  if (/[\uD800-\uDFFF]/u.test(xml)) throw new Error('Malformed FCPXML: invalid Unicode surrogate')
+  let elements = 0
   const document: Element = { tag: 'document', attrs: {}, children: [], line: 1 }
   const stack = [document]
   const parser = new SaxesParser<{ xmlns: false }>({ xmlns: false })
@@ -52,12 +65,20 @@ function readXml(xml: string): Element {
     if (value.trim() !== 'fcpxml') throw new Error('FCPXML supports only the plain <!DOCTYPE fcpxml> declaration')
   })
   parser.on('opentagstart', (tag) => {
-    if (stack.length > 24) throw new Error(`FCPXML nesting is too deep at line ${parser.line}`)
+    if (stack.length > FCPXML_LIMITS.depth) throw new Error(`FCPXML nesting is too deep at line ${parser.line}`)
+    if (++elements > FCPXML_LIMITS.elements) throw new Error('FCPXML contains too many elements. Export a smaller sequence')
     const el: Element = { tag: tag.name, attrs: {}, children: [], line: parser.line }
     stack[stack.length - 1]!.children.push(el)
     stack.push(el)
   })
-  parser.on('opentag', (tag) => { stack[stack.length - 1]!.attrs = tag.attributes })
+  parser.on('opentag', (tag) => {
+    const attrs = Object.entries(tag.attributes)
+    if (attrs.length > FCPXML_LIMITS.attributes || attrs.some(([key, value]) =>
+      key.length > FCPXML_LIMITS.attributeLength || value.length > FCPXML_LIMITS.attributeLength)) {
+      throw new Error('FCPXML attribute limits exceeded. Shorten metadata or export a smaller sequence')
+    }
+    stack[stack.length - 1]!.attrs = tag.attributes
+  })
   parser.on('closetag', () => { stack.pop() })
   function text(value: string) {
     if (value.trim()) fail(stack[stack.length - 1]!, 'Unexpected text')
@@ -181,6 +202,7 @@ function localPath(el: Element): string {
   const src = required(el, 'src')
   try {
     if (!/^file:\/\/[^\\]/i.test(src) || /[\x00-\x1f\x7f\\]/.test(src)) throw new Error()
+    if (decodeURIComponent(src).split(/[\\/]/).some(part => part === '.' || part === '..')) throw new Error()
     const url = new URL(src)
     if (url.protocol !== 'file:' || url.hostname || url.search || url.hash) throw new Error()
     const path = fileURLToPath(url)
@@ -213,7 +235,7 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
   const duration = time(el, 'duration')
   // Still-image assets in FCPXML describe zero source duration: the enclosing
   // <video> gives the duration on the edit. Do not impose video-frame/source
-  // duration checks on PNG artwork (including VoiceScript viseme overlays).
+  // duration checks on still artwork.
   const stillImage = hasVideo && !hasAudio && duration.num === 0
   let videoFormat: Asset['videoFormat']
   if (a.format !== undefined) {

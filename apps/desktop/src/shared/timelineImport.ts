@@ -46,8 +46,7 @@ export interface TimelineImportReport {
 
 export interface TimelineImportPreview extends TimelineImportReport {
   id: string
-  mode: 'new' | 'current'
-  current?: { width: number; height: number; fps: { num: number; den: number }; sampleRate: number; channels: number }
+  current: { width: number; height: number; fps: { num: number; den: number }; sampleRate: number; channels: number }
 }
 
 export interface TimelineSequenceChoice {

@@ -114,14 +114,8 @@ test.describe('macOS application menu', () => {
       })
       .toEqual([appMenuLabel])
 
-    // Import timeline can create a new project even before one is open.
-    // Save and Export remain unavailable until there is a project.
-    expect(await menuBar(app)).toHaveLength(5)
-    const fileLabel = (await menuBar(app))[1]!
-    await expect.poll(async () => (await menuSnapshot(app))!
-      .filter((i) => i.menu === fileLabel && i.type !== 'separator')
-      .map((i) => i.accelerator))
-      .toEqual(['CommandOrControl+Shift+I'])
+    // With no project open, the startup screen projects no File actions.
+    expect(await menuBar(app)).toHaveLength(4)
 
     await app.close()
   })
@@ -153,8 +147,7 @@ test.describe('macOS application menu', () => {
       })
       .toEqual([
         'CommandOrControl+I', // Import media…
-        'CommandOrControl+Shift+I', // Import timeline as new project…
-        null, // Import timeline into current project (intentionally unbound)
+        'CommandOrControl+Shift+I', // Import FCPXML…
         'CommandOrControl+S', // Save
         'CommandOrControl+Shift+S', // Save as…
         'CommandOrControl+W', // Save and Close — the app's action, not Close Window

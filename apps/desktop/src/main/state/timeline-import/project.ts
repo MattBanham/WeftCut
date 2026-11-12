@@ -1,6 +1,6 @@
-import { lstat, open, mkdir, rmdir, unlink } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
-import { canvasSizeError, validateProjectName } from '../../../shared/newProject'
+import { lstat, open } from 'node:fs/promises'
+import { basename, extname, isAbsolute, join } from 'node:path'
+import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime } from '../../../renderer/timeMapping'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
@@ -11,26 +11,13 @@ import { blankProject, rootComposition, type AudioParams, type Layer, type Media
 import { applyAddTrack, DEFAULT_MARKER_COLOR } from '../mutations/add'
 import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/media'
 import { applyDurationAutofit } from '../mutations/helpers'
-import { PROJECT_FILE, serializeProjectToJson } from '../persistence'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
-import type { OrchestratorDeps } from '../workspace-orchestrator'
-import { listFcpxmlSequences, parseFcpxml, type FcpxmlSequenceChoice } from './fcpxml'
+import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml, type FcpxmlSequenceChoice } from './fcpxml'
 import type { TimelineClip } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem } from '../../../shared/timelineImport'
 
 type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'>
-const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
-
-export function timelineDestination(value: unknown): string {
-  if (typeof value !== 'string' || !isAbsolute(value)) throw new Error('Choose an absolute path for a new project folder')
-  const path = resolve(value)
-  const name = basename(path)
-  if (path === dirname(path) || /[\x00-\x1f\x7f]/.test(name) || validateProjectName(name)) {
-    throw new Error('Choose a valid name for the new project folder')
-  }
-  return path
-}
 
 async function readTimelineDocument(path: string, deps: MediaDeps): Promise<string> {
   const facts = deps.statPath(path)
@@ -38,7 +25,7 @@ async function readTimelineDocument(path: string, deps: MediaDeps): Promise<stri
   const file = await open(path, 'r')
   try {
     const stat = await file.stat()
-    if (!stat.isFile() || stat.size > MAX_DOCUMENT_BYTES) throw new Error('Choose a regular timeline file up to 16 MiB')
+    if (!stat.isFile() || stat.size > FCPXML_LIMITS.bytes) throw new Error('Choose a regular timeline file up to 16 MiB')
     const data = Buffer.alloc(stat.size + 1)
     let read = 0
     while (read < data.length) {
@@ -79,7 +66,7 @@ export async function listTimelineSequences(path: unknown, deps: MediaDeps): Pro
 
 export async function prepareTimelineProject(
   path: unknown, destination: string, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
-  relinkDirectory?: unknown, sequenceIndex?: unknown,
+  relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project,
 ): Promise<{ project: Project; report: TimelineImportReport }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
@@ -91,11 +78,17 @@ export async function prepareTimelineProject(
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(destination))
   rootComposition(initial).fps = timeline.fps
+  if (existing) {
+    initial.media_pool = existing.media_pool
+    const parent = rootComposition(existing)
+    rootComposition(initial).sample_rate = parent.sample_rate
+    rootComposition(initial).channels = parent.channels
+  }
   const actor = createActor({ initial, idGen, clock: () => new Date().toISOString() })
-  // The standard importer deduplicates and hashes in a private actor. Opening
-  // the finished project starts the usual workspace copies and derivatives.
+  // Stage registration through the normal importer against the destination's
+  // pool. Disk jobs wait for confirmation; cancellation discards this actor.
   const importer = createMediaImporter({
-    ...deps, actor, workspaceDir: () => null,
+    ...deps, actor, workspaceDir: () => destination,
     enqueueDerivatives: async () => {}, enqueueWorkspaceCopy: async () => {},
   })
   if (relinkDirectory !== undefined) {
@@ -145,7 +138,13 @@ export async function prepareTimelineProject(
   const mediaIds = new Map<string, string>()
   for (const [mediaPath, ref] of paths) {
     assertCurrent()
-    try { mediaIds.set(mediaPath, (await importer.ensureImported(mediaPath)).mediaId) }
+    try {
+      const result = await importer.ensureImported(mediaPath)
+      if (result.disposition === 'relinked' && existing?.media_pool[result.mediaId]) {
+        throw new Error('An existing pool item needs repair. Relink it through the media pool before reviewing this timeline')
+      }
+      mediaIds.set(mediaPath, result.mediaId)
+    }
     catch (error) {
       throw new Error(`Could not import asset ${ref} (${mediaPath}): ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -160,7 +159,10 @@ export async function prepareTimelineProject(
   if (canvasSizeError(width, height)) throw new Error('The original media must have a supported even-sized WeftCut canvas')
   const target = { ...root, width, height, tracks: root.tracks.map((track) => ({ ...track, layers: [] as Layer[] })),
     links: [...root.links], markers: [...root.markers] }
-  const project = { ...snapshot, compositions: { ...snapshot.compositions, [root.id]: target } }
+  const usedMedia = new Set(mediaIds.values())
+  const project = { ...snapshot,
+    media_pool: Object.fromEntries(Object.entries(snapshot.media_pool).filter(([id]) => usedMedia.has(id))),
+    compositions: { ...snapshot.compositions, [root.id]: target } }
   const laneIds = new Map([[0, target.tracks[0]!.id]])
   const lanes = [...new Set(timeline.clips.map((clip) => clip.lane))].sort((a, b) => a - b)
   let lowerTracks = 0
@@ -293,7 +295,7 @@ export async function prepareTimelineProject(
   validate(project)
   return { project, report: {
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
-    videoClips, audioClips, markers: target.markers.length, media: Object.keys(snapshot.media_pool).length,
+    videoClips, audioClips, markers: target.markers.length, media: Object.keys(project.media_pool).length,
     lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
     resampledAudioClips, downmixedAudioClips,
     rateConformedVideoClips, resizedVideoClips, videoConversions: [...videoConversions.values()],
@@ -411,35 +413,4 @@ function validateSource(clip: TimelineClip, item: MediaItem): ExactTime {
     if (roundTime(clip.sourceOut) === duration && compareTime(clip.sourceIn, end) < 0) return end
   }
   return fail('The trim exceeds the probed duration of the original file. Relink the matching original or shorten the trim')
-}
-
-type PublicationDeps = Pick<OrchestratorDeps, 'actor' | 'join' | 'enqueueDerivatives'> & {
-  napi: Pick<OrchestratorDeps['napi'], 'commitWorkspace' | 'pushRecent'>
-}
-
-export async function publishTimelineProject(deps: PublicationDeps, dir: string, project: Project): Promise<void> {
-  validate(project)
-  const file = deps.join(dir, PROJECT_FILE)
-  const text = serializeProjectToJson(project)
-  try { await mkdir(dir) }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('That project folder already exists. Choose a new name or location')
-    throw error
-  }
-  let ownsFile = false
-  try {
-    const handle = await open(file, 'wx')
-    ownsFile = true
-    try { await handle.writeFile(text, 'utf8'); await handle.sync() }
-    finally { await handle.close() }
-    await deps.napi.commitWorkspace(dir)
-  } catch (error) {
-    if (ownsFile) await unlink(file).catch(() => {})
-    await rmdir(dir).catch(() => {})
-    throw error
-  }
-  deps.actor.replaceState(project)
-  try { await deps.napi.pushRecent(dir, project.metadata.name) }
-  catch (error) { console.warn('[timeline import] Could not update recent projects', error) }
-  deps.enqueueDerivatives?.(project)
 }

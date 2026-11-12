@@ -1,17 +1,17 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, test } from '@playwright/test'
-import { launchApp, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
+import { invokeCmd, newProject, launchApp, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
 
-test('imports VoiceScript-style 48 kHz mono audio and zero-duration PNG visemes as image overlays', async () => {
+test('imports fictional 48 kHz mono audio and zero-duration PNG visemes as image overlays', async () => {
   test.setTimeout(90_000)
-  const folder = tmpDir('weftcut-voicescript-stills-')
-  const source = join(folder, 'VoiceScript.fcpxml')
+  const folder = tmpDir('weftcut-illustrated-story-stills-')
+  const source = join(folder, 'Illustrated Story.fcpxml')
   const audio = join(folder, 'Narration.wav')
   const png = join(folder, 'Mouth.png')
-  const destination = join(folder, 'Imported VoiceScript')
+  const destination = join(folder, 'Imported Illustrated Story')
 
   execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
@@ -36,7 +36,7 @@ test('imports VoiceScript-style 48 kHz mono audio and zero-duration PNG visemes 
       <media-rep kind="original-media" src="${pathToFileURL(png).href}"/>
     </asset>
   </resources>
-  <library><event name="VoiceScript"><project name="VoiceScript test">
+  <library><event name="Illustrated Story"><project name="Illustrated Story test">
     <sequence format="f" duration="120/60s" tcStart="0s" tcFormat="NDF" audioLayout="mono" audioRate="48k">
       <spine><gap offset="0s" start="0s" duration="120/60s">
         <asset-clip ref="voice" lane="-1" offset="0s" start="0s" duration="120/60s" audioRole="dialogue"/>
@@ -48,20 +48,24 @@ test('imports VoiceScript-style 48 kHz mono audio and zero-duration PNG visemes 
 
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: folder, name: 'Imported Illustrated Story',
+      canvas: { width: 320, height: 240, fpsNum: 60, fpsDen: 1 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+    await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Video clips 1.*Audio clips 1.*Media files 2/)).toBeVisible()
-    expect(existsSync(destination)).toBe(false)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await waitForHook(page, 'getSelectedLayerIds')
     const imported = await rootSummary<ProjectSummary>(page)
-    expect(imported).toMatchObject({ fps_num: 60, fps_den: 1, duration_us: 2_000_000, layer_count: 2 })
+    expect(imported).toMatchObject({ fps_num: 60, fps_den: 1, duration_us: 2_000_000, layer_count: 3 })
+    await invokeCmd(page, 'project_save')
     const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const root = project.compositions[project.root_id]
+    const root: any = Object.values(project.compositions).find((c: any) => c.id !== project.root_id)
     const layers = root.tracks.flatMap((track: { layers: { params: { kind: string }; t_start_us: number; t_end_us: number }[] }) => track.layers)
     expect(layers.map((layer: { params: { kind: string } }) => layer.params.kind).sort()).toEqual(['Audio', 'ImageOverlay'])
     expect(layers.find((layer: { params: { kind: string } }) => layer.params.kind === 'ImageOverlay'))

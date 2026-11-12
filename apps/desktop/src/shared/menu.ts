@@ -25,7 +25,6 @@
 export const MENU_ACTION_IDS = [
   'importMedia',
   'importTimeline',
-  'importTimelineIntoCurrent',
   'save',
   'saveAs',
   'closeProject',

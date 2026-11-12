@@ -37,7 +37,6 @@ import {
   BugIcon,
   ChevronUpIcon,
   FolderOpenIcon,
-  ListVideoIcon,
   GlobeIcon,
   PlusIcon,
   SettingsIcon,
@@ -70,7 +69,6 @@ import {
   isDeadRecentError,
 } from "./openError";
 import { AppIcon } from "@/components/AppIcon";
-import { useTimelineImportFlow } from "./useTimelineImportFlow";
 
 interface Props {
   /// Called once the user has successfully picked or created a workspace.
@@ -85,7 +83,6 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
   const { t, i18n } = useTranslation();
   const [recents, setRecents] = useState<RecentEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const timelineImport = useTimelineImportFlow(onWorkspaceReady, setError);
   const [busy, setBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -106,8 +103,8 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
   // `keybindings` is a Record<string, string[]> from main; the cast narrows it
   // to the catalogue's ids, exactly as App.tsx does.
   const settingsHandlers = useMemo<HandlerMap>(
-    () => ({ openSettings: () => setSettingsOpen(true), importTimeline: () => void timelineImport.begin() }),
-    [timelineImport.begin],
+    () => ({ openSettings: () => setSettingsOpen(true) }),
+    [],
   );
   const settingsOverrides = keybindings as OverrideMap;
   useShortcuts({ handlers: settingsHandlers, overrides: settingsOverrides });
@@ -312,23 +309,9 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
             <AppIcon icon={FolderOpenIcon} size="display" strokeWidth={1.5} aria-hidden />
             <span className="startup-action-label">{t("startup.open_project")}</span>
           </button>
-          <button
-            type="button"
-            className="startup-action"
-            onClick={() => void timelineImport.begin()}
-            disabled={busy || timelineImport.busy}
-          >
-            <AppIcon icon={ListVideoIcon} size="display" strokeWidth={1.5} aria-hidden />
-            <span className="startup-action-label">{t("startup.import_timeline")}</span>
-          </button>
         </div>
 
         {error && <p className="startup-error">{error}</p>}
-        {error && timelineImport.canRelink && (
-          <button type="button" onClick={() => void timelineImport.relink()} disabled={timelineImport.busy}>
-            {t("startup.import_choose_relink_folder")}
-          </button>
-        )}
 
         <section className="startup-recent" style={RECENT_BODY_STYLE}>
           <div className="startup-recent-header">
@@ -412,7 +395,6 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
           }}
         />
       )}
-      {timelineImport.dialogs}
       {settingsOpen && (
         // No composition props: there is no open project here, so the
         // project-scoped "Project" category hides itself (see SettingsPanel).

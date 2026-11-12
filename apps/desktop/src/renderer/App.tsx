@@ -194,7 +194,7 @@ interface AppProps {
 
 export function App({ onCloseProject, onWorkspaceReady }: AppProps) {
   const { t } = useTranslation();
-  const timelineImport = useTimelineImportFlow(onWorkspaceReady);
+  const timelineImport = useTimelineImportFlow();
   const summary = useProjectSummary();
   // The timeline the panels, the shortcuts and the Insert menu act on. Export
   // and Settings read the root below regardless (compositionAnchorStore.ts
@@ -1053,8 +1053,7 @@ export function App({ onCloseProject, onWorkspaceReady }: AppProps) {
       // latent and pop the palette open when the user returns to the editor.
       if (!agentMode) setPaletteOpen(true);
     },
-    importTimeline: () => void timelineImport.begin('new'),
-    importTimelineIntoCurrent: () => void timelineImport.begin('current'),
+    importTimeline: () => void timelineImport.begin(),
     openSettings: () => openSettings("general"),
   };
   // Memoised so `useShortcuts`'s `useMemo(entries)` doesn't churn each

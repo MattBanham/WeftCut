@@ -24,7 +24,6 @@ export type ActionId =
   | "splitAtPlayhead"
   | "importMedia"
   | "importTimeline"
-  | "importTimelineIntoCurrent"
   | "export"
   | "selectTool"
   | "toggleBladeMode"
@@ -184,7 +183,6 @@ export const ACTION_DEFS: Record<ActionId, ActionDef> = {
   splitAtPlayhead: { defaultKeys: ["Mod+B"],               labelKey: "actions.split_at_playhead", fireWhenEditing: false, scope: TIMELINE_SELECTION },
   importMedia:     { defaultKeys: ["Mod+I"],               labelKey: "actions.import_media" },
   importTimeline:  { defaultKeys: ["Mod+Shift+I"],         labelKey: "actions.import_timeline" },
-  importTimelineIntoCurrent: { defaultKeys: [], labelKey: "actions.import_timeline_into_current" },
   export:          { defaultKeys: ["Mod+E"],               labelKey: "actions.export" },
   // Modal timeline tools, one key per tool (`toolStore.ts`): `V` arms
   // Selection, `C` arms the Blade. Both are IDEMPOTENT — pressing a tool's

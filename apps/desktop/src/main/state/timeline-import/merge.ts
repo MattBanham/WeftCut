@@ -18,7 +18,7 @@ export function applyImportedTimelineGroup(
   const parent = rootComposition(draft)
   const source = rootComposition(imported)
   if (parent.fps.num * source.fps.den !== source.fps.num * parent.fps.den) {
-    throw new Error('Frame rates differ. Import as a new project; changing the current project frame grid is not supported')
+    throw new Error('Frame rates differ. Export the sequence at the destination project rate and review again')
   }
   if (source.sample_rate !== parent.sample_rate || source.channels !== parent.channels) {
     throw new Error('The imported and current projects use different audio editing lattices')
@@ -26,13 +26,19 @@ export function applyImportedTimelineGroup(
   if (Object.keys(imported.compositions).length !== 1 || imported.root_id !== source.id) {
     throw new Error('Only one imported timeline can be added as a Group')
   }
-  if (draft.compositions[source.id] || Object.keys(imported.media_pool).some(id => id in draft.media_pool)) {
+  if (draft.compositions[source.id]) {
     throw new Error('Imported IDs conflict with existing project IDs; review the import again')
   }
   if (!['fit', 'fill', 'original'].includes(canvas)) throw new Error('Choose how the imported canvas should fit')
 
   validate(imported)
-  draft.media_pool = { ...draft.media_pool, ...imported.media_pool }
+  for (const [id, item] of Object.entries(imported.media_pool)) {
+    const held = draft.media_pool[id]
+    if (held && JSON.stringify(held) !== JSON.stringify(item)) {
+      throw new Error('Import would change an existing media item; review the import again')
+    }
+    if (!held) draft.media_pool[id] = item
+  }
   draft.compositions[source.id] = { ...source, label: imported.metadata.name, ordinal: draft.next_group_ordinal++ }
   const trackId = applyAddTrack(draft, idGen, imported.metadata.name, undefined, parent.id)
   const scale = canvas === 'original' ? 1

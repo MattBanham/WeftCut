@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { expect, test } from '@playwright/test'
-import { invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
+import { expect, test, type Page } from '@playwright/test'
+import { invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary, type ProjectSummaryWire } from './helpers/driver'
 
 function encodeSource(media: string) {
   execFileSync('ffmpeg', [
@@ -13,7 +13,28 @@ function encodeSource(media: string) {
   ], { windowsHide: true })
 }
 
-test('imports FCPXML from startup as an editable project and refuses missing media', async () => {
+
+async function beginImport(page: Page) {
+  await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+  await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
+}
+
+async function importedSummary(page: Page): Promise<ProjectSummary> {
+  const project = await invokeCmd<ProjectSummaryWire>(page, 'project_summary')
+  const imported = Object.values(project.compositions).filter(c => c.id !== project.root_id)
+  expect(imported).toHaveLength(1)
+  const composition = imported[0]!
+  return { ...project, ...composition,
+    layer_count: composition.tracks.reduce((count, track) => count + track.layers.length, 0) }
+}
+
+function importedComposition(project: any): any {
+  const imported = Object.values(project.compositions).filter((c: any) => c.id !== project.root_id)
+  expect(imported).toHaveLength(1)
+  return imported[0]
+}
+
+test('imports an editable FCPXML composition and refuses missing or changed media', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-')
   const source = join(folder, 'Glass Garden.fcpxml')
@@ -44,42 +65,44 @@ test('imports FCPXML from startup as an editable project and refuses missing med
 
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, { source, destination }) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: destination })
     }, { source, destination })
-    const importButton = page.getByRole('button', { name: 'Import timeline…' })
-    await importButton.click()
+    await beginImport(page)
     await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
-    expect(existsSync(destination)).toBe(false)
-    expect(await invokeCmd(page, 'project_open_state')).toBeNull()
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    expect(await invokeCmd(page, 'project_open_state')).not.toBeNull()
 
+    await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
     encodeSource(media)
 
-    await importButton.click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Video clips 2.*Audio clips 2.*Markers 1.*Media files 1/)).toBeVisible()
-    expect(existsSync(destination)).toBe(false)
-    expect(await invokeCmd(page, 'project_open_state')).toBeNull()
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    expect(await invokeCmd(page, 'project_open_state')).not.toBeNull()
     await review.getByRole('button', { name: 'Cancel', exact: true }).click()
     await expect(review).toHaveCount(0)
-    expect(existsSync(destination)).toBe(false)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
 
-    await importButton.click()
+    await beginImport(page)
     await expect(review).toBeVisible()
     const moved = join(folder, 'Moved Take.mov')
     renameSync(media, moved)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review.getByRole('alert')).toContainText('Original media changed or became unreadable')
-    expect(existsSync(destination)).toBe(false)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Cancel', exact: true }).click()
     renameSync(moved, media)
 
-    await importButton.click()
+    await beginImport(page)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
-    await expect(importButton).toHaveCount(0)
+    await expect(review).toHaveCount(0)
     await waitForHook(page, 'getSelectedLayerIds')
-    const imported = await rootSummary<ProjectSummary>(page)
+    const imported = await importedSummary(page)
     expect(imported).toMatchObject({ fps_num: 30000, fps_den: 1001, duration_us: 200200, layer_count: 4 })
     expect(imported.media).toHaveLength(1)
     expect(imported.links).toHaveLength(2)
@@ -102,7 +125,7 @@ test('imports FCPXML from startup as an editable project and refuses missing med
     }, { timeout: 30_000 }).toBe(true)
     expect(readFileSync(projectFile, 'utf8')).toContain('Glass edit')
     await invokeCmd(page, 'project_open', { path: destination })
-    expect(await rootSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
+    expect(await importedSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
   } finally { await app.close() }
 })
 
@@ -134,21 +157,24 @@ test('conforms 25 fps 640×360 camera footage into a 30 fps 320×240 edit with c
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Video clips using source-timestamp frame-rate conform: 1')
-    await expect(review).toContainText('Video clips scaled to fit the canvas: 1')
+    await expect(review).toContainText('Video clips with source-size or spatial-conform adjustments: 1')
     await expect(review).toContainText('Camera.mov')
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
-    const summary = await rootSummary<ProjectSummary>(page)
+    const summary = await importedSummary(page)
     expect(summary).toMatchObject({ fps_num: 30, fps_den: 1, duration_us: 100000, layer_count: 1 })
+    await invokeCmd(page, 'project_save')
     const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const clip = saved.compositions[saved.root_id].tracks.flatMap(
+    const clip = importedComposition(saved).tracks.flatMap(
       (t: { layers: unknown[] }) => t.layers,
     ).find((layer: any) => layer.params.kind === 'VideoClip')
     expect(clip.params.transform).toMatchObject({
@@ -204,11 +230,13 @@ test('selects one of multiple FCPXML project sequences and leaves the others uni
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const picker = page.getByRole('dialog', { name: 'Choose a timeline to import' })
     await expect(picker).toContainText('2 timelines')
     await picker.getByRole('combobox', { name: 'Source timeline' }).click()
@@ -218,9 +246,10 @@ test('selects one of multiple FCPXML project sequences and leaves the others uni
     await expect(review).toContainText('Final Export')
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
-    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(2)
+    await invokeCmd(page, 'project_save')
     const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    expect(saved.metadata.name).toBe('Final Export')
+    expect(importedComposition(saved).label).toBe('Final Export')
   } finally { await app.close() }
 })
 
@@ -252,17 +281,20 @@ test('fits non-square pixel aspect footage while preserving display geometry', a
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('SAR 8:9')
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
     const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const clip = saved.compositions[saved.root_id].tracks.flatMap(
+    const clip = importedComposition(saved).tracks.flatMap(
       (t: { layers: unknown[] }) => t.layers,
     ).find((layer: any) => layer.params.kind === 'VideoClip')
     expect(clip.params.transform).toMatchObject({
@@ -311,18 +343,21 @@ test('keeps FCPXML fill conform and static audio gain as editable layer settings
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Spatial conform: fill the canvas')
     await expect(review).toContainText('Static clip gain: -6dB')
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
     const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const clips = saved.compositions[saved.root_id].tracks.flatMap((t: { layers: unknown[] }) => t.layers)
+    const clips = importedComposition(saved).tracks.flatMap((t: { layers: unknown[] }) => t.layers)
     const video = clips.find((layer: any) => layer.params.kind === 'VideoClip')
     const audio = clips.find((layer: any) => layer.params.kind === 'Audio')
     expect(video.params.transform.scale_x.value).toBeCloseTo(2 / 3, 5)
@@ -361,18 +396,21 @@ test('renders FCPXML static position/scale and normal opacity without baking med
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Static position/scale/rotation')
     await expect(review).toContainText('Static opacity: 0.5')
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
     const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const clip = saved.compositions[saved.root_id].tracks.flatMap((t: { layers: unknown[] }) => t.layers)
+    const clip = importedComposition(saved).tracks.flatMap((t: { layers: unknown[] }) => t.layers)
       .find((layer: any) => layer.params.kind === 'VideoClip')
     expect(clip.params).toMatchObject({
       opacity: { mode: 'Static', value: 0.5 },
@@ -421,16 +459,18 @@ test('imports a Final Cut bundle with Info.fcpxml and reports its source', async
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, args) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [args.bundle] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: args.destination })
     }, { bundle, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Source: FCPXML bundle')
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
-    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(2)
     expect(existsSync(join(destination, 'project.json'))).toBe(true)
   } finally { await app.close() }
 })
@@ -463,6 +503,8 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
 </fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async (_window, options) => {
         const pickingDirectory = options.properties?.length === 1 &&
@@ -471,78 +513,21 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
       }
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, relocatedFolder, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
     await page.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Check media replacements')
     await expect(review).toContainText(lost)
     await expect(review).toContainText(actual)
-    expect(existsSync(destination)).toBe(false)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
-    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(2)
+    await invokeCmd(page, 'project_save')
     const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
     const record = Object.values(project.media_pool)[0] as { path_abs: string }
-    expect(record.path_abs).toBe(actual)
-  } finally { await app.close() }
-})
-
-test('File menu imports into a separate project without replacing an existing edit', async () => {
-  test.setTimeout(90_000)
-  const folder = tmpDir('weftcut-file-timeline-')
-  const source = join(folder, 'New Cut.fcpxml')
-  const media = join(folder, 'Source.mov')
-  const original = join(folder, 'Original')
-  const destination = join(folder, 'Imported Cut')
-  encodeSource(media)
-  writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE fcpxml>
-<fcpxml version="1.10">
-  <resources>
-    <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
-    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
-      audioSources="1" audioChannels="2" audioRate="48000">
-      <media-rep kind="original-media" src="${pathToFileURL(media).href}"/>
-    </asset>
-  </resources>
-  <project name="New Cut">
-    <sequence format="f" duration="3003/30000s">
-      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
-    </sequence>
-  </project>
-</fcpxml>`)
-
-  const { app, page } = await launchApp()
-  try {
-    await newProject(page, {
-      parentFolder: folder, name: 'Original',
-      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 },
-    })
-    await page.waitForSelector('.app-header')
-    const previous = JSON.parse(readFileSync(join(original, 'project.json'), 'utf8'))
-    await app.evaluate(({ dialog }, input) => {
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
-      dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
-    }, { source, destination })
-
-    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
-    await page.getByRole('menuitem', { name: 'Import timeline as new project…' }).click()
-    const review = page.getByRole('dialog', { name: 'Review timeline import' })
-    await expect(review).toContainText('New Cut')
-    expect(existsSync(destination)).toBe(false)
-    expect(await invokeCmd(page, 'project_open_state')).not.toBeNull()
-    await review.getByRole('button', { name: 'Import', exact: true }).click()
-    await expect(review).toHaveCount(0)
-    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
-    expect(existsSync(join(original, 'project.json'))).toBe(true)
-    const preserved = JSON.parse(readFileSync(join(original, 'project.json'), 'utf8'))
-    expect(preserved.project_id).toBe(previous.project_id)
-    expect(preserved.compositions[preserved.root_id].tracks.flatMap(
-      (track: { layers: unknown[] }) => track.layers,
-    )).toHaveLength(0)
-    expect(existsSync(join(destination, 'project.json'))).toBe(true)
-    expect((await rootSummary<ProjectSummary>(page)).media).toHaveLength(1)
+    expect(readFileSync(record.path_abs)).toEqual(readFileSync(actual))
   } finally { await app.close() }
 })
 
@@ -585,7 +570,7 @@ test('imports into the current project as one undoable Group without replacing i
     }, { source })
 
     await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
-    await page.getByRole('menuitem', { name: 'Import timeline into current project…' }).click()
+    await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Compare project settings')
     await expect(review.getByText(/1920 × 1080/)).toBeVisible()
@@ -594,7 +579,7 @@ test('imports into the current project as one undoable Group without replacing i
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
 
     await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
-    await page.getByRole('menuitem', { name: 'Import timeline into current project…' }).click()
+    await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
     await expect(review).toBeVisible()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
@@ -654,13 +639,10 @@ audioSources="1" audioChannels="2" audioRate="48000">
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: otherDestination })
     }, { path: xml, otherDestination })
     await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
-    await page.getByRole('menuitem', { name: 'Import timeline into current project…' }).click()
+    await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/These frame rates differ/)).toBeVisible()
     await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
-    await review.getByRole('button', { name: 'Use imported settings in new project…' }).click()
-    await expect(review.getByText('Compare project settings')).toHaveCount(0)
-    await expect(review).toContainText(otherDestination)
     await review.getByRole('button', { name: 'Cancel', exact: true }).click()
     expect(await invokeCmd(page, 'project_open_state')).toEqual(state)
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
@@ -699,17 +681,20 @@ test('discloses 96 kHz surround resampling and stereo downmix before import', as
 
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
     await app.evaluate(({ dialog }, input) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Audio clips requiring 48 kHz resampling: 1/)).toBeVisible()
     await expect(review.getByText(/Audio clips requiring stereo downmixing: 1/)).toBeVisible()
-    expect(existsSync(destination)).toBe(false)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
-    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(1)
+    await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(1)
+    await invokeCmd(page, 'project_save')
     const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
     const pool = Object.values(project.media_pool) as { metadata: { audio: { sample_rate: number; channels: number } } }[]
     expect(pool).toHaveLength(1)
@@ -764,24 +749,27 @@ test('reviews and imports connected FCPXML video and audio lanes in stacking ord
 
   const { app, page } = await launchApp()
   try {
+    await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, { source, destination }) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [source] })
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: destination })
     }, { source, destination })
-    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Lanes from bottom to top.*-1, 0, 1, 2/)).toBeVisible()
     await expect(review.getByText(/3 connected clips become independent clips/)).toBeVisible()
     await expect(review.getByText(/less than half a microsecond/)).toBeVisible()
-    expect(existsSync(destination)).toBe(false)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
     await waitForHook(page, 'getSelectedLayerIds')
-    const summary = await rootSummary<ProjectSummary>(page)
+    const summary = await importedSummary(page)
     expect(summary.layer_count).toBe(4)
     expect(summary.tracks.map((track) => track.layers[0]?.params.kind)).toEqual(['Audio', 'VideoClip', 'VideoClip', 'VideoClip'])
+    await invokeCmd(page, 'project_save')
     const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const layers = project.compositions[project.root_id].tracks.map((track: { layers: { label: string; t_start_us: number; t_end_us: number }[] }) => track.layers[0])
+    const layers = importedComposition(project).tracks.map((track: { layers: { label: string; t_start_us: number; t_end_us: number }[] }) => track.layers[0])
     expect(layers.map((layer: { label: string }) => layer.label)).toEqual(['Tone', 'Primary', 'Middle', 'Top'])
     expect(layers[3]).toMatchObject({ t_start_us: 33367, t_end_us: 100100 })
     await waitForHook(page, 'weftcutSampleComposite')

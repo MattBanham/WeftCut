@@ -7,28 +7,20 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 
 ## Timeline import
 
-Choose **Import timeline…** on the start screen or **File → Import
-timeline as new project…** (Mod+Shift+I) to create a new project from an
-FCPXML. If a project is already open, its edits are saved
-before the imported project replaces it in the window; the old project
-remains on disk and in Recent. The review shows canvas, duration, clips,
-media, and conversions before publishing. Keep source files accessible until
-they have been copied into the new project's media pool.
+Choose **File → Import FCPXML…** (Mod+Shift+I) in an open project to
+review and import a sequence as a separate editable Group. Confirmation adds
+one Group on a new track after the current timeline through the validated
+actor edit path. Existing clips and settings are unchanged; Undo removes the
+import in one step. Cancellation and failed validation leave the project
+unchanged. Media uses the normal import pipeline and workspace copies; keep
+original files accessible until copying finishes.
 
-**File → Import timeline into current project…** instead imports the edit
-as a new, editable Group on a separate track after the current timeline.
-The original project id, existing clips, composition settings, and media
-remain unchanged; Undo removes the import in one step. The imported Group
-retains its own canvas and all its internal lanes. If canvas dimensions
-differ, choose **Fit** (no crop), **Fill** (possible crop), or **Original
-size** (may crop); the parent Group is centred without rewriting the member
-transforms. An FPS mismatch is explicitly blocked, because this version
-cannot safely change or conform the existing project's frame lattice.
-The review offers to import as a new project instead. The audio path uses
-WeftCut's normal 48 kHz mono/stereo conforming and discloses resampling or
-surround downmixing. Missing media or a failed validation does not change
-the active project. Media copies are scheduled into the current workspace
-once the import commits.
+The imported composition retains its own canvas and internal tracks. For a
+canvas mismatch, choose **Fit**, **Fill** (may crop), or **Original size**
+(may crop) for the parent Group, without rewriting its member transforms.
+The destination project rate stays locked. A sequence-rate mismatch blocks
+confirmation with instructions to export at the destination rate. Source
+footage can have a different frame rate, as described below.
 
 FCPXML import accepts one selected sequence with a primary storyline of
 straight cuts, gaps and single-frame clip markers at a supported WeftCut frame
@@ -36,7 +28,7 @@ rate. Documents containing multiple projects across one or more Final Cut
 events display a picker naming each event and project. Only the selected
 project is parsed and imported; other projects remain untouched even if
 they contain unsupported edits. The sequence selection survives media
-relinking and switching between current-project and new-project workflows. A
+relinking. A
 sequence `<format>` can define explicit dimensions and frame duration, or
 omit fields supplied by a recognized progressive Apple `FFVideoFormat…`
 preset (explicit values override named values). Unknown names without
@@ -81,7 +73,9 @@ The importer supports UTF-8 `.fcpxml` documents from FCPXML 1.6–1.13
 and both asset URL forms. Modern Final Cut `.fcpxmld` bundles are read
 through a regular root `Info.fcpxml`; metadata-only `<import-options>`
 are accepted without affecting the edit. Symlinked bundle roots or
-Info files are rejected.
+Info files are rejected. XML is bounded to 16 MiB, 24 levels of nesting,
+50,000 elements, 64 attributes per element and 16,384 characters per attribute.
+External DTDs/entities, invalid UTF-8/Unicode and media URL traversal are refused.
 
 If a referenced source is missing, **Find original media in a folder…**
 looks in the chosen folder for exact filenames (not recursively). The
@@ -118,7 +112,7 @@ follow the imported clip when it moves. A trailing gap extends the duration.
 If an exact fractional source out rounds down to the probed end of the
 file, the review reports the sub-microsecond adjustment.
 
-An unsupported edit, missing media or occupied destination folder stops the
+An unsupported edit or missing media stops the
 import. Follow the reported element or asset to simplify the timeline or
 relink its source, then export it again.
 

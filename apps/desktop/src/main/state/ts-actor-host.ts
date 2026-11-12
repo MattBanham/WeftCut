@@ -41,7 +41,7 @@ import type { RecentsStore } from '../recents'
 import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
-import { listTimelineSequences, prepareTimelineProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
+import { listTimelineSequences, prepareTimelineProject } from './timeline-import/project'
 import type { TimelineImportPreview } from '../../shared/timelineImport'
 
 export interface TsActorHostDeps {
@@ -470,8 +470,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
   let timelineReview: {
     preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
     assertCurrent: () => void
-    mode: 'new' | 'current'
-    original: ReturnType<typeof actor.snapshot> | null
+    original: ReturnType<typeof actor.snapshot>
   } | null = null
   function discardTimelineReview() {
     timelineReviewId = null
@@ -909,11 +908,9 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       }
       case 'previewTimeline': {
         if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
-        const mode = args.mode === 'current' ? 'current' : 'new'
-        if (mode === 'current' && !opened) throw new Error('Open a project before importing into it')
-        const dir = mode === 'current' ? opened!.dir : timelineDestination(args.destination)
-        if (mode === 'new' && deps.fs.exists(dir)) throw new Error('That project folder already exists. Choose a new name or location')
-        const original = mode === 'current' ? actor.snapshot() : null
+        if (!opened) throw new Error('Open a project before importing FCPXML')
+        const dir = opened.dir
+        const original = actor.snapshot()
         const id = idGen()
         timelineReviewId = id
         timelineReview = null
@@ -922,15 +919,15 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           assertSession()
           if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
         }
-        const preparation = await prepareTimelineProject(args.path, dir, idGen, hybridDeps, assertCurrent, args.relinkDirectory, args.sequenceIndex)
+        const preparation = await prepareTimelineProject(args.path, dir, idGen, hybridDeps, assertCurrent, args.relinkDirectory, args.sequenceIndex, original)
         assertCurrent()
-        if (original !== null && actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
-        timelineReview = { preparation, assertCurrent, mode, original }
-        const current = original ? rootComposition(original) : null
-        return { id, mode, ...preparation.report, ...(current ? { current: {
+        if (actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
+        timelineReview = { preparation, assertCurrent, original }
+        const current = rootComposition(original)
+        return { id, ...preparation.report, current: {
           width: current.width, height: current.height, fps: current.fps,
           sampleRate: current.sample_rate, channels: current.channels,
-        } } : {}) } satisfies TimelineImportPreview
+        } } satisfies TimelineImportPreview
       }
       case 'discardTimelinePreview':
         if (args.id === timelineReviewId) discardTimelineReview()
@@ -941,9 +938,9 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         const review = timelineReview
         if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
         timelineReview = null
-        const { preparation: { project, report }, assertCurrent, mode, original } = review
+        const { preparation: { project }, assertCurrent, original } = review
         assertCurrent()
-        if (mode === 'current' && (original === null || actor.snapshot() !== original)) {
+        if (actor.snapshot() !== original) {
           throw new Error('The current project changed during review. Review the import again')
         }
         for (const item of Object.values(project.media_pool)) {
@@ -953,30 +950,26 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           if (hash !== item.file_hash_blake3)
             throw new Error('Original media changed or became unreadable after review. Review the timeline again')
         }
-        if (mode === 'current') {
-          const canvas = args.canvas === 'fill' || args.canvas === 'original' ? args.canvas : 'fit'
+        if (actor.snapshot() !== original) throw new Error('The current project changed during confirmation. Review the import again')
+        deps.exportJobs?.assertWritable()
+        {
+          if (args.canvas !== undefined && !['fit', 'fill', 'original'].includes(args.canvas as string)) {
+            throw new Error('Choose how the imported canvas should fit')
+          }
+          const canvas = args.canvas ?? 'fit'
           const result = actor.dispatch('import_timeline_group', {
-            imported: project, expectedProjectId: original!.project_id, canvas,
+            imported: project, expectedProjectId: original.project_id, canvas,
           })
           if (!result.ok) throw new Error(JSON.stringify(result.error))
-          for (const item of Object.values(project.media_pool)) {
+          const addedMedia = Object.values(project.media_pool).filter(item => !original.media_pool[item.id])
+          for (const item of addedMedia) {
             void deps.enqueueWorkspaceCopy(item.id, item.path_abs).catch(error =>
               console.warn('[timeline import] Workspace media copy failed', error))
           }
-          void Promise.resolve(deps.napi.enqueueJobsForMedia(JSON.stringify(Object.values(project.media_pool))))
+          void Promise.resolve(deps.napi.enqueueJobsForMedia(JSON.stringify(addedMedia)))
             .catch(error => console.warn('[timeline import] Derivative enqueue failed', error))
           return opened!.dir
         }
-        return replaceWorkspace(async () => {
-          for (const item of Object.values(project.media_pool)) {
-            const stamp = deps.poolFs.stat(item.path_abs)
-            if (!stamp || stamp.size !== item.file_size || stamp.mtimeSecs !== item.file_mtime)
-              throw new Error('Original media changed or became unreadable after review. Review the timeline again')
-          }
-          await publishTimelineProject(orchestratorDeps, report.destination, project)
-          opens(report.destination)
-          return report.destination
-        })
       }
       case 'save': return persistence.save()
       case 'close': return persistence.close()

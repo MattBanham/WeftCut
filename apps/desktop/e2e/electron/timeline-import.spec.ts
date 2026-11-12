@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
@@ -523,8 +524,7 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
     await page.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Check media replacements')
-    await expect(review).toContainText(lost)
-    await expect(review).toContainText(actual)
+    await expect(review.getByText(`${lost} → ${await realpath(actual)}`, { exact: true })).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)

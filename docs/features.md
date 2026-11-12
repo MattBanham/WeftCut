@@ -115,7 +115,8 @@ land on exact timeline frames. Linked audio edges land on the nearest 48 kHz
 sample, with the final edge kept inside the sequence duration. The review gives the audio boundary adjustments in microseconds and identifies
 single-frame markers converted to point markers. Imported markers follow their
 clips. Named gaps keep their span and lose their labels. The review lists source
-metadata and import options the edit does not carry over. A trailing gap extends the duration.
+metadata and import options the edit does not carry over, including asset UIDs
+and media signatures. A trailing gap extends the duration.
 If an exact fractional source out rounds down to the probed end of the
 file, the review reports the sub-microsecond adjustment.
 

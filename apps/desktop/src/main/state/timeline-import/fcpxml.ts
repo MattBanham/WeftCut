@@ -441,6 +441,9 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
     if (!asset) {
       asset = parseAsset(assetNode, lookup)
       assets.set(ref, asset)
+      if (assetNode.attrs.uid !== undefined) notice(assetNode, 'Source asset UID is not retained')
+      const mediaRep = assetNode.children.find(child => child.tag === 'media-rep')
+      if (mediaRep?.attrs.sig !== undefined) notice(mediaRep, 'Source media signature is not retained')
     }
     if (asset.stillImage && el.tag !== 'video')
       fail(el, 'Still-image assets must be placed with a <video> clip')

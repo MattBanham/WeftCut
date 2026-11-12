@@ -463,7 +463,11 @@ test('imports a Final Cut bundle with Info.fcpxml and reports its source', async
     await newProject(page, { parentFolder: dirname(destination), name: basename(destination),
       canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, args) => {
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [args.bundle] })
+      dialog.showOpenDialog = async (_window, options) => {
+        const expected = process.platform === 'darwin' ? ['openDirectory', 'treatPackageAsDirectory'] : ['openDirectory']
+        if (JSON.stringify(options.properties) !== JSON.stringify(expected)) throw new Error('Wrong picker for a bundle')
+        return { canceled: false, filePaths: [args.bundle] }
+      }
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: args.destination })
     }, { bundle, destination })
     await beginImport(page, "bundle")

@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { seededGen } from '../ids'
@@ -94,7 +94,7 @@ describe('untrusted documents and bundles on disk', () => {
     await expect(listTimelineSequences(path, deps)).rejects.toThrow(/UTF-8/)
   })
 
-  it.skipIf(process.platform === 'win32')('refuses bundle and Info.fcpxml symlink escapes', async () => {
+  it.skipIf(process.platform === 'win32')('refuses an Info.fcpxml symlink escape', async () => {
     const dir = await folder(), bundle = join(dir, 'Lantern.fcpxmld')
     const outside = join(dir, 'Outside.fcpxml')
     await writeFile(outside, fixture())
@@ -102,9 +102,20 @@ describe('untrusted documents and bundles on disk', () => {
     await symlink(outside, join(bundle, 'Info.fcpxml'))
     await expect(prepareTimelineProject(bundle, dir, seededGen(), deps, () => {}))
       .rejects.toThrow(/regular Info.fcpxml/)
+  })
+
+  it('refuses a bundle or relink directory that is a symlink or junction', async () => {
+    const dir = await folder(), bundle = join(dir, 'Original.fcpxmld')
+    const outside = join(bundle, 'Info.fcpxml')
+    await mkdir(bundle)
+    await writeFile(outside, fixture())
     const alias = join(dir, 'Alias.fcpxmld')
-    await symlink(bundle, alias)
-    await expect(listTimelineSequences(alias, deps)).rejects.toThrow(/accessible.*directory/)
+    await symlink(bundle, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    for (const selection of [alias, alias + sep]) {
+      await expect(listTimelineSequences(selection, deps)).rejects.toThrow(/accessible.*directory/)
+      await expect(prepareTimelineProject(outside, dir, seededGen(), deps, () => {}, selection))
+        .rejects.toThrow(/not a regular directory/)
+    }
   })
 
   it('refuses a bundle whose root Info document is missing', async () => {

@@ -37,7 +37,7 @@ export function useTimelineImportFlow() {
     try {
       const source = await openDialog({
         title: t("startup.import_timeline_title"),
-        ...(bundle ? { directory: true } : { filters: [{ name: "FCPXML", extensions: ["fcpxml"] }] }),
+        ...(bundle ? { directory: true, treatPackageAsDirectory: true } : { filters: [{ name: "FCPXML", extensions: ["fcpxml"] }] }),
       });
       if (typeof source !== "string") return;
       {

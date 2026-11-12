@@ -2356,13 +2356,15 @@ app.whenReady().then(async () => {
       title?: string
       multiple?: boolean
       directory?: boolean
+      treatPackageAsDirectory?: boolean
       filters?: { name: string; extensions: string[] }[]
       defaultPath?: string
     }
-    const properties: Array<'openFile' | 'openDirectory' | 'multiSelections'> = o.directory
+    const properties: NonNullable<import('electron').OpenDialogOptions['properties']> = o.directory
       ? ['openDirectory']
       : ['openFile']
     if (o.multiple) properties.push('multiSelections')
+    if (process.platform === 'darwin' && o.directory && o.treatPackageAsDirectory) properties.push('treatPackageAsDirectory')
     const res = await dialog.showOpenDialog(mainWindow!, {
       title: o.title,
       defaultPath: o.defaultPath,

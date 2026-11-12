@@ -588,6 +588,17 @@ describe('timeline import transaction', () => {
     expect(() => validate(project)).not.toThrow()
   })
 
+  it('refuses HDR detected in the original when the XML has no color declaration', async () => {
+    await writeFile(media, 'Fictional HDR video')
+    const run = setup()
+    const probe = JSON.parse(await run.probeMedia())
+    probe.metadata.video.color_transfer = 'smpte2084'
+    probe.metadata.video.color_primaries = 'bt2020'
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    await expect(run.prepareReview()).rejects.toThrow(/unsupported color transfer.*smpte2084.*bt2020/)
+    expect(run.actor.snapshot()).toBe(run.before)
+  })
+
   it('refuses mismatched video FPS or dimensions when the source format is declared', async () => {
     const file = join(parent, 'Camera.mov')
     await writeFile(file, 'Wrong camera video')

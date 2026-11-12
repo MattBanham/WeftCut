@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
 import { lstat, open, opendir, realpath } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
@@ -51,13 +51,13 @@ async function resolveTimelineInput(path: unknown): Promise<{ inputFile: string;
   if (typeof path !== 'string' || !['.fcpxml', '.fcpxmld'].includes(extension)) {
     throw new Error('Choose a local .fcpxml, .fcpxmld bundle')
   }
-  let inputFile = path
+  let inputFile = resolve(path)
   if (extension === '.fcpxmld') {
-    const bundle = await lstat(path).catch(() => null)
+    const bundle = await lstat(inputFile).catch(() => null)
     if (!bundle?.isDirectory() || bundle.isSymbolicLink()) {
       throw new Error('The FCPXML bundle must be an accessible .fcpxmld directory')
     }
-    inputFile = join(path, 'Info.fcpxml')
+    inputFile = join(inputFile, 'Info.fcpxml')
     const info = await lstat(inputFile).catch(() => null)
     if (!info?.isFile() || info.isSymbolicLink()) {
       throw new Error('The FCPXML bundle needs a regular Info.fcpxml file at its root')
@@ -117,11 +117,13 @@ export async function prepareTimelineProject(
     ...deps, actor, workspaceDir: () => destination,
     enqueueDerivatives: async () => {}, enqueueWorkspaceCopy: async () => {},
   })
+  let relinkRoot: string | undefined
   if (relinkDirectory !== undefined) {
     if (typeof relinkDirectory !== 'string' || !isAbsolute(relinkDirectory)) {
       throw new Error('Choose an absolute media folder for relinking')
     }
-    const directory = await lstat(relinkDirectory).catch(() => null)
+    relinkRoot = resolve(relinkDirectory)
+    const directory = await lstat(relinkRoot).catch(() => null)
     if (!directory?.isDirectory() || directory.isSymbolicLink()) {
       throw new Error('The selected media folder is missing or is not a regular directory')
     }
@@ -144,8 +146,8 @@ export async function prepareTimelineProject(
     }
     offline.push(asset)
   }
-  const candidates = typeof relinkDirectory === 'string' && offline.length
-    ? await findRelinkCandidates(relinkDirectory, new Set(offline.map(asset => asset.filename)))
+  const candidates = relinkRoot && offline.length
+    ? await findRelinkCandidates(relinkRoot, new Set(offline.map(asset => asset.filename)))
     : new Map<string, string>()
   const missing: string[] = []
   const substitutions = new Map<string, string>()
@@ -437,6 +439,13 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start:
 function validateSource(clip: TimelineClip, item: MediaItem): ExactTime {
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(`${clip.location}, source ${clip.asset.ref}: ${message}`) }
+  const transfer = video?.color_transfer
+  const primaries = video?.color_primaries
+  if ((transfer != null && transfer !== 'bt709' && transfer !== 'iec61966-2-1') ||
+      (primaries != null && primaries !== 'bt709')) {
+    fail('The original declares an unsupported color transfer or gamut (' + (transfer ?? 'unspecified transfer') +
+      ', ' + (primaries ?? 'unspecified primaries') + '). Convert it to SDR Rec. 709 before importing')
+  }
   if (clip.asset.stillImage) {
     // The normal image probe may report width/height in metadata.video even
     // though the media is an Image, not a moving VideoClip. Image kind is the

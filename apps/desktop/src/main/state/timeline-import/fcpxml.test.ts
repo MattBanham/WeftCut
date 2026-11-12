@@ -12,7 +12,7 @@ import { mediaItemTemplate } from '../mutations/media'
 import { PROJECT_FILE } from '../persistence'
 import { AUDIO_GRID, isCanonicalOnGrid } from '../snap'
 import { validate } from '../validate'
-import { parseFcpxml } from './fcpxml'
+import { listFcpxmlSequences, parseFcpxml } from './fcpxml'
 import { prepareTimelineProject, publishTimelineProject } from './project'
 
 const fixture = (url = 'file:///fictional/Harbor%20Lights.mov') => `<?xml version="1.0" encoding="UTF-8"?>
@@ -140,6 +140,74 @@ describe('FCPXML subset', () => {
       .toThrow(/Unsupported attribute/)
   })
 
+  it('lists multiple projects by index and imports only the requested sequence', () => {
+    const xml = fixture().replace('</project>', `</project>
+    <project name="Alternate Edit">
+      <sequence format="format" duration="1001/30000s">
+        <spine><asset-clip ref="take" start="108002002/30000s" duration="1001/30000s"/></spine>
+      </sequence>
+    </project>`)
+    const choices = listFcpxmlSequences(xml)
+    expect(choices).toMatchObject([
+      { index: 0, name: 'Harbor & Lights', event: null },
+      { index: 1, name: 'Alternate Edit', event: null },
+    ])
+    expect(() => parseFcpxml(xml)).toThrow(/Choose which one/)
+    expect(parseFcpxml(xml, 0).clips).toHaveLength(2)
+    const alternate = parseFcpxml(xml, 1)
+    expect(alternate).toMatchObject({ name: 'Alternate Edit', durationFrames: 1 })
+    expect(alternate.clips).toHaveLength(1)
+    expect(() => parseFcpxml(xml, 2)).toThrow(/not available/)
+    expect(() => parseFcpxml(xml, -1)).toThrow(/not available/)
+    expect(() => parseFcpxml(xml, 1.2)).toThrow(/not available/)
+  })
+
+  it('lists project sequences across multiple library events, retaining event provenance', () => {
+    const xml = fixture()
+      .replace('<project name=', '<library><event name="Scene One"><project name=')
+      .replace('</project>', `</project></event><event name="Scene Two">
+        <project name="Alternate Edit">
+          <sequence format="format" duration="1001/30000s">
+            <spine><asset-clip ref="take" start="108002002/30000s" duration="1001/30000s"/></spine>
+          </sequence>
+        </project></event></library>`)
+    expect(listFcpxmlSequences(xml)).toMatchObject([
+      { index: 0, name: 'Harbor & Lights', event: 'Scene One' },
+      { index: 1, name: 'Alternate Edit', event: 'Scene Two' },
+    ])
+    expect(parseFcpxml(xml, 1).clips).toHaveLength(1)
+  })
+
+  it.each([
+    ['transition', '<gap offset="3003/30000s" duration="1001/30000s"/>',
+      '<transition duration="1001/30000s"/>', /Unsupported inside <spine>/],
+    ['multicam clip', '<gap offset="3003/30000s" duration="1001/30000s"/>',
+      '<mc-clip ref="multicam" duration="1001/30000s"/>', /Unsupported inside <spine>/],
+    ['motion title', '<gap offset="3003/30000s" duration="1001/30000s"/>',
+      '<title ref="motion-template" duration="1001/30000s"/>', /Unsupported inside <spine>/],
+  ])('blocks an unsupported %s instead of silently dropping it', (_name, find, replace, issue) => {
+    expect(() => parseFcpxml(fixture().replace(find, replace))).toThrow(issue)
+  })
+
+  it('blocks source retiming, unsupported third-party effects and HDR with specific elements', () => {
+    const xml = fixture()
+    expect(() => parseFcpxml(xml.replace('<marker value="Signal seen"',
+      '<timeMap><timept time="0s" value="0s"/></timeMap><marker value="Signal seen"')))
+      .toThrow(/Unsupported inside <asset-clip>/)
+    expect(() => parseFcpxml(xml.replace('<marker value="Signal seen"',
+      '<filter-video ref="custom" name="Third-party plugin"/><marker value="Signal seen"')))
+      .toThrow(/Unsupported inside <asset-clip>/)
+    expect(() => parseFcpxml(xml.replace('width="320" height="240"',
+      'width="320" height="240" colorSpace="9-16-9"')))
+      .toThrow(/Only progressive Rec. 709 formats/)
+  })
+
+  it.each(['1.6', '1.7', '1.8', '1.9', '1.10', '1.11', '1.12', '1.13'])(
+    'parses a supported interchange subset at FCPXML version %s', version => {
+      expect(parseFcpxml(fixture().replace('version="1.10"', 'version="' + version + '"')).clips).toHaveLength(2)
+    },
+  )
+
   it('accepts legacy asset URLs and a single library/event/project wrapper', () => {
     const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href
     const xml = fixture(url).replace('version="1.10"', 'version="1.8"')
@@ -157,6 +225,59 @@ describe('FCPXML subset', () => {
     expect(parsed.clips.map((clip) => [clip.lane, clip.firstFrame, clip.endFrame])).toEqual([[0, 0, 3], [0, 4, 6], [2, 1, 3]])
     expect(() => parseFcpxml(xml.replace(child, child + child))).toThrow(/same connected lane/)
     expect(() => parseFcpxml(xml.replace('offset="108003003/30000s"', 'offset="0s"'))).toThrow(/before the timeline origin/)
+  })
+
+  it('parses static spatial conform and audio gain and rejects unsupported adjustments', () => {
+    const xml = fixture().replace(
+      'duration="3003/30000s">\n          <marker',
+      'duration="3003/30000s">\n          <adjust-conform type="fill"/>\n          <adjust-volume amount="-6dB"/>\n          <marker',
+    )
+    const parsed = parseFcpxml(xml)
+    expect(parsed.clips[0]).toMatchObject({ conform: 'fill', volumeDb: -6 })
+    expect(parsed.clips[1]).toMatchObject({ conform: 'fit', volumeDb: 0 })
+    expect(() => parseFcpxml(xml.replace('type="fill"', 'type="stretch"')))
+      .toThrow(/Spatial conform must be/)
+    expect(() => parseFcpxml(xml.replace('amount="-6dB"', 'amount="-120dB"')))
+      .toThrow(/between -30dB and/)
+    expect(() => parseFcpxml(xml.replace('<adjust-conform type="fill"/>',
+      '<adjust-conform type="fill"><param key="animated" value="1"/></adjust-conform>')))
+      .toThrow(/Unsupported inside <adjust-conform>/)
+    expect(() => parseFcpxml(xml.replace('<adjust-conform type="fill"/>',
+      '<adjust-conform type="fill"/><adjust-conform type="fit"/>')))
+      .toThrow(/Only one spatial conform/)
+  })
+
+  it('preserves static FCPXML transform and normal-mode opacity, rejecting animated or off-pivot variants', async () => {
+    const xml = fixture().replace('<marker value="Signal seen"',
+      '<adjust-transform position="10 10" scale="0.5 0.75" rotation="30"/>' +
+      '<adjust-blend amount="0.75" mode="0"/><marker value="Signal seen"')
+    expect(parseFcpxml(xml).clips[0]).toMatchObject({
+      opacity: 0.75,
+      staticTransform: { xPercent: 10, yPercent: 10, scaleX: 0.5, scaleY: 0.75, rotation: 30 },
+    })
+    expect(() => parseFcpxml(xml.replace('mode="0"', 'mode="17"')))
+      .toThrow(/Only normal blend mode/)
+    expect(() => parseFcpxml(xml.replace('rotation="30"', 'rotation="nan"')))
+      .toThrow(/Static transform must have/)
+    expect(() => parseFcpxml(xml.replace('rotation="30"', 'rotation="30" anchor="10 0"')))
+      .toThrow(/Nonzero anchor/)
+    expect(() => parseFcpxml(xml.replace('<adjust-blend amount="0.75" mode="0"/>',
+      '<adjust-blend amount="0.75" mode="0"><param name="opacity"/></adjust-blend>')))
+      .toThrow(/Unsupported inside <adjust-blend>/)
+
+  })
+
+  it('accepts non-square source pixels but rejects unsupported non-square sequence canvases', () => {
+    const source = mixedVideoFixture('file:///fictional/Camera.mov')
+      .replace('width="640" height="360"', 'width="640" height="360" paspH="8" paspV="9"')
+    expect(parseFcpxml(source).clips[0]!.asset.videoFormat).toMatchObject({
+      width: 640, height: 360, paspH: 8, paspV: 9,
+    })
+    expect(() => parseFcpxml(source.replace('width="320" height="240"',
+      'width="320" height="240" paspH="8" paspV="9"')))
+      .toThrow(/Non-square sequence pixel aspect ratios/)
+    expect(() => parseFcpxml(source.replace('paspH="8"', 'paspH="0"')))
+      .toThrow(/Pixel aspect ratio values/)
   })
 
   it('accepts independent source FPS/resolution and aligns trims to the source frame grid', () => {
@@ -297,6 +418,27 @@ describe('timeline import transaction', () => {
     await expect(setup().prepareReview()).rejects.toThrow(/regular Info.fcpxml/)
   })
 
+  it('publishes imported static transform and opacity as editable visual params', async () => {
+    const xml = fixture(pathToFileURL(media).href).replace('<marker value="Signal seen"',
+      '<adjust-transform position="10 10" scale="0.5 0.75" rotation="30"/>' +
+      '<adjust-blend amount="0.75" mode="0"/><marker value="Signal seen"')
+    await writeFile(media, 'Fictional video')
+    await writeFile(document, xml)
+    const project = await setup().prepare()
+    const video = rootComposition(project).tracks[0]!.layers.find(l => l.params.kind === 'VideoClip')!
+    expect(video.params).toMatchObject({
+      opacity: { mode: 'Static', value: 0.75 },
+      transform: {
+        position: { x: { mode: 'Static', value: 184 }, y: { mode: 'Static', value: 96 } },
+        scale_x: { mode: 'Static', value: 0.5 },
+        scale_y: { mode: 'Static', value: 0.75 },
+        rotation_deg: { mode: 'Static', value: -30 },
+        scale_linked: false,
+      },
+    })
+    expect(() => validate(project)).not.toThrow()
+  })
+
   it('publishes a validated editable project with exact trims, sample-aligned audio and clip markers', async () => {
     await writeFile(media, 'Fictional video')
     const run = setup()
@@ -409,6 +551,33 @@ describe('timeline import transaction', () => {
     await writeFile(document, xml.replace('start="1/25s"', 'start="1/30s"'))
     await expect(prepareTimelineProject(document, destination, undefined, seededGen(), deps, () => {}))
       .rejects.toThrow(/source in-point falls between frames/)
+  })
+
+  it('applies a non-square pixel-aspect correction before fitting to the canvas', async () => {
+    const file = join(parent, 'NonSquare.mov')
+    await writeFile(file, 'Fictional non-square source')
+    await writeFile(document, mixedVideoFixture(pathToFileURL(file).href)
+      .replace('width="640" height="360"', 'width="640" height="360" paspH="8" paspV="9"'))
+    const mediaId = '00000000-0000-0000-0000-0000000000bd'
+    const { project, report } = await prepareTimelineProject(document, destination, undefined, seededGen(), {
+      compute: {
+        probeMedia: async () => JSON.stringify({
+          ...mediaItemTemplate(mediaId, 'Video', 1_000_000, false),
+          path_abs: file, file_hash_blake3: 'a'.repeat(64),
+          metadata: { duration_us: 1_000_000,
+            video: { width: 640, height: 360, fps_num: 25, fps_den: 1 }, audio: null },
+        }),
+        hashMediaSource: async () => 'a'.repeat(64),
+      },
+      statPath: path => existsSync(path) && statSync(path).isFile() ? { kind: 'file', readable: true } : null,
+    }, () => {})
+    expect(report.videoConversions[0]).toMatchObject({ pixelAspect: { h: 8, v: 9 }, scaledToFit: true })
+    const layer = rootComposition(project).tracks[0]!.layers[0]!
+    expect(layer.params).toMatchObject({ kind: 'VideoClip', transform: {
+      scale_x: { mode: 'Static', value: 0.5 },
+      scale_y: { mode: 'Static', value: 0.5625 },
+    } })
+    expect(() => validate(project)).not.toThrow()
   })
 
   it('refuses mismatched video FPS or dimensions when the source format is declared', async () => {

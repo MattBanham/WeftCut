@@ -41,7 +41,7 @@ import type { RecentsStore } from '../recents'
 import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
-import { prepareTimelineProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
+import { listTimelineSequences, prepareTimelineProject, publishTimelineProject, timelineDestination } from './timeline-import/project'
 import type { TimelineImportPreview } from '../../shared/timelineImport'
 
 export interface TsActorHostDeps {
@@ -903,6 +903,10 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       case 'open': return persistence.open((args as { path: string }).path)
       case 'saveAs': return persistence.saveAs((args as { path: string }).path)
       case 'newWorkspace': return persistence.newWorkspace(args as never)
+      case 'listTimelineSequences': {
+        if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
+        return listTimelineSequences(args.path, hybridDeps)
+      }
       case 'previewTimeline': {
         if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
         const mode = args.mode === 'current' ? 'current' : 'new'
@@ -918,7 +922,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           assertSession()
           if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
         }
-        const preparation = await prepareTimelineProject(args.path, dir, args.edl, idGen, hybridDeps, assertCurrent, args.relinkDirectory)
+        const preparation = await prepareTimelineProject(args.path, dir, args.edl, idGen, hybridDeps, assertCurrent, args.relinkDirectory, args.sequenceIndex)
         assertCurrent()
         if (original !== null && actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
         timelineReview = { preparation, assertCurrent, mode, original }

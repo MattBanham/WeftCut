@@ -16,9 +16,9 @@ import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import type { OrchestratorDeps } from '../workspace-orchestrator'
 import { parseEdl } from './edl'
-import { parseFcpxml } from './fcpxml'
+import { listFcpxmlSequences, parseFcpxml, type FcpxmlSequenceChoice } from './fcpxml'
 import type { TimelineClip } from './timeline'
-import type { TimelineImportReport } from '../../../shared/timelineImport'
+import type { TimelineImportReport, TimelineCompatibilityItem } from '../../../shared/timelineImport'
 
 type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'>
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -53,10 +53,7 @@ async function readTimelineDocument(path: string, deps: MediaDeps): Promise<stri
   } finally { await file.close() }
 }
 
-export async function prepareTimelineProject(
-  path: unknown, destination: string, edlOptions: unknown, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
-  relinkDirectory?: unknown,
-): Promise<{ project: Project; report: TimelineImportReport }> {
+async function resolveTimelineInput(path: unknown): Promise<{ inputFile: string; extension: string }> {
   const extension = typeof path === 'string' && isAbsolute(path) ? extname(path).toLowerCase() : ''
   if (typeof path !== 'string' || !['.fcpxml', '.fcpxmld', '.edl'].includes(extension)) {
     throw new Error('Choose a local .fcpxml, .fcpxmld bundle, or .edl file')
@@ -73,8 +70,26 @@ export async function prepareTimelineProject(
       throw new Error('The FCPXML bundle needs a regular Info.fcpxml file at its root')
     }
   }
+  return { inputFile, extension }
+}
+
+export async function listTimelineSequences(path: unknown, deps: MediaDeps): Promise<FcpxmlSequenceChoice[]> {
+  const { inputFile, extension } = await resolveTimelineInput(path)
+  if (extension === '.edl') throw new Error('EDL has one edit; choose import with EDL options instead')
+  return listFcpxmlSequences(await readTimelineDocument(inputFile, deps))
+}
+
+export async function prepareTimelineProject(
+  path: unknown, destination: string, edlOptions: unknown, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
+  relinkDirectory?: unknown, sequenceIndex?: unknown,
+): Promise<{ project: Project; report: TimelineImportReport }> {
+  const { inputFile, extension } = await resolveTimelineInput(path)
+  if (sequenceIndex !== undefined &&
+      (!Number.isSafeInteger(sequenceIndex) || (sequenceIndex as number) < 0 || extension === '.edl')) {
+    throw new Error('Choose a valid FCPXML sequence index')
+  }
   const document = await readTimelineDocument(inputFile, deps)
-  const timeline = extension === '.edl' ? parseEdl(document, edlOptions) : parseFcpxml(document)
+  const timeline = extension === '.edl' ? parseEdl(document, edlOptions) : parseFcpxml(document, sequenceIndex as number | undefined)
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(destination))
   rootComposition(initial).fps = timeline.fps
@@ -180,38 +195,85 @@ export async function prepareTimelineProject(
   let rateConformedVideoClips = 0
   let resizedVideoClips = 0
   const videoConversions = new Map<string, TimelineImportReport['videoConversions'][number]>()
+  const compatibilityItems: TimelineCompatibilityItem[] = []
   for (const clip of timeline.clips) {
     const item = itemOf(clip)
+    const notes: string[] = []
+    let approximation = false
+    let converted = false
     const sourceOut = validateSource(target, clip, item, extension !== '.edl')
-    if (sourceOut !== clip.sourceOut) roundedEnds++
+    if (sourceOut !== clip.sourceOut) {
+      roundedEnds++
+      converted = true
+      notes.push('Source out-point rounded to the probed file endpoint')
+    }
     if (clip.asset.hasVideo && !clip.asset.stillImage && item.metadata.video) {
       const sourceVideo = item.metadata.video
       const rateConformed = sourceVideo.fps_num! * target.fps.den !== sourceVideo.fps_den! * target.fps.num
-      const scaledToFit = sourceVideo.width !== width || sourceVideo.height !== height
-      if (rateConformed) rateConformedVideoClips++
-      if (scaledToFit) resizedVideoClips++
-      if ((rateConformed || scaledToFit) && !videoConversions.has(item.path_abs)) {
-        videoConversions.set(item.path_abs, { source: item.path_abs,
+      const aspect = clip.asset.videoFormat
+      const nonSquarePixels = aspect !== undefined && aspect.paspH !== aspect.paspV
+      const scaledToFit = sourceVideo.width !== width || sourceVideo.height !== height || nonSquarePixels ||
+        (clip.conform !== undefined && clip.conform !== 'fit')
+      if (rateConformed) {
+        rateConformedVideoClips++
+        converted = true
+        notes.push('Source-timestamp FPS conform: output may repeat or skip source frames')
+        approximation = true
+      }
+      if (scaledToFit) {
+        resizedVideoClips++
+        converted = true
+        notes.push(clip.conform === 'fill' ? 'Spatial conform: fill the canvas (may crop)'
+          : clip.conform === 'none' ? 'Spatial conform: preserve source pixel dimensions (may crop)'
+            : nonSquarePixels
+              ? 'Source pixel aspect ' + aspect.paspH + ':' + aspect.paspV + ' is conformed and scaled to fit'
+              : 'Source resolution is scaled uniformly to fit the canvas')
+      }
+      const conversionKey = item.path_abs + '|' + (clip.conform ?? 'fit')
+      if ((rateConformed || scaledToFit) && !videoConversions.has(conversionKey)) {
+        videoConversions.set(conversionKey, { source: item.path_abs,
           sourceWidth: sourceVideo.width!, sourceHeight: sourceVideo.height!,
           sourceFps: { num: sourceVideo.fps_num!, den: sourceVideo.fps_den! },
+          pixelAspect: nonSquarePixels ? { h: aspect.paspH, v: aspect.paspV } : null,
+          spatialConform: clip.conform ?? 'fit',
           rateConformed, scaledToFit })
       }
     }
     if (clip.audioRole && item.metadata.audio) {
-      if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) resampledAudioClips++
-      if ((item.metadata.audio.channels ?? 0) > 2) downmixedAudioClips++
+      if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) {
+        resampledAudioClips++
+        converted = true
+        notes.push('Audio resampled to the 48 kHz editing mix')
+      }
+      if ((item.metadata.audio.channels ?? 0) > 2) {
+        downmixedAudioClips++
+        converted = true
+        notes.push('Discrete multichannel audio downmixed to stereo')
+        approximation = true
+      }
     }
+    if (clip.volumeDb) notes.push('Static clip gain: ' + clip.volumeDb + 'dB (editable)')
+    if (clip.staticTransform) notes.push('Static position/scale/rotation (editable)')
+    if (clip.opacity !== undefined && clip.opacity !== 1) {
+      notes.push('Static opacity: ' + clip.opacity + ' (editable)')
+    }
+    compatibilityItems.push({ location: clip.location,
+      label: clip.label || clip.asset.ref, lane: clip.lane,
+      status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
+      notes })
     const track = tracks.get(laneIds.get(clip.lane)!)!
     const video = clip.asset.hasVideo && !clip.asset.stillImage
       ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
-        fitVideoParams(item, target))
+        visualAdjustments(fitVideoParams(item, target, clip), clip, target))
       : null
     const image = clip.asset.stillImage
       ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
-        imageOverlayParams(item.id, { width, height }) as Extract<Layer['params'], { kind: 'ImageOverlay' }>)
+        visualAdjustments(imageOverlayParams(item.id, { width, height }) as Extract<Layer['params'], { kind: 'ImageOverlay' }>,
+          clip, target))
       : null
     const audio = clip.audioRole
-      ? newLayer(idGen, clip, sourceOut, sampleBoundary(clip.firstFrame), sampleBoundary(clip.endFrame), { ...audioParams(item.id, 0, 0), role: clip.audioRole })
+      ? newLayer(idGen, clip, sourceOut, sampleBoundary(clip.firstFrame), sampleBoundary(clip.endFrame),
+        { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
       : null
     if (video || image) { track.layers.push((video ?? image)!); videoClips++ }
     if (audio) { track.layers.push(audio); audioClips++ }
@@ -241,18 +303,57 @@ export async function prepareTimelineProject(
     normalizedTimecode: timeline.normalizedTimecode ?? false,
     dropFrameTimecode: timeline.dropFrameTimecode ?? false,
     namedFormatDefaults: timeline.namedFormatDefaults ?? false,
-    bundleSource: extension === '.fcpxmld', relinkedMedia,
+    bundleSource: extension === '.fcpxmld', relinkedMedia, compatibilityItems,
+    compatibilityCounts: {
+      exact: compatibilityItems.filter(i => i.status === 'exact').length,
+      converted: compatibilityItems.filter(i => i.status === 'converted').length,
+      approximated: compatibilityItems.filter(i => i.status === 'approximated').length,
+      unsupported: 0,
+    },
   } }
 }
 
-function fitVideoParams(item: MediaItem, target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>) {
+function fitVideoParams(item: MediaItem, target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>,
+  clip: TimelineClip) {
   const params = videoClipParams(item.id, 0, 0, target)
   const video = item.metadata.video
-  if (video?.width && video.height && (video.width !== target.width || video.height !== target.height)) {
-    const fit = Math.min(target.width / video.width, target.height / video.height)
-    params.transform.scale_x = { mode: 'Static', value: fit }
+  if (video?.width && video.height) {
+    const ratio = clip.asset.videoFormat
+      ? clip.asset.videoFormat.paspH / clip.asset.videoFormat.paspV : 1
+    const displayedWidth = video.width * ratio
+    const fit = clip.conform === 'none' ? 1
+      : clip.conform === 'fill'
+        ? Math.max(target.width / displayedWidth, target.height / video.height)
+        : Math.min(target.width / displayedWidth, target.height / video.height)
+    params.transform.scale_x = { mode: 'Static', value: fit * ratio }
     params.transform.scale_y = { mode: 'Static', value: fit }
+    params.transform.scale_linked = ratio === 1
   }
+  return params
+}
+
+function visualAdjustments<T extends Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }>>(
+  params: T, clip: TimelineClip, target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>,
+): T {
+  if (clip.staticTransform) {
+    const adj = clip.staticTransform
+    // FCPXML offsets are percentages of FRAME height, with Y increasing
+    // upward; WeftCut uses composition pixels with Y increasing downward.
+    params.transform.position.x = { mode: 'Static', value:
+      target.width / 2 + adj.xPercent * target.height / 100 }
+    params.transform.position.y = { mode: 'Static', value:
+      target.height / 2 - adj.yPercent * target.height / 100 }
+    if (params.transform.scale_x.mode !== 'Static' || params.transform.scale_y.mode !== 'Static') {
+      throw new Error('Imported clips require static source scale tracks')
+    }
+    params.transform.scale_x = { mode: 'Static', value: params.transform.scale_x.value * adj.scaleX }
+    params.transform.scale_y = { mode: 'Static', value: params.transform.scale_y.value * adj.scaleY }
+    // FCPXML positive rotation is counterclockwise; Pixi's angle is
+    // clockwise in screen coordinates.
+    params.transform.rotation_deg = { mode: 'Static', value: -adj.rotation }
+  }
+  params.transform.scale_linked = params.transform.scale_x.value === params.transform.scale_y.value
+  if (clip.opacity !== undefined) params.opacity = { mode: 'Static', value: clip.opacity }
   return params
 }
 

@@ -24,6 +24,8 @@ interface Format {
   width: number
   height: number
   frameDuration: ExactTime
+  paspH: number
+  paspV: number
   namedDefaults: boolean
 }
 
@@ -143,16 +145,24 @@ function predefinedFormat(name: string | undefined): Omit<Format, 'namedDefaults
     : rate === '2997' ? { num: 30_000, den: 1001 }
       : rate === '5994' ? { num: 60_000, den: 1001 }
         : { num: Number(rate), den: 1 }
-  return { width, height, frameDuration: exactTime(1_000_000 * fps.den, fps.num) }
+  return { width, height, frameDuration: exactTime(1_000_000 * fps.den, fps.num),
+    paspH: 1, paspV: 1 }
 }
 
-function parseFormat(el: Element): Format {
+function parseFormat(el: Element, sourceFormat = false): Format {
   check(el, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
   const a = el.attrs
   if ((a.colorSpace !== undefined && !/^1-1-1(?:\s|$)/.test(a.colorSpace)) ||
-      (a.fieldOrder !== undefined && a.fieldOrder !== 'progressive') ||
-      (a.paspH ?? '1') !== (a.paspV ?? '1')) {
-    fail(el, 'Use progressive Rec. 709 video with square pixels')
+      (a.fieldOrder !== undefined && a.fieldOrder !== 'progressive')) {
+    fail(el, 'Only progressive Rec. 709 formats are supported; HDR, alternate transfer functions and interlace require an explicit conversion pipeline')
+  }
+  const paspH = a.paspH === undefined ? 1 : integer(el, 'paspH')
+  const paspV = a.paspV === undefined ? 1 : integer(el, 'paspV')
+  if (paspH < 1 || paspV < 1 || paspH > 65_535 || paspV > 65_535) {
+    fail(el, 'Pixel aspect ratio values must be between 1 and 65535')
+  }
+  if (!sourceFormat && paspH !== paspV) {
+    fail(el, 'Non-square sequence pixel aspect ratios require a separate project-canvas conversion')
   }
   const preset = predefinedFormat(a.name)
   const namedDefaults = a.width === undefined || a.height === undefined || a.frameDuration === undefined
@@ -164,7 +174,7 @@ function parseFormat(el: Element): Format {
   if (canvasSizeError(width, height)) fail(el, 'The canvas must be an even-sized WeftCut canvas within the supported resolution range')
   const frameDuration = a.frameDuration === undefined ? preset!.frameDuration : time(el, 'frameDuration')
   if (frameDuration.num <= 0) fail(el, 'Video frameDuration must be positive')
-  return { width, height, frameDuration, namedDefaults }
+  return { width, height, frameDuration, paspH, paspV, namedDefaults }
 }
 
 function localPath(el: Element): string {
@@ -214,8 +224,9 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
       if (integer(formatNode, 'width') === 0 || integer(formatNode, 'height') === 0)
         fail(formatNode, 'Still-image dimensions must be positive')
     } else {
-      const source = parseFormat(formatNode)
-      videoFormat = { width: source.width, height: source.height, frameDuration: source.frameDuration }
+      const source = parseFormat(formatNode, true)
+      videoFormat = { width: source.width, height: source.height, frameDuration: source.frameDuration,
+        paspH: source.paspH, paspV: source.paspV }
     }
   }
   let path: string
@@ -233,35 +244,68 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
     hasVideo, hasAudio, stillImage, videoFormat, audioChannels, audioRate }
 }
 
-export function parseFcpxml(xml: string): ImportTimeline {
-  try { return parseDocument(readXml(xml)) }
-  catch (error) {
-    if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
-    throw error
-  }
+export interface FcpxmlSequenceChoice {
+  index: number
+  name: string
+  event: string | null
+  location: string
 }
 
-function parseDocument(root: Element): ImportTimeline {
+function collectProjects(root: Element): { project: Element; event: string | null }[] {
   check(root, ['version'], ['resources', 'import-options', 'project', 'library', 'event'])
-  if (!/^1\.(?:[6-9]|1[0-3])$/.test(required(root, 'version'))) fail(root, 'Use an FCPXML document version 1.6 through 1.13')
-  const resources = one(root, 'resources')
+  if (!/^1\.(?:[6-9]|1[0-3])$/.test(required(root, 'version'))) {
+    fail(root, 'Use an FCPXML document version 1.6 through 1.13')
+  }
+  one(root, 'resources')
   const importOptions = root.children.filter(child => child.tag === 'import-options')
   if (importOptions.length > 1) fail(root, 'More than one <import-options> element')
   for (const optionSet of importOptions) {
     check(optionSet, [], ['option'])
     for (const option of optionSet.children) check(option, ['key', 'value'])
   }
-  const story = root.children.filter((child) => child !== resources && child.tag !== 'import-options')
-  if (story.length !== 1) fail(root, 'Export exactly one project')
-  let project = story[0]!
-  if (project.tag === 'library') {
-    check(project, ['location'], ['event'])
-    project = one(project, 'event')
+  const projects: { project: Element; event: string | null }[] = []
+  function fromEvent(event: Element) {
+    check(event, ['name', 'uid'], ['project'])
+    for (const project of event.children) projects.push({ project, event: event.attrs.name ?? null })
   }
-  if (project.tag === 'event') {
-    check(project, ['name', 'uid'], ['project'])
-    project = one(project, 'project')
+  for (const entry of root.children) {
+    if (entry.tag === 'project') projects.push({ project: entry, event: null })
+    else if (entry.tag === 'event') fromEvent(entry)
+    else if (entry.tag === 'library') {
+      check(entry, ['location'], ['event'])
+      for (const event of entry.children) fromEvent(event)
+    }
   }
+  if (projects.length === 0) fail(root, 'No project with a sequence was found')
+  return projects
+}
+
+export function listFcpxmlSequences(xml: string): FcpxmlSequenceChoice[] {
+  return collectProjects(readXml(xml)).map(({ project, event }, index) => ({
+    index, name: project.attrs.name || `Untitled sequence ${index + 1}`,
+    event, location: location(project),
+  }))
+}
+
+export function parseFcpxml(xml: string, sequenceIndex?: number): ImportTimeline {
+  try { return parseDocument(readXml(xml), sequenceIndex) }
+  catch (error) {
+    if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
+    throw error
+  }
+}
+
+function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
+  const choices = collectProjects(root)
+  if (sequenceIndex === undefined && choices.length > 1) {
+    fail(root, `Found ${choices.length} project sequences. Choose which one to import`)
+  }
+  const index = sequenceIndex ?? 0
+  if (!Number.isSafeInteger(index) || index < 0 || index >= choices.length) {
+    fail(root, `Sequence index ${String(index)} is not available. Choose a listed sequence`)
+  }
+  const resources = one(root, 'resources')
+  const project = choices[index]!.project
   check(project, ['name', 'uid', 'modDate'], ['sequence'])
   const seq = one(project, 'sequence')
   check(seq, ['format', 'tcStart', 'tcFormat', 'duration', 'audioLayout', 'audioRate'], ['spine'])
@@ -307,7 +351,9 @@ function parseDocument(root: Element): ImportTimeline {
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
       : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat'],
-    parent ? ['marker'] : gap ? ['asset-clip', 'video'] : ['marker', 'asset-clip', 'video'])
+    parent ? ['marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend']
+      : gap ? ['asset-clip', 'video']
+        : ['marker', 'asset-clip', 'video', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend'])
     const lane = Number(a.lane ?? '0')
     if (parent) {
       if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
@@ -352,6 +398,84 @@ function parseDocument(root: Element): ImportTimeline {
     if (a.format !== undefined && a.format !== assetNode.attrs.format && a.format !== seq.attrs.format) {
       fail(el, 'Clip format differs from both the asset and sequence format')
     }
+    const conformance = el.children.filter(child => child.tag === 'adjust-conform')
+    if (conformance.length > 1) fail(el, 'Only one spatial conform operation is supported')
+    let conform: 'fit' | 'fill' | 'none' = 'fit'
+    if (conformance.length) {
+      const operation = conformance[0]!
+      check(operation, ['type'])
+      conform = (operation.attrs.type ?? 'fit') as typeof conform
+      if (!['fit', 'fill', 'none'].includes(conform)) fail(operation, 'Spatial conform must be fit, fill or none')
+      if (!asset.hasVideo || asset.stillImage) fail(operation, 'Spatial conform currently supports only moving video clips')
+    }
+    const volumeOps = el.children.filter(child => child.tag === 'adjust-volume')
+    if (volumeOps.length > 1) fail(el, 'Only one static volume operation is supported')
+    let volumeDb = 0
+    if (volumeOps.length) {
+      const operation = volumeOps[0]!
+      check(operation, ['amount'])
+      if (!asset.hasAudio) fail(operation, 'Volume adjustment requires source audio')
+      const raw = operation.attrs.amount ?? '0dB'
+      if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)dB$/.test(raw)) {
+        fail(operation, 'Only static dB volume adjustments are supported; keyframed, relative and infinite gain require an audio conversion')
+      }
+      volumeDb = Number(raw.slice(0, -2))
+      if (!Number.isFinite(volumeDb) || volumeDb < -30 || volumeDb > 20) {
+        fail(operation, 'Volume gain must be between -30dB and +20dB, within WeftCut editable range')
+      }
+    }
+    const transformOps = el.children.filter(child => child.tag === 'adjust-transform')
+    const blendOps = el.children.filter(child => child.tag === 'adjust-blend')
+    if (transformOps.length > 1 || blendOps.length > 1) {
+      fail(el, 'Only one static transform and one static blend operation per clip are supported')
+    }
+    if ((!asset.hasVideo || asset.stillImage && el.tag !== 'video') &&
+        (transformOps.length || blendOps.length)) {
+      fail(el, 'Visual adjustments require a video or image clip')
+    }
+    let staticTransform: TimelineClip['staticTransform']
+    if (transformOps.length) {
+      const operation = transformOps[0]!
+      check(operation, ['enabled', 'position', 'scale', 'rotation', 'anchor'])
+      if (operation.attrs.enabled !== undefined && !['0', '1'].includes(operation.attrs.enabled)) {
+        fail(operation, 'Invalid transform enabled flag')
+      }
+      function pair(value: string, attribute: string): [number, number] {
+        const match = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))$/.exec(value)
+        if (!match) fail(operation, 'Static transform ' + attribute + ' needs two finite numbers')
+        const x = Number(match[1]), y = Number(match[2])
+        if (![x, y].every(Number.isFinite)) fail(operation, 'Invalid static transform vector')
+        return [x, y]
+      }
+      const anchor = pair(operation.attrs.anchor ?? '0 0', 'anchor')
+      if (anchor[0] !== 0 || anchor[1] !== 0) {
+        fail(operation, 'Nonzero anchor offsets require a verified pivot conversion')
+      }
+      if (operation.attrs.enabled !== '0') {
+        const pos = pair(operation.attrs.position ?? '0 0', 'position')
+        const scale = pair(operation.attrs.scale ?? '1 1', 'scale')
+        const rotation = Number(operation.attrs.rotation ?? '0')
+        if (scale.some(n => n <= 0 || n > 10) || !Number.isFinite(rotation) ||
+            Math.abs(rotation) > 360 || pos.some(n => Math.abs(n) > 1000)) {
+          fail(operation, 'Static transform must have positive 0–10 scales, ±360° rotation and ±1000% positions')
+        }
+        staticTransform = { xPercent: pos[0], yPercent: pos[1],
+          scaleX: scale[0], scaleY: scale[1], rotation }
+      }
+    }
+    let opacity: number | undefined
+    if (blendOps.length) {
+      const operation = blendOps[0]!
+      check(operation, ['amount', 'mode'])
+      if (!['0', 'normal'].includes(operation.attrs.mode ?? '0')) {
+        fail(operation, 'Only normal blend mode can be imported without a verified compositor mapping')
+      }
+      const raw = operation.attrs.amount ?? '1'
+      if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(raw)) {
+        fail(operation, 'Static opacity must be between 0 and 1')
+      }
+      opacity = Number(raw)
+    }
     const audioRole = a.audioRole ?? 'dialogue'
     if (audioRole !== 'dialogue' && audioRole !== 'music' && audioRole !== 'effects')
       fail(el, 'Use the standard dialogue, music or effects audio role')
@@ -375,7 +499,8 @@ function parseDocument(root: Element): ImportTimeline {
         source: subtractTime(at, asset.start) }
     })
     const clip: TimelineClip = { label: a.name || assetNode.attrs.name, asset, lane, firstFrame, endFrame, sourceIn, sourceOut,
-      audioRole: !asset.hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole, markers, location: location(el) }
+      audioRole: !asset.hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole,
+      conform, volumeDb, opacity, staticTransform, markers, location: location(el) }
     if (parent) connected.push({ element: el, clip })
     else clips.push(clip)
   }

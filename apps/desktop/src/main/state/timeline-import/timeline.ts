@@ -7,7 +7,7 @@ export interface TimelineSource {
   hasVideo: boolean
   /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */
   stillImage?: boolean
-  videoFormat?: { width: number; height: number; frameDuration: ExactTime }
+  videoFormat?: { width: number; height: number; frameDuration: ExactTime; paspH: number; paspV: number }
   hasAudio?: boolean
   audioChannels?: number
   audioRate?: number
@@ -22,6 +22,10 @@ export interface TimelineClip {
   sourceIn: ExactTime
   sourceOut: ExactTime
   audioRole: AudioRole | null
+  conform?: 'fit' | 'fill' | 'none'
+  volumeDb?: number
+  opacity?: number
+  staticTransform?: { xPercent: number; yPercent: number; scaleX: number; scaleY: number; rotation: number }
   markers: { label: string; frame: number; source: ExactTime }[]
   location: string
 }

@@ -30,14 +30,21 @@ surround downmixing. Missing media or a failed validation does not change
 the active project. Media copies are scheduled into the current workspace
 once the import commits.
 
-FCPXML import accepts one sequence with a primary storyline of straight cuts,
-gaps and single-frame clip markers at a supported WeftCut frame rate. A
+FCPXML import accepts one selected sequence with a primary storyline of
+straight cuts, gaps and single-frame clip markers at a supported WeftCut frame
+rate. Documents containing multiple projects across one or more Final Cut
+events display a picker naming each event and project. Only the selected
+project is parsed and imported; other projects remain untouched even if
+they contain unsupported edits. The sequence selection survives media
+relinking and switching between current-project and new-project workflows. A
 sequence `<format>` can define explicit dimensions and frame duration, or
 omit fields supplied by a recognized progressive Apple `FFVideoFormat…`
 preset (explicit values override named values). Unknown names without
 all required fields are rejected instead of guessed. Progressive Rec. 709
-square-pixel video is required; non-square pixels, HDR and interlaced
-formats remain unsupported.
+square-pixel sequence canvases are required. Non-square source pixels
+are corrected using the source format pixel aspect before spatial conform.
+HDR, unverified alternate colour transfers, interlaced sources and
+non-square sequence canvases remain explicitly unsupported.
 
 Nonzero sequence `tcStart` is normalized to WeftCut's zero-based timeline
 when clip offsets are in the source timecode domain. FCPXML
@@ -54,9 +61,14 @@ resolution and frame rate from the destination sequence. The original
 source in/out times are preserved independently of the sequence frame grid;
 the decoder selects frames by source presentation timestamp, potentially
 repeating or skipping frames without altering playback speed. Sources with
-different dimensions are uniformly scaled to fit and centred, preserving
-aspect ratio without cropping. The review lists converted source files,
-original sizes/rates, and affected clip counts. If the FCPXML asset declares
+different dimensions can be fitted (letterbox), filled (crop), or
+retained at original source pixel size (potential crop), according to the
+source clip's spatial conform adjustment. The review lists converted
+source files, source sizes/rates, pixel-aspect corrections, and affected
+clip counts. The review also classifies each imported source clip as exact,
+converted, or approximated (for example frame repeats/skips or surround
+downmixing), with an element location and conversion details. Unsupported
+elements block import and are never silently omitted. If the FCPXML asset declares
 a video format, it must match the probed original. Otherwise the probed
 FPS determines whether the source in-point is aligned to an actual frame.
 Unknown or contradictory source metadata is refused, never silently
@@ -79,6 +91,18 @@ Ambiguous filename mappings and unreadable or symlinked files are
 refused; every replacement undergoes the normal source-format, duration
 and trim checks. Neither the interchange document nor original media
 is rewritten.
+
+A moving-video clip can carry static spatial conform (Fit/Fill/None).
+Video or still-image clips can carry static position, scale, rotation and
+normal blend opacity, retained as editable WeftCut properties. The position
+is converted from FCPXML's percentage-of-sequence-height coordinate system
+(Y up) to WeftCut canvas pixels (Y down); positive FCPXML rotation is
+counterclockwise and translated to WeftCut's rotation sign. Nonzero pivot
+anchors and keyframed transforms are rejected. Clips with audio support
+one static dB gain adjustment in WeftCut's -30dB to +20dB editing range.
+Multicam/compound/synchronized clips, transitions, Motion titles,
+third-party filters, source speed ramps, and non-normal blend effects
+require further conversion or rendering support and are rejected.
 
 A primary clip or gap can carry one level of connected asset clips or `<video>`
 still-image overlays. Positive lanes hold video/images and negative lanes hold

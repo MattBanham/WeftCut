@@ -3,7 +3,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, test } from '@playwright/test'
-import { invokeCmd, launchApp, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
+import { invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
 
 function encodeSource(media: string) {
   execFileSync('ffmpeg', [
@@ -103,6 +103,114 @@ test('imports FCPXML from startup as an editable project and refuses missing med
     expect(readFileSync(projectFile, 'utf8')).toContain('Glass edit')
     await invokeCmd(page, 'project_open', { path: destination })
     expect(await rootSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
+  } finally { await app.close() }
+})
+
+test('File menu imports into a separate project without replacing an existing edit', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-file-timeline-')
+  const source = join(folder, 'New Cut.fcpxml')
+  const media = join(folder, 'Source.mov')
+  const original = join(folder, 'Original')
+  const destination = join(folder, 'Imported Cut')
+  encodeSource(media)
+  writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+      audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="${pathToFileURL(media).href}"/>
+    </asset>
+  </resources>
+  <project name="New Cut">
+    <sequence format="f" duration="3003/30000s">
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
+    </sequence>
+  </project>
+</fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, {
+      parentFolder: folder, name: 'Original',
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 },
+    })
+    await page.waitForSelector('.app-header')
+    const previous = JSON.parse(readFileSync(join(original, 'project.json'), 'utf8'))
+    await app.evaluate(({ dialog }, input) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
+    }, { source, destination })
+
+    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+    await page.getByRole('menuitem', { name: 'Import timeline…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('New Cut')
+    expect(existsSync(destination)).toBe(false)
+    expect(await invokeCmd(page, 'project_open_state')).not.toBeNull()
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    expect(existsSync(join(original, 'project.json'))).toBe(true)
+    const preserved = JSON.parse(readFileSync(join(original, 'project.json'), 'utf8'))
+    expect(preserved.project_id).toBe(previous.project_id)
+    expect(preserved.compositions[preserved.root_id].tracks.flatMap(
+      (track: { layers: unknown[] }) => track.layers,
+    )).toHaveLength(0)
+    expect(existsSync(join(destination, 'project.json'))).toBe(true)
+    expect((await rootSummary<ProjectSummary>(page)).media).toHaveLength(1)
+  } finally { await app.close() }
+})
+
+test('discloses 96 kHz surround resampling and stereo downmix before import', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-surround-import-')
+  const source = join(folder, 'Surround Edit.fcpxml')
+  const audio = join(folder, 'Six Channel.wav')
+  const destination = join(folder, 'Imported Surround')
+  execFileSync('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+    '-i', 'sine=frequency=440:sample_rate=96000', '-t', '1',
+    '-ac', '6', '-c:a', 'pcm_s16le', audio,
+  ], { windowsHide: true })
+  writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="f" frameDuration="1/30s" width="320" height="240"/>
+    <asset id="tone" hasAudio="1" audioSources="1" audioChannels="6" audioRate="96000"
+      start="0s" duration="1s">
+      <media-rep kind="original-media" src="${pathToFileURL(audio).href}"/>
+    </asset>
+  </resources>
+  <project name="Surround Edit">
+    <sequence format="f" duration="1s" audioLayout="surround" audioRate="96k">
+      <spine><gap offset="0s" duration="1s">
+        <asset-clip ref="tone" lane="-1" offset="0s" start="0s" duration="1s"/>
+      </gap></spine>
+    </sequence>
+  </project>
+</fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await app.evaluate(({ dialog }, input) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
+    }, { source, destination })
+    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/Audio clips requiring 48 kHz resampling: 1/)).toBeVisible()
+    await expect(review.getByText(/Audio clips requiring stereo downmixing: 1/)).toBeVisible()
+    expect(existsSync(destination)).toBe(false)
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(1)
+    const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const pool = Object.values(project.media_pool) as { metadata: { audio: { sample_rate: number; channels: number } } }[]
+    expect(pool).toHaveLength(1)
+    expect(pool[0]?.metadata.audio).toMatchObject({ sample_rate: 96000, channels: 6 })
   } finally { await app.close() }
 })
 

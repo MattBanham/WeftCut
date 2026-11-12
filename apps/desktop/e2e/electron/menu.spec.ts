@@ -114,10 +114,14 @@ test.describe('macOS application menu', () => {
       })
       .toEqual([appMenuLabel])
 
-    // The startup screen has no project to save or export, and an action this
-    // surface cannot run is OMITTED rather than shown dead — so there is no
-    // File menu at all yet: App, Edit, View, Window.
-    expect(await menuBar(app)).toHaveLength(4)
+    // Import timeline can create a new project even before one is open.
+    // Save and Export remain unavailable until there is a project.
+    expect(await menuBar(app)).toHaveLength(5)
+    const fileLabel = (await menuBar(app))[1]!
+    await expect.poll(async () => (await menuSnapshot(app))!
+      .filter((i) => i.menu === fileLabel && i.type !== 'separator')
+      .map((i) => i.accelerator))
+      .toEqual(['CommandOrControl+Shift+I'])
 
     await app.close()
   })
@@ -149,6 +153,7 @@ test.describe('macOS application menu', () => {
       })
       .toEqual([
         'CommandOrControl+I', // Import media…
+        'CommandOrControl+Shift+I', // Import timeline…
         'CommandOrControl+S', // Save
         'CommandOrControl+Shift+S', // Save as…
         'CommandOrControl+W', // Save and Close — the app's action, not Close Window

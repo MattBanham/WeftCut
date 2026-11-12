@@ -20,6 +20,8 @@ export interface TimelineImportReport {
   lanes: number[]
   connectedClips: number
   roundedEnds: number
+  resampledAudioClips: number
+  downmixedAudioClips: number
 }
 
 export interface TimelineImportPreview extends TimelineImportReport {

@@ -115,6 +115,20 @@ function integer(el: Element, key: string): number {
   return number
 }
 
+function audioSampleRate(el: Element, key: string, zeroAllowed = false): number {
+  const raw = required(el, key)
+  // FCPXML sequence settings commonly use "44.1k" / "48k", whereas
+  // source asset metadata may use integer Hz. Both describe source metadata,
+  // not the 48 kHz lattice used internally by WeftCut's audio conformer.
+  const match = /^(\d+)(?:\.(\d+))?k$/.exec(raw)
+  const rate = match ? Number(raw.slice(0, -1)) * 1000 : Number(raw)
+  if (!Number.isSafeInteger(rate) || rate < 0 || (!zeroAllowed && rate === 0) || rate > 384_000 ||
+      (!match && !/^\d+$/.test(raw))) {
+    fail(el, `Invalid audio sample rate "${raw}"`)
+  }
+  return rate
+}
+
 function parseFormat(el: Element): Format {
   check(el, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
   const a = el.attrs
@@ -156,10 +170,10 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
   if (a.audioSources !== undefined && a.audioSources !== (hasAudio ? '1' : '0'))
     fail(el, 'Only one embedded audio stream per asset is supported')
   const audioChannels = a.audioChannels === undefined ? undefined : integer(el, 'audioChannels')
-  const audioRate = a.audioRate === undefined ? undefined : integer(el, 'audioRate')
-  if ((audioChannels !== undefined && (hasAudio ? ![1, 2].includes(audioChannels) : audioChannels !== 0)) ||
+  const audioRate = a.audioRate === undefined ? undefined : audioSampleRate(el, 'audioRate', !hasAudio)
+  if ((audioChannels !== undefined && (hasAudio ? (audioChannels < 1 || audioChannels > 8) : audioChannels !== 0)) ||
       (audioRate !== undefined && (hasAudio ? audioRate === 0 : audioRate !== 0))) {
-    fail(el, 'Use a video-only asset or a video with one mono or stereo audio stream')
+    fail(el, 'Use an asset with at most one audio stream and 1–8 channels')
   }
   const duration = time(el, 'duration')
   // Still-image assets in FCPXML describe zero source duration: the enclosing
@@ -225,10 +239,11 @@ function parseDocument(root: Element): ImportTimeline {
     fail(seq, 'Set the sequence to zero-start non-drop-frame timecode and export again')
   }
   const audioLayout = seq.attrs.audioLayout ?? 'stereo'
-  const audioRate = seq.attrs.audioRate ?? '48k'
-  if (!['mono', 'stereo'].includes(audioLayout) || audioRate !== '48k') {
-    fail(seq, `Only 48 kHz mono or stereo sequence audio is supported (found ${audioLayout}, ${audioRate})`)
-  }
+  if (!['mono', 'stereo', 'surround'].includes(audioLayout))
+    fail(seq, `Unsupported sequence audio layout "${audioLayout}"`)
+  // Sequence audio is presentation metadata; source media can use other sample
+  // rates and channel layouts, which the existing conform pipeline converts.
+  if (seq.attrs.audioRate !== undefined) audioSampleRate(seq, 'audioRate')
 
   const byId = new Map<string, Element>()
   for (const el of resources.children) {

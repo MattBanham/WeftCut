@@ -110,12 +110,32 @@ describe('FCPXML subset', () => {
     ])
     expect(parsed.clips[0]!.asset).toMatchObject({ hasAudio: true, audioChannels: 1, stillImage: false })
     expect(parsed.clips[1]!.asset).toMatchObject({ hasVideo: true, hasAudio: false, stillImage: true })
-    expect(() => parseFcpxml(xml.replace('audioLayout="mono"', 'audioLayout="surround"')))
-      .toThrow(/Only 48 kHz mono or stereo/)
-    expect(() => parseFcpxml(xml.replace('audioRate="48k"', 'audioRate="44.1k"')))
-      .toThrow(/Only 48 kHz mono or stereo/)
+    expect(parseFcpxml(xml.replace('audioLayout="mono"', 'audioLayout="surround"')).clips).toHaveLength(2)
+    expect(parseFcpxml(xml.replace('audioRate="48k"', 'audioRate="44.1k"')).clips).toHaveLength(2)
+    expect(() => parseFcpxml(xml.replace('audioLayout="mono"', 'audioLayout="unknown"')))
+      .toThrow(/Unsupported sequence audio layout/)
+    expect(() => parseFcpxml(xml.replace('audioRate="48k"', 'audioRate="unknown"')))
+      .toThrow(/Invalid audio sample rate/)
     expect(() => parseFcpxml(xml.replace('<video ref="mouth"', '<asset-clip ref="mouth"')))
       .toThrow(/Still-image assets must be placed with a <video>/)
+  })
+
+  it('does not invent audio for a video-only timeline, even with no sequence audio attributes', () => {
+    const xml = fixture().replace(
+      'hasAudio="1" audioSources="1" audioChannels="2"\n        audioRate="48000"',
+      'hasAudio="0" audioSources="0" audioChannels="0"\n        audioRate="0"',
+    )
+    const parsed = parseFcpxml(xml)
+    expect(parsed.clips).toHaveLength(2)
+    expect(parsed.clips.every((clip) => clip.audioRole === null && !clip.asset.hasAudio)).toBe(true)
+  })
+
+  it('accepts a supported surround source for explicit 48 kHz stereo downmixing', async () => {
+    const xml = fixture().replace('audioChannels="2"', 'audioChannels="6"')
+      .replace('audioRate="48000"', 'audioRate="96000"')
+      .replace('tcFormat="NDF"', 'tcFormat="NDF" audioLayout="surround" audioRate="96k"')
+    const parsed = parseFcpxml(xml)
+    expect(parsed.clips[0]!.asset).toMatchObject({ audioChannels: 6, audioRate: 96000 })
   })
 
   it.each([
@@ -154,7 +174,7 @@ describe('timeline import transaction', () => {
   })
   afterEach(async () => { await rm(parent, { recursive: true, force: true }) })
 
-  function setup(duration = 10_000_000) {
+  function setup(duration = 10_000_000, audio: { channels: number; sample_rate: number } | null = { channels: 2, sample_rate: 48000 }) {
     const idGen = seededGen()
     const before = blankProject(idGen, 'Existing Project')
     const actor = createActor({ idGen, initial: before })
@@ -166,7 +186,7 @@ describe('timeline import transaction', () => {
       ...mediaItemTemplate(id, 'Video', duration, true), path_abs: media, file_hash_blake3: `pending-${id}`,
       metadata: {
         duration_us: duration, video: { width: 320, height: 240, fps_num: 30000, fps_den: 1001 },
-        audio: { channels: 2, sample_rate: 48000 },
+        audio,
       },
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
@@ -237,6 +257,29 @@ describe('timeline import transaction', () => {
     await expect(run.prepare()).rejects.toThrow(/source read failed/)
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)
+  })
+
+  it('imports a video-only edit without inventing an audio track', async () => {
+    await writeFile(document, fixture(pathToFileURL(media).href)
+      .replace('hasAudio="1" audioSources="1" audioChannels="2"\n        audioRate="48000"',
+        'hasAudio="0" audioSources="0" audioChannels="0"\n        audioRate="0"'))
+    await writeFile(media, 'Fictional silent video')
+    const { prepareReview } = setup(10_000_000, null)
+    const { project, report } = await prepareReview()
+    expect(report).toMatchObject({ videoClips: 2, audioClips: 0, downmixedAudioClips: 0, resampledAudioClips: 0 })
+    expect(rootComposition(project).tracks.flatMap((track) => track.layers).every((layer) => layer.params.kind === 'VideoClip')).toBe(true)
+  })
+
+  it('warns before resampling 96 kHz and downmixing six-channel audio', async () => {
+    await writeFile(document, fixture(pathToFileURL(media).href)
+      .replace('audioChannels="2"', 'audioChannels="6"')
+      .replace('audioRate="48000"', 'audioRate="96000"')
+      .replace('tcFormat="NDF"', 'tcFormat="NDF" audioLayout="surround" audioRate="96k"'))
+    await writeFile(media, 'Fictional six-channel video')
+    const { prepareReview } = setup(10_000_000, { channels: 6, sample_rate: 96000 })
+    const { project, report } = await prepareReview()
+    expect(report).toMatchObject({ videoClips: 2, audioClips: 2, resampledAudioClips: 2, downmixedAudioClips: 2 })
+    expect(() => validate(project)).not.toThrow()
   })
 
   it('preserves a folder created during preparation', async () => {

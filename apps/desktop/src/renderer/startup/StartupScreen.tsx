@@ -1,4 +1,4 @@
-import { open as openDialog, save as saveDialog } from "@/bridge/dialog";
+import { open as openDialog } from "@/bridge/dialog";
 import { documentDir } from "@/bridge/path";
 import type { TFunction } from "i18next";
 import {
@@ -45,9 +45,6 @@ import {
 } from "lucide-react";
 import {
   keybindingsGet,
-  projectImportTimeline,
-  projectPreviewTimeline,
-  projectDiscardTimelinePreview,
   projectNewWorkspace,
   projectOpen,
   recentsLastNewProjectParent,
@@ -65,7 +62,6 @@ import {
   resolutionLabel,
 } from "./canvasPresets";
 import { LogoPulsePaths } from "./LogoPulsePaths";
-import type { EdlImportOptions, TimelineImportPreview } from "../../shared/timelineImport";
 import { validateProjectName } from "../../shared/newProject";
 import {
   cleanIpcDetail,
@@ -74,6 +70,7 @@ import {
   isDeadRecentError,
 } from "./openError";
 import { AppIcon } from "@/components/AppIcon";
+import { useTimelineImportFlow } from "./useTimelineImportFlow";
 
 interface Props {
   /// Called once the user has successfully picked or created a workspace.
@@ -88,10 +85,9 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
   const { t, i18n } = useTranslation();
   const [recents, setRecents] = useState<RecentEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const timelineImport = useTimelineImportFlow(onWorkspaceReady, setError);
   const [busy, setBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [edlImport, setEdlImport] = useState<{ source: string; destination: string } | null>(null);
-  const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [keybindings, setKeybindings] = useState<KeybindingsMap>({});
@@ -110,8 +106,8 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
   // `keybindings` is a Record<string, string[]> from main; the cast narrows it
   // to the catalogue's ids, exactly as App.tsx does.
   const settingsHandlers = useMemo<HandlerMap>(
-    () => ({ openSettings: () => setSettingsOpen(true) }),
-    [],
+    () => ({ openSettings: () => setSettingsOpen(true), importTimeline: () => void timelineImport.begin() }),
+    [timelineImport.begin],
   );
   const settingsOverrides = keybindings as OverrideMap;
   useShortcuts({ handlers: settingsHandlers, overrides: settingsOverrides });
@@ -196,26 +192,6 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
       (e) => describeOpenError(e, picked, t),
     );
   }, [t, runProtected, onWorkspaceReady]);
-
-  const importTimeline = useCallback(() => runProtected(async () => {
-    const source = await openDialog({
-      title: t("startup.import_timeline_title"),
-      filters: [{ name: "Timeline interchange", extensions: ["fcpxml", "edl"] }],
-    });
-    if (typeof source !== "string") return;
-    const name = source.split(/[\\/]/).pop()!.replace(/\.(fcpxml|edl)$/i, "");
-    const destination = await saveDialog({
-      title: t("startup.import_timeline_destination"),
-      defaultPath: t("startup.import_timeline_folder", { name }),
-    });
-    if (!destination) return;
-    if (/\.edl$/i.test(source)) {
-      setEdlImport({ source, destination });
-      return;
-    }
-    setTimelinePreview(await projectPreviewTimeline(source, destination));
-  }, (error) => t("startup.import_timeline_failed", { detail: cleanIpcDetail(error) })),
-  [t, runProtected]);
 
   const openRecent = useCallback(
     async (entry: RecentEntry) => {
@@ -339,8 +315,8 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
           <button
             type="button"
             className="startup-action"
-            onClick={importTimeline}
-            disabled={busy}
+            onClick={() => void timelineImport.begin()}
+            disabled={busy || timelineImport.busy}
           >
             <AppIcon icon={ListVideoIcon} size="display" strokeWidth={1.5} aria-hidden />
             <span className="startup-action-label">{t("startup.import_timeline")}</span>
@@ -431,29 +407,7 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
           }}
         />
       )}
-      {edlImport && (
-        <EdlImportForm
-          onCancel={() => setEdlImport(null)}
-          onImport={async (options) => {
-            const preview = await projectPreviewTimeline(edlImport.source, edlImport.destination, options);
-            setEdlImport(null);
-            setTimelinePreview(preview);
-          }}
-        />
-      )}
-      {timelinePreview && (
-        <TimelineImportReview
-          preview={timelinePreview}
-          onCancel={() => {
-            void projectDiscardTimelinePreview(timelinePreview.id).catch(() => {});
-            setTimelinePreview(null);
-          }}
-          onImport={async () => {
-            await projectImportTimeline(timelinePreview.id);
-            onWorkspaceReady();
-          }}
-        />
-      )}
+      {timelineImport.dialogs}
       {settingsOpen && (
         // No composition props: there is no open project here, so the
         // project-scoped "Project" category hides itself (see SettingsPanel).
@@ -499,126 +453,6 @@ function joinPath(parent: string, name: string): string {
   const sep = parent.includes("\\") ? "\\" : parent.includes("/") ? "/" : "\\";
   const trimmed = parent.replace(/[\\/]+$/, "");
   return `${trimmed}${sep}${name}`;
-}
-
-function TimelineImportReview({ preview, onImport, onCancel }: {
-  preview: TimelineImportPreview;
-  onImport: () => Promise<void>;
-  onCancel: () => void;
-}) {
-  const { t } = useTranslation();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit() {
-    setBusy(true);
-    try { await onImport(); }
-    catch (cause) {
-      setError(cleanIpcDetail(cause));
-      setBusy(false);
-    }
-  }
-
-  return (
-    <AppDialog title={t("startup.timeline_review")} onClose={busy ? undefined : onCancel} panelClassName="new-project-panel">
-      <p>{preview.name}</p>
-      <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>
-      <p>{t("startup.timeline_review_format", {
-        width: preview.width, height: preview.height, rate: fpsLabel(preview.fps, t), frames: preview.durationFrames,
-      })}</p>
-      <p>{t("startup.timeline_review_contents", {
-        video: preview.videoClips, audio: preview.audioClips, markers: preview.markers, media: preview.media,
-      })}</p>
-      {preview.connectedClips > 0 && (
-        <>
-          <p>{t("startup.timeline_review_lanes", { lanes: preview.lanes.join(", ") })}</p>
-          <p>{t("startup.timeline_review_connections", { count: preview.connectedClips })}</p>
-          {(preview.lanes.length > 2 || preview.lanes.some((lane) => lane < 0)) &&
-            <p>{t("startup.timeline_review_all_tracks")}</p>}
-        </>
-      )}
-      {preview.roundedEnds > 0 && <p>{t("startup.timeline_review_rounding")}</p>}
-      {error && <p className="new-project-error" role="alert">{error}</p>}
-      <footer className="new-project-actions">
-        <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
-        <Button size="lg" onClick={submit} disabled={busy || error !== null}>
-          {t(busy ? "startup.import_timeline_busy" : "startup.import_timeline_submit")}
-        </Button>
-      </footer>
-    </AppDialog>
-  );
-}
-
-function EdlImportForm({ onImport, onCancel }: {
-  onImport: (options: EdlImportOptions) => Promise<void>;
-  onCancel: () => void;
-}) {
-  const { t } = useTranslation();
-  const [fps, setFps] = useState("");
-  const [recordOrigin, setRecordOrigin] = useState("");
-  const [sourceOrigin, setSourceOrigin] = useState("");
-  const [mediaDirectory, setMediaDirectory] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const timecode = /^\d\d:[0-5]\d:[0-5]\d:\d\d$/;
-  const canImport = !busy && fps !== "" && mediaDirectory !== "" && timecode.test(recordOrigin) && timecode.test(sourceOrigin);
-
-  async function pickMedia() {
-    const dir = await openDialog({ title: t("startup.edl_media_folder"), directory: true });
-    if (typeof dir === "string") setMediaDirectory(dir);
-  }
-
-  async function submit() {
-    if (!canImport) return;
-    const [fpsNum, fpsDen] = fps.split("/").map(Number);
-    setBusy(true);
-    setError(null);
-    try { await onImport({ fpsNum: fpsNum!, fpsDen: fpsDen!, recordOrigin, sourceOrigin, mediaDirectory }); }
-    catch (cause) { setError(cleanIpcDetail(cause)); setBusy(false); }
-  }
-
-  return (
-    <AppDialog title={t("startup.edl_title")} onClose={busy ? undefined : onCancel} panelClassName="new-project-panel">
-      <p>{t("startup.edl_description")}</p>
-      <div className="new-project-row">
-        <span>{t("new_project.frame_rate")}</span>
-        <AppSelect
-          ariaLabel={t("new_project.frame_rate")}
-          value={fps}
-          onValueChange={setFps}
-          disabled={busy}
-          options={[
-            { value: "", label: t("startup.edl_choose_rate"), disabled: true },
-            ...FPS_OPTIONS.map((rate) => ({ value: rate.num + "/" + rate.den, label: fpsLabel(rate, t) })),
-          ]}
-        />
-      </div>
-      <label className="new-project-row">
-        <span>{t("startup.edl_record_origin")}</span>
-        <AppInput mono value={recordOrigin} onValueChange={setRecordOrigin} disabled={busy} placeholder="00:00:00:00" maxLength={11} />
-      </label>
-      <label className="new-project-row">
-        <span>{t("startup.edl_source_origin")}</span>
-        <AppInput mono value={sourceOrigin} onValueChange={setSourceOrigin} disabled={busy} placeholder="00:00:00:00" maxLength={11} />
-      </label>
-      <div className="new-project-row">
-        <span>{t("startup.edl_media_folder")}</span>
-        <div className="new-project-folder">
-          <span className="new-project-folder-path" title={mediaDirectory}>
-            {mediaDirectory || t("new_project.parent_folder_placeholder")}
-          </span>
-          <Button onClick={pickMedia} disabled={busy}>{t("new_project.choose_folder")}</Button>
-        </div>
-      </div>
-      {error && <p className="new-project-error" role="alert">{error}</p>}
-      <footer className="new-project-actions">
-        <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
-        <Button size="lg" onClick={submit} disabled={!canImport}>
-          {t(busy ? "startup.timeline_review_preparing" : "startup.timeline_review_continue")}
-        </Button>
-      </footer>
-    </AppDialog>
-  );
 }
 
 /// Exported for NewProjectForm.test.tsx (same arrangement as CanvasSection).

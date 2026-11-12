@@ -7,15 +7,23 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 
 ## Timeline import
 
-On the start screen, choose **Import timeline…**, select an FCPXML or CMX
-3600 EDL document, then name the new project folder. The review shows the
-canvas, duration, clip and media counts, and any changes to the source edit
-before the project is created. Keep the original files accessible until
-WeftCut finishes copying them into the project's media pool.
+Choose **Import timeline…** from the start screen or **File → Import
+timeline…** in the editor (Mod+Shift+I), select an FCPXML or CMX 3600 EDL
+document, then name a new project folder. Importing from an open project
+saves and switches to the new project; it never merges into or overwrites
+the current edit. The review shows the canvas, duration, clip and media
+counts, and any changes to the source edit before the project is created.
+Keep the original files accessible until WeftCut finishes copying them into
+the project's media pool.
 
 FCPXML import accepts one sequence with a primary storyline of straight cuts,
 gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline
-with 48 kHz mono or stereo audio and a WeftCut frame rate. Moving video must
+with a WeftCut frame rate. Video-only timelines are supported. FCPXML
+sequence audio may declare mono, stereo or surround at a valid sample rate;
+decodable source audio is conformed to 48 kHz and at most two channels for
+editing. The review warns how many audio clips require resampling and how
+many will lose discrete channels through stereo downmixing. Original media
+is preserved. Moving video must
 use a local original matching the sequence dimensions and frame rate. Mono or
 stereo audio can be standalone or linked to a video clip. FCPXML still-image
 assets (zero source duration) can be placed through connected `<video>` clips

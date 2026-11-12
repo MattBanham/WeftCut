@@ -128,10 +128,16 @@ export async function prepareTimelineProject(
   let videoClips = 0
   let audioClips = 0
   let roundedEnds = 0
+  let resampledAudioClips = 0
+  let downmixedAudioClips = 0
   for (const clip of timeline.clips) {
     const item = itemOf(clip)
     const sourceOut = validateSource(target, clip, item)
     if (sourceOut !== clip.sourceOut) roundedEnds++
+    if (clip.audioRole && item.metadata.audio) {
+      if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) resampledAudioClips++
+      if ((item.metadata.audio.channels ?? 0) > 2) downmixedAudioClips++
+    }
     const track = tracks.get(laneIds.get(clip.lane)!)!
     const video = clip.asset.hasVideo && !clip.asset.stillImage
       ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame), videoClipParams(item.id, 0, 0, target))
@@ -166,6 +172,7 @@ export async function prepareTimelineProject(
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
     videoClips, audioClips, markers: target.markers.length, media: Object.keys(snapshot.media_pool).length,
     lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
+    resampledAudioClips, downmixedAudioClips,
   } }
 }
 
@@ -198,7 +205,7 @@ function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'widt
     fail('The original must be an audio-only file. Relink the matching original and export again')
   }
   if ((clip.asset.hasAudio !== undefined && Boolean(audio) !== clip.asset.hasAudio) || (clip.audioRole && audio && (
-    !audio.channels || ![1, 2].includes(audio.channels) || !audio.sample_rate ||
+    !audio.channels || audio.channels > 8 || !audio.sample_rate ||
     (clip.asset.audioChannels !== undefined && clip.asset.audioChannels !== audio.channels) ||
     (clip.asset.audioRate !== undefined && clip.asset.audioRate !== audio.sample_rate)))) {
     fail('Embedded audio differs from the asset declaration. Relink the matching original and export again')

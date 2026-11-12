@@ -1,5 +1,5 @@
 import { parseManifestIsland } from '../../shared/motifs/catalog';
-import type { TimelineImportPreview, TimelineSequenceChoice } from '../../shared/timelineImport'
+import type { TimelineImportPreview, TimelineProjectDestination, TimelineSequenceChoice } from '../../shared/timelineImport'
 import type { TimingFields } from '../../shared/timeMapping'
 import type { CropRect } from '../../shared/crop';
 // Renderer-side IPC surface: typed `invoke` wrappers plus the wire shapes the
@@ -905,16 +905,20 @@ export function projectListTimelineSequences(path: string): Promise<TimelineSequ
   return invoke<TimelineSequenceChoice[]>("project_list_timeline_sequences", { path });
 }
 
-export function projectPreviewTimeline(path: string, relinkDirectory?: string, sequenceIndex?: number): Promise<TimelineImportPreview> {
-  return invoke<TimelineImportPreview>("project_preview_timeline", { path, relinkDirectory, sequenceIndex });
+export function projectPreviewTimeline(
+  path: string, relinkDirectory?: string, sequenceIndex?: number, newProject = false,
+): Promise<TimelineImportPreview> {
+  return invoke<TimelineImportPreview>("project_preview_timeline", { path, relinkDirectory, sequenceIndex, newProject });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {
   return invoke<null>("project_discard_timeline_preview", { id });
 }
 
-export function projectImportTimeline(id: string, canvas: 'fit' | 'fill' | 'original' = 'fit'): Promise<string> {
-  return invoke<string>("project_import_timeline", { id, canvas });
+export function projectImportTimeline(
+  id: string, canvas: 'fit' | 'fill' | 'original' = 'fit', destination?: TimelineProjectDestination,
+): Promise<string> {
+  return invoke<string>("project_import_timeline", { id, canvas, destination });
 }
 
 export async function projectOpen(path: string): Promise<void> {

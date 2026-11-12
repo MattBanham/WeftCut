@@ -379,6 +379,8 @@ const zhCN: Resources = {
     new_project: "新建项目",
     open_project: "打开项目…",
     import_timeline: "导入时间线…",
+    import_timeline_location: "选择项目位置…",
+    import_timeline_project: "从时间线创建项目",
     import_timeline_title: "选择 FCPXML 时间线",
     import_fcpxml_file: "选择 FCPXML 文件…",
     import_fcpxml_bundle: "选择 FCPXML 文件包…",

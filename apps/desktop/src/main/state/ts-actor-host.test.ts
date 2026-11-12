@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, copyFi
 import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import nodePath from 'node:path'
-import { mapChangeEvent, createTsActorHost } from './ts-actor-host'
+import { mapChangeEvent, createTsActorHost, type TsActorHostDeps } from './ts-actor-host'
 import { UserMotifStore } from '../motif/store'
 import { createAppSettingsStore } from '../app-settings'
 import { createViewStateStore } from '../view-state'
@@ -21,6 +21,8 @@ import { mediaItemTemplate } from './mutations/media'
 import { ExportJobs } from '../exportJobs'
 import { autosaveMaxWaitMs } from './autosave'
 import { rootComposition } from './model'
+import { serializeProjectToJson } from './persistence'
+import type { TimelineImportPreview } from '../../shared/timelineImport'
 import { errno } from './__tests__/fixtures/memAtomicIo'
 import { SAVE_STATUS_CHANNEL, SAVE_STATUS_EVENT, type SaveStatus } from '../../shared/save-status'
 
@@ -92,7 +94,7 @@ describe('createTsActorHost — persistence-route integration', () => {
       compute: { probeMedia: async () => '{}', hashMediaSource: async () => 'h', parseSubtitles: async () => '{}', synthesizeSpeechCompute: async () => '{}' },
       enqueueWorkspaceCopy: async () => {},
       readFile: (p: string) => memFs.readFile(p),
-      statPath: () => ({ kind: 'file' as const, readable: true }),
+      statPath: (() => ({ kind: 'file', readable: true })) as TsActorHostDeps['statPath'],
       workspaceDir: () => wsDir,
       appSettings: createAppSettingsStore({ fs: memFs, path: '/cfg/app_settings.json', dir: '/cfg' }),
       viewState: createViewStateStore({ fs: memFs, join: (...parts: string[]) => parts.join('/').replace(/\/+/g, '/') }),
@@ -109,6 +111,7 @@ describe('createTsActorHost — persistence-route integration', () => {
   function timelineFixture() {
     const fixture = makeInMemoryDeps()
     const folder = mkdtempSync(nodePath.join(tmpdir(), 'weftcut-review-'))
+    fixture.deps.statPath = (asked) => ({ kind: asked === folder ? 'directory' : 'file', readable: true })
     const path = nodePath.join(folder, 'Lantern.fcpxml')
     const source = nodePath.join(folder, 'Lantern.mov')
     writeFileSync(source, 'Fictional source bytes')
@@ -128,10 +131,57 @@ describe('createTsActorHost — persistence-route integration', () => {
     fixture.deps.enqueueWorkspaceCopy = copy
     const host = createTsActorHost(fixture.deps)
     const close = () => { host.stop(); rmSync(folder, { recursive: true, force: true }) }
-    return { ...fixture, host, path, source, copy, close }
+    return { ...fixture, host, folder, path, source, copy, close }
   }
 
   describe('FCPXML actor import', () => {
+    it('creates a workspace only after review, protects occupied folders, and persists an undoable import', async () => {
+      const f = timelineFixture()
+      try {
+        const before = f.host.actor.snapshot()
+        const preview = async () => await f.host.handleInvoke('project_preview_timeline',
+          { path: f.path, newProject: true }) as TimelineImportPreview
+        const cancel = await preview()
+        expect(cancel).toMatchObject({ current: null, destination: null, fps: { num: 30, den: 1 } })
+        await f.host.handleInvoke('project_discard_timeline_preview', { id: cancel.id })
+        expect(f.deps.workspaceDir()).toBeNull()
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.napiCalls).toEqual([])
+
+        const occupied = f.deps.join(f.folder, 'Occupied')
+        const sentinel = f.deps.join(occupied, 'project.json')
+        f.deps.fs.mkdirp(occupied)
+        f.vfs[sentinel] = 'The other project'
+        const ready = await preview()
+        const confirm = (id: string, name: string) => f.host.handleInvoke('project_import_timeline',
+          { id, destination: { parentFolder: f.folder, name } })
+        await expect(confirm(ready.id, 'Occupied')).rejects.toThrow(/ProjectFolderExists/)
+        expect(f.vfs[sentinel]).toBe('The other project')
+
+        f.deps.compute.hashMediaSource = async () => 'changed'
+        const target = f.deps.join(f.folder, 'Lantern Edit')
+        await expect(confirm(ready.id, 'Lantern Edit')).rejects.toThrow(/Original media changed/)
+        expect(f.deps.fs.exists(target)).toBe(false)
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.copy).not.toHaveBeenCalled()
+
+        f.deps.compute.hashMediaSource = async () => 'h'
+        const fresh = await preview()
+        expect(await confirm(fresh.id, 'Lantern Edit')).toBe(target)
+        const imported = f.host.actor.snapshot()
+        expect(imported.metadata.name).toBe('Lantern Edit')
+        expect(rootComposition(imported)).toMatchObject({ width: 320, height: 240, fps: { num: 30, den: 1 } })
+        expect(f.vfs[f.deps.join(target, 'project.json')]).toEqual(serializeProjectToJson(imported))
+        expect(f.copy).toHaveBeenCalledOnce()
+        expect(f.host.actor.dispatch('undo', {}).ok).toBe(true)
+        expect(f.host.actor.snapshot().project_id).toBe(imported.project_id)
+        expect(Object.keys(f.host.actor.snapshot().compositions)).toHaveLength(1)
+        expect(f.host.actor.snapshot().media_pool).toEqual({})
+        expect(f.host.actor.dispatch('redo', {}).ok).toBe(true)
+        expect(f.host.actor.snapshot()).toEqual(imported)
+      } finally { f.close() }
+    })
+
     it('reviews without writes, cancels without edits, and imports a reusable composition in one undo', async () => {
       const f = timelineFixture()
       try {

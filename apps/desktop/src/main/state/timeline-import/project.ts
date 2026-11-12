@@ -91,7 +91,7 @@ async function findRelinkCandidates(directory: string, wanted: ReadonlySet<strin
 }
 
 export async function prepareTimelineProject(
-  path: unknown, destination: string, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
+  path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
   relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project,
 ): Promise<{ project: Project; report: TimelineImportReport }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
@@ -102,7 +102,7 @@ export async function prepareTimelineProject(
   const document = await readTimelineDocument(inputFile, deps)
   const timeline = parseFcpxml(document, sequenceIndex as number | undefined)
   assertCurrent()
-  const initial = blankProject(idGen, timeline.name?.trim() || basename(destination))
+  const initial = blankProject(idGen, timeline.name?.trim() || basename(inputFile, extname(inputFile)))
   rootComposition(initial).fps = timeline.fps
   if (existing) {
     initial.media_pool = existing.media_pool

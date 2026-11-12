@@ -9,7 +9,7 @@ export interface TimelineCompatibilityItem {
 
 export interface TimelineImportReport {
   name: string
-  destination: string
+  destination: string | null
   width: number
   height: number
   fps: { num: number; den: number }
@@ -46,7 +46,12 @@ export interface TimelineImportReport {
 
 export interface TimelineImportPreview extends TimelineImportReport {
   id: string
-  current: { width: number; height: number; fps: { num: number; den: number }; sampleRate: number; channels: number }
+  current: { width: number; height: number; fps: { num: number; den: number }; sampleRate: number; channels: number } | null
+}
+
+export interface TimelineProjectDestination {
+  parentFolder: string
+  name: string
 }
 
 export interface TimelineSequenceChoice {

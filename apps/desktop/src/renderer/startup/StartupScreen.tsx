@@ -36,6 +36,7 @@ import {
   ChevronDownIcon,
   BugIcon,
   ChevronUpIcon,
+  FileInputIcon,
   FolderOpenIcon,
   GlobeIcon,
   PlusIcon,
@@ -44,6 +45,8 @@ import {
 } from "lucide-react";
 import {
   keybindingsGet,
+  projectDiscardTimelinePreview,
+  projectImportTimeline,
   projectNewWorkspace,
   projectOpen,
   recentsLastNewProjectParent,
@@ -69,6 +72,8 @@ import {
   isDeadRecentError,
 } from "./openError";
 import { AppIcon } from "@/components/AppIcon";
+import { useTimelineImportFlow } from "./useTimelineImportFlow";
+import type { TimelineImportPreview } from "../../shared/timelineImport";
 
 interface Props {
   /// Called once the user has successfully picked or created a workspace.
@@ -85,6 +90,8 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [timelineToCreate, setTimelineToCreate] = useState<TimelineImportPreview | null>(null);
+  const timelineImport = useTimelineImportFlow(setTimelineToCreate);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [keybindings, setKeybindings] = useState<KeybindingsMap>({});
@@ -295,7 +302,7 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
             type="button"
             className="startup-action primary"
             onClick={() => setNewProjectOpen(true)}
-            disabled={busy}
+            disabled={busy || timelineImport.busy}
           >
             <AppIcon icon={PlusIcon} size="display" strokeWidth={1.5} aria-hidden />
             <span className="startup-action-label">{t("startup.new_project")}</span>
@@ -304,10 +311,19 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
             type="button"
             className="startup-action"
             onClick={openWorkspaceFolder}
-            disabled={busy}
+            disabled={busy || timelineImport.busy}
           >
             <AppIcon icon={FolderOpenIcon} size="display" strokeWidth={1.5} aria-hidden />
             <span className="startup-action-label">{t("startup.open_project")}</span>
+          </button>
+          <button
+            type="button"
+            className="startup-action"
+            onClick={timelineImport.begin}
+            disabled={busy || timelineImport.busy}
+          >
+            <AppIcon icon={FileInputIcon} size="display" strokeWidth={1.5} aria-hidden />
+            <span className="startup-action-label">{t("startup.import_timeline")}</span>
           </button>
         </div>
 
@@ -386,6 +402,17 @@ export function StartupScreen({ onWorkspaceReady }: Props) {
         </section>
       </div>
 
+      {timelineImport.dialogs}
+      {timelineToCreate && (
+        <NewProjectForm
+          timeline={timelineToCreate}
+          onCancel={() => {
+            void projectDiscardTimelinePreview(timelineToCreate.id).catch(() => {});
+            setTimelineToCreate(null);
+          }}
+          onCreated={onWorkspaceReady}
+        />
+      )}
       {newProjectOpen && (
         <NewProjectForm
           onCancel={() => setNewProjectOpen(false)}
@@ -446,12 +473,14 @@ function joinPath(parent: string, name: string): string {
 export function NewProjectForm({
   onCancel,
   onCreated,
+  timeline,
 }: {
   onCancel: () => void;
   onCreated: () => void;
+  timeline?: TimelineImportPreview;
 }) {
   const { t } = useTranslation();
-  const [name, setName] = useState("");
+  const [name, setName] = useState(timeline?.name ?? "");
   const [parentFolder, setParentFolder] = useState<string>("");
   /// Size and rate are authored separately, exactly as Settings › Canvas does it:
   /// they are independent decisions (a 4K project is not automatically a 60 fps
@@ -528,16 +557,20 @@ export function NewProjectForm({
     setBusy(true);
     setSubmitError(null);
     try {
-      await projectNewWorkspace({
-        parentFolder,
-        name: name.trim(),
-        canvas: {
-          width: size.width,
-          height: size.height,
-          fpsNum: fps.num,
-          fpsDen: fps.den,
-        },
-      });
+      if (timeline) {
+        await projectImportTimeline(timeline.id, "fit", { parentFolder, name: name.trim() });
+      } else {
+        await projectNewWorkspace({
+          parentFolder,
+          name: name.trim(),
+          canvas: {
+            width: size.width,
+            height: size.height,
+            fpsNum: fps.num,
+            fpsDen: fps.den,
+          },
+        });
+      }
       onCreated();
     } catch (e) {
       // The refusal carries no path — main composed the same target this dialog
@@ -545,11 +578,11 @@ export function NewProjectForm({
       setSubmitError(describeCreateError(e, previewPath ?? "", t));
       setBusy(false);
     }
-  }, [canCreate, parentFolder, name, size, fps, previewPath, t, onCreated]);
+  }, [canCreate, parentFolder, name, size, fps, previewPath, t, onCreated, timeline]);
 
   return (
     <AppDialog
-      title={t("new_project.title")}
+      title={t(timeline ? "startup.import_timeline_project" : "new_project.title")}
       onClose={busy ? undefined : onCancel}
       showClose={false}
       panelClassName="new-project-panel"
@@ -600,6 +633,12 @@ export function NewProjectForm({
           </p>
         )}
 
+        {timeline ? (
+          <p>{t("startup.timeline_review_format", {
+            width: timeline.width, height: timeline.height,
+            rate: fpsLabel(timeline.fps, t), frames: timeline.durationFrames,
+          })}</p>
+        ) : <>
         <div className="new-project-row">
           <span>{t("new_project.resolution")}</span>
           <AppSelect
@@ -678,8 +717,10 @@ export function NewProjectForm({
           />
         </div>
 
+        </>}
+
         {submitError && (
-          <p className="new-project-error">{submitError}</p>
+          <p className="new-project-error" role="alert">{submitError}</p>
         )}
 
         <footer className="new-project-actions">

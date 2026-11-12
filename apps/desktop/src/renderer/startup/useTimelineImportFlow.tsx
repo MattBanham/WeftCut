@@ -14,8 +14,9 @@ import type { TimelineImportPreview, TimelineSequenceChoice } from "../../shared
 import { fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 
-export function useTimelineImportFlow() {
+export function useTimelineImportFlow(onNewProject?: (preview: TimelineImportPreview) => void) {
   const { t } = useTranslation();
+  const newProject = onNewProject !== undefined;
   const [busy, setBusy] = useState(false);
   const [sourcePicker, setSourcePicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +51,7 @@ export function useTimelineImportFlow() {
       const sequenceIndex = 0;
 
       {
-        try { setTimelinePreview(await projectPreviewTimeline(source, undefined, sequenceIndex)); }
+        try { setTimelinePreview(await projectPreviewTimeline(source, undefined, sequenceIndex, newProject)); }
         catch (cause) {
           if (cleanIpcDetail(cause).includes("Missing or unreadable original media")) {
             setRelinkRequest({ source, sequenceIndex });
@@ -64,7 +65,7 @@ export function useTimelineImportFlow() {
     } finally {
       setBusy(false);
     }
-  }, [busy, t]);
+  }, [busy, t, newProject]);
 
   const relink = useCallback(async () => {
     if (!relinkRequest || busy) return;
@@ -75,7 +76,7 @@ export function useTimelineImportFlow() {
 
     try {
       const preview = await projectPreviewTimeline(
-        relinkRequest.source, folder, relinkRequest.sequenceIndex,
+        relinkRequest.source, folder, relinkRequest.sequenceIndex, newProject,
       );
 
       setTimelinePreview(preview);
@@ -84,7 +85,7 @@ export function useTimelineImportFlow() {
       const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
       setError(message);
     } finally { setBusy(false); }
-  }, [relinkRequest, busy, t]);
+  }, [relinkRequest, busy, t, newProject]);
 
   const chooseSequence = useCallback(async (index: number) => {
     if (!sequenceImport || busy) return;
@@ -96,7 +97,7 @@ export function useTimelineImportFlow() {
     try {
 
       try {
-        const preview = await projectPreviewTimeline(source, undefined, index);
+        const preview = await projectPreviewTimeline(source, undefined, index, newProject);
         setTimelinePreview(preview);
       } catch (cause) {
         if (cleanIpcDetail(cause).includes("Missing or unreadable original media")) {
@@ -108,7 +109,7 @@ export function useTimelineImportFlow() {
       const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
       setError(message);
     } finally { setBusy(false); }
-  }, [sequenceImport, busy, t]);
+  }, [sequenceImport, busy, t, newProject]);
 
   const dialogs = (
     <>
@@ -145,7 +146,8 @@ export function useTimelineImportFlow() {
             setTimelinePreview(null);
           }}
           onImport={async (canvas) => {
-            await projectImportTimeline(timelinePreview.id, canvas);
+            if (onNewProject) onNewProject(timelinePreview);
+            else await projectImportTimeline(timelinePreview.id, canvas);
             setTimelinePreview(null);
           }}
         />
@@ -213,7 +215,7 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
   return (
     <AppDialog title={t("startup.timeline_review")} onClose={busy ? undefined : onCancel} panelClassName="new-project-panel">
       <p>{preview.name}</p>
-      <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>
+      {preview.destination && <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>}
       <p>{t("startup.timeline_review_format", {
         width: preview.width, height: preview.height, rate: fpsLabel(preview.fps, t), frames: preview.durationFrames,
       })}</p>
@@ -311,7 +313,7 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
       <footer className="new-project-actions">
         <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
         <Button size="lg" onClick={submit} disabled={busy || error !== null || fpsMismatch}>
-          {t(busy ? "startup.import_timeline_busy" : "startup.import_timeline_submit")}
+          {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
         </Button>
       </footer>
     </AppDialog>

@@ -28,7 +28,10 @@ describe('bounded untrusted FCPXML parsing', () => {
     ['huge time', () => fixture().replace('duration="1s"', 'duration="9999999999999999s"'), /out-of-range/],
     ['missing resource', () => fixture().replace('ref="a"', 'ref="missing"'), /Resource "missing"/],
     ['duplicate resource', () => fixture().replace('id="a"', 'id="f"'), /Duplicate resource/],
-    ['cyclic structure', () => fixture().replace('<asset-clip ref="a"', '<ref-clip ref="a"'), /Unsupported/],
+    ['cyclic structure', () => fixture()
+      .replace('</resources>', '<media id="cycle"><sequence format="f" duration="1s">' +
+        '<spine><ref-clip ref="cycle" duration="1s"/></spine></sequence></media></resources>')
+      .replace('<asset-clip ref="a"', '<ref-clip ref="cycle"'), /<ref-clip>.*Unsupported/],
     ['relative path', () => fixture().replace(/src="[^"]+"/, 'src="../Lantern.mov"'), /absolute local file/],
     ['encoded traversal', () => fixture().replace(/src="[^"]+"/, 'src="file:///home/u/%2e%2e/Lantern.mov"'), /absolute local file/],
     ['traversal', () => fixture().replace(/src="[^"]+"/, 'src="file:///home/u/../Lantern.mov"'), /absolute local file/],

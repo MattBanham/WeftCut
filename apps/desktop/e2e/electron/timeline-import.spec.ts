@@ -496,9 +496,9 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
 <fcpxml version="1.10">
   <resources>
     <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
-    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+    <asset id="a" uid="fictional-asset" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
       audioSources="1" audioChannels="2" audioRate="48000">
-      <media-rep kind="original-media" src="${pathToFileURL(lost).href}"/>
+      <media-rep kind="original-media" sig="fictional-signature" src="${pathToFileURL(lost).href}"/>
     </asset>
   </resources>
   <project name="Offline">
@@ -524,6 +524,8 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
     await page.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Check media replacements')
+    await expect(review).toContainText('Source asset UID is not retained')
+    await expect(review).toContainText('Source media signature is not retained')
     await expect(review.getByText(`${lost} → ${await realpath(actual)}`, { exact: true })).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await review.getByRole('button', { name: 'Import', exact: true }).click()

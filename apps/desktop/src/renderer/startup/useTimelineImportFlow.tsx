@@ -14,17 +14,17 @@ import type { EdlImportOptions, TimelineImportPreview } from "../../shared/timel
 import { FPS_OPTIONS, fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 
-// Both the start screen and the in-editor File menu use one review-and-publish
-// flow. Imports always create a separate project; a project's current edit is
-// never silently overwritten or merged.
+// The start screen and File menu share review and validation. In-project
+// imports use one Group, leaving the existing clips untouched.
 export function useTimelineImportFlow(onImported: () => void, onError?: (message: string | null) => void) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [edlImport, setEdlImport] = useState<{ source: string; destination: string } | null>(null);
+  const [edlImport, setEdlImport] = useState<{ source: string; destination: string; mode: 'new' | 'current' } | null>(null);
   const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
+  const [sourceFile, setSourceFile] = useState<{ path: string; edl?: EdlImportOptions } | null>(null);
 
-  const begin = useCallback(async () => {
+  const begin = useCallback(async (mode: 'new' | 'current' = 'new') => {
     if (busy || edlImport !== null || timelinePreview !== null) return;
     setBusy(true);
     setError(null);
@@ -35,14 +35,15 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
         filters: [{ name: "Timeline interchange", extensions: ["fcpxml", "edl"] }],
       });
       if (typeof source !== "string") return;
+      setSourceFile({ path: source });
       const name = source.split(/[\/]/).pop()!.replace(/\.(fcpxml|edl)$/i, "");
-      const destination = await saveDialog({
+      const destination = mode === 'new' ? await saveDialog({
         title: t("startup.import_timeline_destination"),
         defaultPath: t("startup.import_timeline_folder", { name }),
-      });
-      if (!destination) return;
-      if (/\.edl$/i.test(source)) setEdlImport({ source, destination });
-      else setTimelinePreview(await projectPreviewTimeline(source, destination));
+      }) : '';
+      if (destination === null) return;
+      if (/\.edl$/i.test(source)) setEdlImport({ source, destination, mode });
+      else setTimelinePreview(await projectPreviewTimeline(source, destination, undefined, mode));
     } catch (cause) {
       const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
       if (onError) onError(message);
@@ -66,7 +67,8 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
         <EdlImportForm
           onCancel={() => setEdlImport(null)}
           onImport={async (options) => {
-            const preview = await projectPreviewTimeline(edlImport.source, edlImport.destination, options);
+            setSourceFile({ path: edlImport.source, edl: options });
+            const preview = await projectPreviewTimeline(edlImport.source, edlImport.destination, options, edlImport.mode);
             setEdlImport(null);
             setTimelinePreview(preview);
           }}
@@ -75,14 +77,26 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
       {timelinePreview && (
         <TimelineImportReview
           preview={timelinePreview}
+          onNewProject={async () => {
+            if (!sourceFile) throw new Error('Choose a timeline source again');
+            const name = sourceFile.path.split(/[\\/]/).pop()!.replace(/\.(fcpxml|edl)$/i, '');
+            const destination = await saveDialog({
+              title: t('startup.import_timeline_destination'),
+              defaultPath: t('startup.import_timeline_folder', { name }),
+            });
+            if (!destination) return;
+            const next = await projectPreviewTimeline(sourceFile.path, destination, sourceFile.edl, 'new');
+            setTimelinePreview(next);
+          }}
           onCancel={() => {
             void projectDiscardTimelinePreview(timelinePreview.id).catch(() => {});
             setTimelinePreview(null);
           }}
-          onImport={async () => {
-            await projectImportTimeline(timelinePreview.id);
+          onImport={async (canvas) => {
+            await projectImportTimeline(timelinePreview.id, canvas);
+            const wasNewProject = timelinePreview.mode === 'new';
             setTimelinePreview(null);
-            onImported();
+            if (wasNewProject) onImported();
           }}
         />
       )}
@@ -91,18 +105,32 @@ export function useTimelineImportFlow(onImported: () => void, onError?: (message
   return { begin, busy, dialogs };
 }
 
-function TimelineImportReview({ preview, onImport, onCancel }: {
+function TimelineImportReview({ preview, onImport, onCancel, onNewProject }: {
   preview: TimelineImportPreview;
-  onImport: () => Promise<void>;
+  onImport: (canvas: 'fit' | 'fill' | 'original') => Promise<void>;
   onCancel: () => void;
+  onNewProject: () => Promise<void>;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canvas, setCanvas] = useState<'fit' | 'fill' | 'original'>('fit');
+  const current = preview.current;
+  const fpsMismatch = current != null &&
+    current.fps.num * preview.fps.den !== preview.fps.num * current.fps.den;
+  const sizeMismatch = current != null &&
+    (current.width !== preview.width || current.height !== preview.height);
+
+  async function chooseNew() {
+    setBusy(true);
+    try { await onNewProject(); }
+    catch (cause) { setError(cleanIpcDetail(cause)); }
+    finally { setBusy(false); }
+  }
 
   async function submit() {
     setBusy(true);
-    try { await onImport(); }
+    try { await onImport(canvas); }
     catch (cause) {
       setError(cleanIpcDetail(cause));
       setBusy(false);
@@ -127,13 +155,51 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
             <p>{t("startup.timeline_review_all_tracks")}</p>}
         </>
       )}
+      {current && (
+        <section aria-label={t("startup.import_conflicts_title")}>
+          <p><strong>{t("startup.import_conflicts_title")}</strong></p>
+          <p>{t("startup.import_existing_group_hint")}</p>
+          <p>{t("startup.import_conflict_fps", {
+            current: fpsLabel(current.fps, t), imported: fpsLabel(preview.fps, t),
+          })}</p>
+          {fpsMismatch ? (
+            <p className="new-project-error" role="alert">{t("startup.import_fps_unsupported")}</p>
+          ) : <p>{t("startup.import_fps_match")}</p>}
+          <p>{t("startup.import_conflict_size", {
+            current: current.width + " × " + current.height,
+            imported: preview.width + " × " + preview.height,
+          })}</p>
+          {sizeMismatch && (
+            <div className="new-project-row">
+              <span>{t("startup.import_canvas_choice")}</span>
+              <AppSelect
+                ariaLabel={t("startup.import_canvas_choice")}
+                value={canvas}
+                onValueChange={(v) => setCanvas(v as 'fit' | 'fill' | 'original')}
+                options={[
+                  { value: 'fit', label: t("startup.import_canvas_fit") },
+                  { value: 'fill', label: t("startup.import_canvas_fill") },
+                  { value: 'original', label: t("startup.import_canvas_original") },
+                ]}
+              />
+            </div>
+          )}
+          <p>{t("startup.import_audio_choice", {
+            current: current.sampleRate / 1000 + " kHz / " + current.channels,
+            imported: "48 kHz / stereo",
+          })}</p>
+        </section>
+      )}
       {preview.roundedEnds > 0 && <p>{t("startup.timeline_review_rounding")}</p>}
       {preview.resampledAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_resample", { count: preview.resampledAudioClips })}</p>}
       {preview.downmixedAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_downmix", { count: preview.downmixedAudioClips })}</p>}
       {error && <p className="new-project-error" role="alert">{error}</p>}
       <footer className="new-project-actions">
         <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
-        <Button size="lg" onClick={submit} disabled={busy || error !== null}>
+        {current && <Button size="lg" onClick={() => void chooseNew()} disabled={busy}>
+          {t("startup.import_use_new_project")}
+        </Button>}
+        <Button size="lg" onClick={submit} disabled={busy || error !== null || fpsMismatch}>
           {t(busy ? "startup.import_timeline_busy" : "startup.import_timeline_submit")}
         </Button>
       </footer>

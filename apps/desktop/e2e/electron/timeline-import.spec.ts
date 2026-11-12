@@ -145,7 +145,7 @@ test('File menu imports into a separate project without replacing an existing ed
     }, { source, destination })
 
     await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
-    await page.getByRole('menuitem', { name: 'Import timeline…' }).click()
+    await page.getByRole('menuitem', { name: 'Import timeline as new project…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('New Cut')
     expect(existsSync(destination)).toBe(false)
@@ -161,6 +161,127 @@ test('File menu imports into a separate project without replacing an existing ed
     )).toHaveLength(0)
     expect(existsSync(join(destination, 'project.json'))).toBe(true)
     expect((await rootSummary<ProjectSummary>(page)).media).toHaveLength(1)
+  } finally { await app.close() }
+})
+
+test('imports into the current project as one undoable Group without replacing its edit', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-current-import-')
+  const source = join(folder, 'Short Scene.fcpxml')
+  const media = join(folder, 'Scene.mov')
+  const original = join(folder, 'Original')
+  encodeSource(media)
+  writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+      audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="${pathToFileURL(media).href}"/>
+    </asset>
+  </resources>
+  <project name="Short Scene">
+    <sequence format="f" duration="3003/30000s">
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
+    </sequence>
+  </project>
+</fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, {
+      parentFolder: folder, name: 'Original',
+      canvas: { width: 1920, height: 1080, fpsNum: 30000, fpsDen: 1001 },
+    })
+    const originalFile = join(original, 'project.json')
+    const before = JSON.parse(readFileSync(originalFile, 'utf8'))
+    await app.evaluate(({ dialog }, input) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
+      // In-project importing MUST NOT ask for a project destination.
+      dialog.showSaveDialog = async () => { throw new Error('Unexpected Save As dialog') }
+    }, { source })
+
+    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+    await page.getByRole('menuitem', { name: 'Import timeline into current project…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Compare project settings')
+    await expect(review.getByText(/1920 × 1080/)).toBeVisible()
+    await review.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+
+    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+    await page.getByRole('menuitem', { name: 'Import timeline into current project…' }).click()
+    await expect(review).toBeVisible()
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    // The project summary counts nested clips as well as the Group layer.
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(3)
+
+    await invokeCmd(page, 'project_save')
+    const after = JSON.parse(readFileSync(originalFile, 'utf8'))
+    expect(after.project_id).toBe(before.project_id)
+    expect(after.root_id).toBe(before.root_id)
+    expect(Object.keys(after.compositions)).toHaveLength(2)
+    const root = after.compositions[after.root_id]
+    const groups = root.tracks.flatMap((track: { layers: { params: { kind: string } }[] }) => track.layers)
+      .filter((layer: { params: { kind: string } }) => layer.params.kind === 'CompositionRef')
+    expect(groups).toHaveLength(1)
+    expect(Object.keys(after.media_pool)).toHaveLength(1)
+    // The in-project media source is copied into the existing workspace,
+    // not left as a dependency on a temporary external import folder.
+    await expect.poll(async () => {
+      await invokeCmd(page, 'project_save')
+      const saved = JSON.parse(readFileSync(originalFile, 'utf8'))
+      const item = Object.values(saved.media_pool)[0] as { path_rel: string | null; path_abs: string }
+      return item.path_rel !== null && existsSync(item.path_abs) &&
+        readFileSync(item.path_abs).equals(readFileSync(media))
+    }, { timeout: 30_000 }).toBe(true)
+    await invokeCmd(page, 'project_undo')
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    expect((await invokeCmd(page, 'project_open_state'))).not.toBeNull()
+  } finally { await app.close() }
+})
+
+test('refuses current-project FPS conflict before import', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-conflict-import-')
+  const media = join(folder, 'Source.mov')
+  const xml = join(folder, 'Conflict.fcpxml')
+  encodeSource(media)
+  writeFileSync(xml, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml><fcpxml version="1.10">
+<resources><format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+<asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+audioSources="1" audioChannels="2" audioRate="48000">
+<media-rep kind="original-media" src="${pathToFileURL(media).href}"/></asset></resources>
+<project name="Conflict"><sequence format="f" duration="3003/30000s">
+<spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
+</sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, {
+      parentFolder: folder, name: 'Original',
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 },
+    })
+    const state = await invokeCmd(page, 'project_open_state')
+    const otherDestination = join(folder, 'Imported as New')
+    await app.evaluate(({ dialog }, { path, otherDestination }) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: otherDestination })
+    }, { path: xml, otherDestination })
+    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
+    await page.getByRole('menuitem', { name: 'Import timeline into current project…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/These frame rates differ/)).toBeVisible()
+    await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
+    await review.getByRole('button', { name: 'Use imported settings in new project…' }).click()
+    await expect(review.getByText('Compare project settings')).toHaveCount(0)
+    await expect(review).toContainText(otherDestination)
+    await review.getByRole('button', { name: 'Cancel', exact: true }).click()
+    expect(await invokeCmd(page, 'project_open_state')).toEqual(state)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
   } finally { await app.close() }
 })
 

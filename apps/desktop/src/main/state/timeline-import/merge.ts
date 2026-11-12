@@ -1,0 +1,60 @@
+import type { IdGen } from '../ids'
+import { rootComposition, type CompositionRefParams, type Layer, type Project } from '../model'
+import { applyAddTrack, defaultTransform } from '../mutations/add'
+import { applyDurationAutofit } from '../mutations/helpers'
+import { frameGrid, snapOnGrid } from '../snap'
+import { validate } from '../validate'
+
+export type ImportedCanvasPlacement = 'fit' | 'fill' | 'original'
+
+/** Imports into a Group, not into existing tracks: all authored source timing,
+ * clip relationships, marker anchors and per-layer transforms survive intact.
+ * The parent sees one independently editable Group, so a viewport mismatch has
+ * an explicit whole-composition scaling choice rather than hundreds of guesses.
+ * The imported composition must share the parent's frame/audio lattice. */
+export function applyImportedTimelineGroup(
+  draft: Project, imported: Project, idGen: IdGen, canvas: ImportedCanvasPlacement,
+): string {
+  const parent = rootComposition(draft)
+  const source = rootComposition(imported)
+  if (parent.fps.num * source.fps.den !== source.fps.num * parent.fps.den) {
+    throw new Error('Frame rates differ. Import as a new project; changing the current project frame grid is not supported')
+  }
+  if (source.sample_rate !== parent.sample_rate || source.channels !== parent.channels) {
+    throw new Error('The imported and current projects use different audio editing lattices')
+  }
+  if (Object.keys(imported.compositions).length !== 1 || imported.root_id !== source.id) {
+    throw new Error('Only one imported timeline can be added as a Group')
+  }
+  if (draft.compositions[source.id] || Object.keys(imported.media_pool).some(id => id in draft.media_pool)) {
+    throw new Error('Imported IDs conflict with existing project IDs; review the import again')
+  }
+  if (!['fit', 'fill', 'original'].includes(canvas)) throw new Error('Choose how the imported canvas should fit')
+
+  validate(imported)
+  draft.media_pool = { ...draft.media_pool, ...imported.media_pool }
+  draft.compositions[source.id] = { ...source, label: imported.metadata.name, ordinal: draft.next_group_ordinal++ }
+  const trackId = applyAddTrack(draft, idGen, imported.metadata.name, undefined, parent.id)
+  const scale = canvas === 'original' ? 1
+    : (canvas === 'fill' ? Math.max : Math.min)(
+      parent.width / source.width, parent.height / source.height,
+    )
+  const transform = defaultTransform(parent.width / 2, parent.height / 2)
+  transform.scale_x = { mode: 'Static', value: scale }
+  transform.scale_y = { mode: 'Static', value: scale }
+  const start = snapOnGrid(parent.duration_us, frameGrid(parent.fps))
+  const end = snapOnGrid(start + source.duration_us, frameGrid(parent.fps))
+  const params: CompositionRefParams = {
+    kind: 'CompositionRef', composition: source.id,
+    src_in_us: 0, src_out_us: source.duration_us,
+    transform, opacity: { mode: 'Static', value: 1 }, blend_mode: 'Normal',
+  }
+  const layer: Layer = {
+    id: idGen(), label: imported.metadata.name,
+    t_start_us: start, t_end_us: end, enabled: true, locked: false,
+    metadata: {}, params, effects: [],
+  }
+  parent.tracks.find(t => t.id === trackId)!.layers.push(layer)
+  applyDurationAutofit(parent)
+  return layer.id
+}

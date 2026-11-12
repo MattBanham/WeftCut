@@ -1053,7 +1053,8 @@ export function App({ onCloseProject, onWorkspaceReady }: AppProps) {
       // latent and pop the palette open when the user returns to the editor.
       if (!agentMode) setPaletteOpen(true);
     },
-    importTimeline: () => void timelineImport.begin(),
+    importTimeline: () => void timelineImport.begin('new'),
+    importTimelineIntoCurrent: () => void timelineImport.begin('current'),
     openSettings: () => openSettings("general"),
   };
   // Memoised so `useShortcuts`'s `useMemo(entries)` doesn't churn each

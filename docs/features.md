@@ -7,14 +7,28 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 
 ## Timeline import
 
-Choose **Import timeline…** from the start screen or **File → Import
-timeline…** in the editor (Mod+Shift+I), select an FCPXML or CMX 3600 EDL
-document, then name a new project folder. Importing from an open project
-saves and switches to the new project; it never merges into or overwrites
-the current edit. The review shows the canvas, duration, clip and media
-counts, and any changes to the source edit before the project is created.
-Keep the original files accessible until WeftCut finishes copying them into
-the project's media pool.
+Choose **Import timeline…** on the start screen or **File → Import
+timeline as new project…** (Mod+Shift+I) to create a new project from an
+FCPXML or CMX 3600 EDL. If a project is already open, its edits are saved
+before the imported project replaces it in the window; the old project
+remains on disk and in Recent. The review shows canvas, duration, clips,
+media, and conversions before publishing. Keep source files accessible until
+they have been copied into the new project's media pool.
+
+**File → Import timeline into current project…** instead imports the edit
+as a new, editable Group on a separate track after the current timeline.
+The original project id, existing clips, composition settings, and media
+remain unchanged; Undo removes the import in one step. The imported Group
+retains its own canvas and all its internal lanes. If canvas dimensions
+differ, choose **Fit** (no crop), **Fill** (possible crop), or **Original
+size** (may crop); the parent Group is centred without rewriting the member
+transforms. An FPS mismatch is explicitly blocked, because this version
+cannot safely change or conform the existing project's frame lattice.
+The review offers to import as a new project instead. The audio path uses
+WeftCut's normal 48 kHz mono/stereo conforming and discloses resampling or
+surround downmixing. Missing media or a failed validation does not change
+the active project. Media copies are scheduled into the current workspace
+once the import commits.
 
 FCPXML import accepts one sequence with a primary storyline of straight cuts,
 gaps and single-frame clip markers. Use a zero-start non-drop-frame timeline

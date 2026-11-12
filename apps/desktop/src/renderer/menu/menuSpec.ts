@@ -35,6 +35,7 @@ export const FILE_MENU: MenuSection = {
   entries: [
     "importMedia",
     "importTimeline",
+    "importTimelineIntoCurrent",
     "---",
     "save",
     "saveAs",

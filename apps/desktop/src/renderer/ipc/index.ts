@@ -901,16 +901,16 @@ export async function projectSaveAs(path: string): Promise<void> {
   return invoke<void>("project_save_as", { path });
 }
 
-export function projectPreviewTimeline(path: string, destination: string, edl?: EdlImportOptions): Promise<TimelineImportPreview> {
-  return invoke<TimelineImportPreview>("project_preview_timeline", { path, destination, edl });
+export function projectPreviewTimeline(path: string, destination: string, edl?: EdlImportOptions, mode: 'new' | 'current' = 'new'): Promise<TimelineImportPreview> {
+  return invoke<TimelineImportPreview>("project_preview_timeline", { path, destination, edl, mode });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {
   return invoke<null>("project_discard_timeline_preview", { id });
 }
 
-export function projectImportTimeline(id: string): Promise<string> {
-  return invoke<string>("project_import_timeline", { id });
+export function projectImportTimeline(id: string, canvas: 'fit' | 'fill' | 'original' = 'fit'): Promise<string> {
+  return invoke<string>("project_import_timeline", { id, canvas });
 }
 
 export async function projectOpen(path: string): Promise<void> {

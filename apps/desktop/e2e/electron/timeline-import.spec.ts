@@ -106,6 +106,68 @@ test('imports FCPXML from startup as an editable project and refuses missing med
   } finally { await app.close() }
 })
 
+test('conforms 25 fps 640×360 camera footage into a 30 fps 320×240 edit with correct preview fit', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-mixed-camera-')
+  const source = join(folder, 'Camera Cut.fcpxml')
+  const media = join(folder, 'Camera.mov')
+  const destination = join(folder, 'Imported Camera Cut')
+  execFileSync('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'color=c=red:s=640x360:r=25',
+    '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', media,
+  ], { windowsHide: true })
+  writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml><fcpxml version="1.10">
+  <resources>
+    <format id="seq" frameDuration="1/30s" width="320" height="240"/>
+    <format id="camera" frameDuration="1/25s" width="640" height="360"/>
+    <asset id="take" format="camera" duration="1s" hasVideo="1" hasAudio="0">
+      <media-rep kind="original-media" src="${pathToFileURL(media).href}"/>
+    </asset>
+  </resources>
+  <project name="Camera Cut">
+    <sequence format="seq" duration="3/30s">
+      <spine><asset-clip ref="take" start="1/25s" duration="3/30s"/></spine>
+    </sequence>
+  </project>
+</fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await app.evaluate(({ dialog }, input) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [input.source] })
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
+    }, { source, destination })
+    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Video clips using source-timestamp frame-rate conform: 1')
+    await expect(review).toContainText('Video clips scaled to fit the canvas: 1')
+    await expect(review).toContainText('Camera.mov')
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    const summary = await rootSummary<ProjectSummary>(page)
+    expect(summary).toMatchObject({ fps_num: 30, fps_den: 1, duration_us: 100000, layer_count: 1 })
+    const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const clip = saved.compositions[saved.root_id].tracks.flatMap(
+      (t: { layers: unknown[] }) => t.layers,
+    ).find((layer: any) => layer.params.kind === 'VideoClip')
+    expect(clip.params.transform).toMatchObject({
+      position: { x: { mode: 'Static', value: 160 }, y: { mode: 'Static', value: 120 } },
+      scale_x: { mode: 'Static', value: 0.5 },
+      scale_y: { mode: 'Static', value: 0.5 },
+    })
+    expect(clip.params.src_in_us).toBe(40000)
+    expect(clip.params.src_out_us).toBe(140000)
+    await waitForHook(page, 'weftcutSampleComposite')
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(33333))
+    const sample = (x: number, y: number) =>
+      page.evaluate(({ x, y }) => (window as any).__weftcutTest.weftcutSampleComposite(x, y), { x, y })
+    await expect.poll(async () => (await sample(160, 120))?.r ?? 0).toBeGreaterThan(180)
+    await expect.poll(async () => (await sample(160, 10))?.r ?? 255).toBeLessThan(80)
+  } finally { await app.close() }
+})
+
 test('imports a Final Cut bundle with Info.fcpxml and reports its source', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-bundle-')

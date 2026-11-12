@@ -49,8 +49,19 @@ time-remapping remains unsupported.
 Video-only timelines are supported. Sequence audio may declare mono,
 stereo or surround at a valid sample rate; decodable audio is conformed
 to 48 kHz and at most two channels. The review reports resampling and
-stereo downmixing. Moving video must still reference an original matching
-the sequence dimensions and frame rate. Mono or stereo audio may be
+stereo downmixing. Moving FCPXML video may have a different source
+resolution and frame rate from the destination sequence. The original
+source in/out times are preserved independently of the sequence frame grid;
+the decoder selects frames by source presentation timestamp, potentially
+repeating or skipping frames without altering playback speed. Sources with
+different dimensions are uniformly scaled to fit and centred, preserving
+aspect ratio without cropping. The review lists converted source files,
+original sizes/rates, and affected clip counts. If the FCPXML asset declares
+a video format, it must match the probed original. Otherwise the probed
+FPS determines whether the source in-point is aligned to an actual frame.
+Unknown or contradictory source metadata is refused, never silently
+reinterpreted. EDL import still requires media matching the chosen
+composition format. Mono or stereo audio may be
 standalone or linked. A zero-duration still-image asset placed through a
 connected `<video>` clip becomes an editable ImageOverlay; its source
 dimensions may differ from the sequence.

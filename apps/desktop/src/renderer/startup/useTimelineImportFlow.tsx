@@ -240,6 +240,23 @@ function TimelineImportReview({ preview, onImport, onCancel, onNewProject }: {
         </section>
       )}
       {preview.roundedEnds > 0 && <p>{t("startup.timeline_review_rounding")}</p>}
+      {preview.rateConformedVideoClips > 0 && <p role="status">{t("startup.timeline_review_fps_conform", { count: preview.rateConformedVideoClips })}</p>}
+      {preview.resizedVideoClips > 0 && <p role="status">{t("startup.timeline_review_video_fit", { count: preview.resizedVideoClips })}</p>}
+      {preview.videoConversions.length > 0 && (
+        <section aria-label={t("startup.timeline_review_video_sources")}>
+          <p><strong>{t("startup.timeline_review_video_sources")}</strong></p>
+          {preview.videoConversions.slice(0, 8).map((source) => (
+            <p key={source.source} title={source.source}>
+              {source.source.split(/[\\/]/).pop()} — {source.sourceWidth} × {source.sourceHeight},
+              {' '}{fpsLabel(source.sourceFps, t)}
+              {source.rateConformed ? ' → ' + fpsLabel(preview.fps, t) : ''}
+              {source.scaledToFit ? ' · ' + t("startup.timeline_review_video_fitted") : ''}
+            </p>
+          ))}
+          {preview.videoConversions.length > 8 &&
+            <p>{t("startup.timeline_review_more_sources", { count: preview.videoConversions.length - 8 })}</p>}
+        </section>
+      )}
       {preview.resampledAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_resample", { count: preview.resampledAudioClips })}</p>}
       {preview.downmixedAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_downmix", { count: preview.downmixedAudioClips })}</p>}
       {error && <p className="new-project-error" role="alert">{error}</p>}

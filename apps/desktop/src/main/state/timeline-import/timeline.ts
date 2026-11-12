@@ -7,6 +7,7 @@ export interface TimelineSource {
   hasVideo: boolean
   /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */
   stillImage?: boolean
+  videoFormat?: { width: number; height: number; frameDuration: ExactTime }
   hasAudio?: boolean
   audioChannels?: number
   audioRate?: number

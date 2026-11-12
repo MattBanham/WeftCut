@@ -2,7 +2,7 @@ import { lstat, open, mkdir, rmdir, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { canvasSizeError, validateProjectName } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
-import { compareTime, exactTime, floorTime, multiplyTime, roundTime } from '../../../renderer/timeMapping'
+import { compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime } from '../../../renderer/timeMapping'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
 import { createActor } from '../actor'
 import { type IdGen } from '../ids'
@@ -177,17 +177,34 @@ export async function prepareTimelineProject(
   let roundedEnds = 0
   let resampledAudioClips = 0
   let downmixedAudioClips = 0
+  let rateConformedVideoClips = 0
+  let resizedVideoClips = 0
+  const videoConversions = new Map<string, TimelineImportReport['videoConversions'][number]>()
   for (const clip of timeline.clips) {
     const item = itemOf(clip)
-    const sourceOut = validateSource(target, clip, item)
+    const sourceOut = validateSource(target, clip, item, extension !== '.edl')
     if (sourceOut !== clip.sourceOut) roundedEnds++
+    if (clip.asset.hasVideo && !clip.asset.stillImage && item.metadata.video) {
+      const sourceVideo = item.metadata.video
+      const rateConformed = sourceVideo.fps_num! * target.fps.den !== sourceVideo.fps_den! * target.fps.num
+      const scaledToFit = sourceVideo.width !== width || sourceVideo.height !== height
+      if (rateConformed) rateConformedVideoClips++
+      if (scaledToFit) resizedVideoClips++
+      if ((rateConformed || scaledToFit) && !videoConversions.has(item.path_abs)) {
+        videoConversions.set(item.path_abs, { source: item.path_abs,
+          sourceWidth: sourceVideo.width!, sourceHeight: sourceVideo.height!,
+          sourceFps: { num: sourceVideo.fps_num!, den: sourceVideo.fps_den! },
+          rateConformed, scaledToFit })
+      }
+    }
     if (clip.audioRole && item.metadata.audio) {
       if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) resampledAudioClips++
       if ((item.metadata.audio.channels ?? 0) > 2) downmixedAudioClips++
     }
     const track = tracks.get(laneIds.get(clip.lane)!)!
     const video = clip.asset.hasVideo && !clip.asset.stillImage
-      ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame), videoClipParams(item.id, 0, 0, target))
+      ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
+        fitVideoParams(item, target))
       : null
     const image = clip.asset.stillImage
       ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
@@ -220,11 +237,23 @@ export async function prepareTimelineProject(
     videoClips, audioClips, markers: target.markers.length, media: Object.keys(snapshot.media_pool).length,
     lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
     resampledAudioClips, downmixedAudioClips,
+    rateConformedVideoClips, resizedVideoClips, videoConversions: [...videoConversions.values()],
     normalizedTimecode: timeline.normalizedTimecode ?? false,
     dropFrameTimecode: timeline.dropFrameTimecode ?? false,
     namedFormatDefaults: timeline.namedFormatDefaults ?? false,
     bundleSource: extension === '.fcpxmld', relinkedMedia,
   } }
+}
+
+function fitVideoParams(item: MediaItem, target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>) {
+  const params = videoClipParams(item.id, 0, 0, target)
+  const video = item.metadata.video
+  if (video?.width && video.height && (video.width !== target.width || video.height !== target.height)) {
+    const fit = Math.min(target.width / video.width, target.height / video.height)
+    params.transform.scale_x = { mode: 'Static', value: fit }
+    params.transform.scale_y = { mode: 'Static', value: fit }
+  }
+  return params
 }
 
 function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }> | AudioParams): Layer {
@@ -235,7 +264,8 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start:
     enabled: true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'width' | 'height' | 'fps'>, clip: TimelineClip, item: MediaItem): ExactTime {
+function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'width' | 'height' | 'fps'>,
+  clip: TimelineClip, item: MediaItem, allowMixedVideo: boolean): ExactTime {
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(`${clip.location}, source ${clip.asset.ref}: ${message}`) }
   if (clip.asset.stillImage) {
@@ -248,9 +278,28 @@ function validateSource(timeline: Pick<ReturnType<typeof rootComposition>, 'widt
     return clip.sourceOut
   }
   if (clip.asset.hasVideo) {
-    if (item.kind !== 'Video' || !video || video.width !== timeline.width || video.height !== timeline.height ||
-        !video.fps_num || !video.fps_den || video.fps_num * timeline.fps.den !== video.fps_den * timeline.fps.num) {
-      fail('The original must be a video with the sequence size and frame rate. Relink or render conforming media')
+    if (item.kind !== 'Video' || !video || !video.width || !video.height ||
+        !video.fps_num || !video.fps_den ||
+        !Number.isSafeInteger(video.width) || !Number.isSafeInteger(video.height) ||
+        !Number.isSafeInteger(video.fps_num) || !Number.isSafeInteger(video.fps_den)) {
+      fail('The original must be decodable video with known positive dimensions and frame rate')
+    }
+    const v = video!
+    const sourceWidth = v.width!, sourceHeight = v.height!
+    const sourceFpsNum = v.fps_num!, sourceFpsDen = v.fps_den!
+    if (!allowMixedVideo && (sourceWidth !== timeline.width || sourceHeight !== timeline.height ||
+        sourceFpsNum * timeline.fps.den !== sourceFpsDen * timeline.fps.num)) {
+      fail('EDL originals must match the selected canvas and frame rate')
+    }
+    const declared = clip.asset.videoFormat
+    const probeFrame = exactTime(1_000_000 * sourceFpsDen, sourceFpsNum)
+    if (declared) {
+      if (sourceWidth !== declared.width || sourceHeight !== declared.height ||
+          compareTime(probeFrame, declared.frameDuration) !== 0) {
+        fail('The original dimensions or frame rate differ from its FCPXML asset format. Relink the matching media')
+      }
+    } else if (allowMixedVideo && divideTime(clip.sourceIn, probeFrame).den !== 1) {
+      fail('The source in-point falls between frames at the probed source frame rate. Choose a source-frame boundary')
     }
   } else if (item.kind !== 'Audio' || video) {
     fail('The original must be an audio-only file. Relink the matching original and export again')

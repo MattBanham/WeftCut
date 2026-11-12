@@ -22,6 +22,16 @@ export interface TimelineImportReport {
   roundedEnds: number
   resampledAudioClips: number
   downmixedAudioClips: number
+  rateConformedVideoClips: number
+  resizedVideoClips: number
+  videoConversions: {
+    source: string
+    sourceWidth: number
+    sourceHeight: number
+    sourceFps: { num: number; den: number }
+    rateConformed: boolean
+    scaledToFit: boolean
+  }[]
   normalizedTimecode: boolean
   dropFrameTimecode: boolean
   namedFormatDefaults: boolean

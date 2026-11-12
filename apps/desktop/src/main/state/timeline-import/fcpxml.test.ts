@@ -39,6 +39,23 @@ const fixture = (url = 'file:///fictional/Harbor%20Lights.mov') => `<?xml versio
   </project>
 </fcpxml>`
 
+const mixedVideoFixture = (url: string) => `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="sequence" frameDuration="1/30s" width="320" height="240"/>
+    <format id="camera" frameDuration="1/25s" width="640" height="360"/>
+    <asset id="take" format="camera" duration="1s" hasVideo="1" hasAudio="0">
+      <media-rep kind="original-media" src="${url}"/>
+    </asset>
+  </resources>
+  <project name="Fictional Cut">
+    <sequence format="sequence" duration="3/30s">
+      <spine><asset-clip ref="take" start="1/25s" duration="3/30s"/></spine>
+    </sequence>
+  </project>
+</fcpxml>`
+
 const voiceScriptStillFixture = (audioUrl: string, imageUrl: string) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.10">
@@ -140,6 +157,21 @@ describe('FCPXML subset', () => {
     expect(parsed.clips.map((clip) => [clip.lane, clip.firstFrame, clip.endFrame])).toEqual([[0, 0, 3], [0, 4, 6], [2, 1, 3]])
     expect(() => parseFcpxml(xml.replace(child, child + child))).toThrow(/same connected lane/)
     expect(() => parseFcpxml(xml.replace('offset="108003003/30000s"', 'offset="0s"'))).toThrow(/before the timeline origin/)
+  })
+
+  it('accepts independent source FPS/resolution and aligns trims to the source frame grid', () => {
+    const parsed = parseFcpxml(mixedVideoFixture('file:///fictional/Camera.mov'))
+    expect(parsed).toMatchObject({ canvas: { width: 320, height: 240 },
+      fps: { num: 30, den: 1 }, durationFrames: 3 })
+    expect(parsed.clips[0]).toMatchObject({
+      firstFrame: 0, endFrame: 3,
+      sourceIn: { num: 40000, den: 1 }, sourceOut: { num: 140000, den: 1 },
+      asset: { videoFormat: { width: 640, height: 360,
+        frameDuration: { num: 40000, den: 1 } } },
+    })
+    expect(() => parseFcpxml(mixedVideoFixture('file:///fictional/Camera.mov')
+      .replace('start="1/25s"', 'start="1/30s"')))
+      .toThrow(/"source in" is between frames/)
   })
 
   it('accepts VoiceScript mono narration and still PNG visemes as connected image clips', () => {
@@ -305,6 +337,99 @@ describe('timeline import transaction', () => {
     expect(sourceOut(video)).toEqual({ num: 166833, den: 1 })
     expect(video.t_end_us).toBe(100100)
     expect(() => validate(project)).not.toThrow()
+  })
+
+  it('maps 25 fps 640×360 media into 30 fps 320×240 with exact trims and centred fit', async () => {
+    const file = join(parent, 'Mixed Camera.mov')
+    await writeFile(file, 'Fictional mixed video')
+    await writeFile(document, mixedVideoFixture(pathToFileURL(file).href))
+    const itemId = '00000000-0000-0000-0000-0000000000bc'
+    const { project, report } = await prepareTimelineProject(
+      document, destination, undefined, seededGen(),
+      {
+        compute: {
+          probeMedia: async () => JSON.stringify({
+            ...mediaItemTemplate(itemId, 'Video', 1_000_000, false),
+            path_abs: file, file_hash_blake3: `pending-${itemId}`,
+            metadata: { duration_us: 1_000_000,
+              video: { width: 640, height: 360, fps_num: 25, fps_den: 1 },
+              audio: null },
+          }),
+          hashMediaSource: async () => 'a'.repeat(64),
+        },
+        statPath: path => existsSync(path) && statSync(path).isFile() ? { kind: 'file', readable: true } : null,
+      }, () => {},
+    )
+    expect(report).toMatchObject({
+      rateConformedVideoClips: 1, resizedVideoClips: 1,
+      videoConversions: [{ source: file, sourceWidth: 640, sourceHeight: 360,
+        sourceFps: { num: 25, den: 1 }, rateConformed: true, scaledToFit: true }],
+    })
+    const layer = rootComposition(project).tracks[0]!.layers[0]!
+    expect(layer).toMatchObject({ t_start_us: 0, t_end_us: 100000,
+      params: { kind: 'VideoClip', transform: {
+        position: { x: { mode: 'Static', value: 160 }, y: { mode: 'Static', value: 120 } },
+        scale_x: { mode: 'Static', value: 0.5 },
+        scale_y: { mode: 'Static', value: 0.5 },
+      } },
+    })
+    expect(sourceIn(layer.params)).toEqual({ num: 40000, den: 1 })
+    expect(sourceOut(layer)).toEqual({ num: 140000, den: 1 })
+    expect(() => validate(project)).not.toThrow()
+  })
+
+  it('uses probed source FPS when FCPXML omits an asset format', async () => {
+    const file = join(parent, 'Unspecified Camera.mov')
+    await writeFile(file, 'Fictional camera source')
+    const xml = mixedVideoFixture(pathToFileURL(file).href)
+      .replace('format="camera" duration=', 'duration=')
+    await writeFile(document, xml)
+    const itemId = '00000000-0000-0000-0000-0000000000bd'
+    const deps = {
+      compute: {
+        probeMedia: async () => JSON.stringify({
+          ...mediaItemTemplate(itemId, 'Video', 1_000_000, false),
+          path_abs: file, file_hash_blake3: `pending-${itemId}`,
+          metadata: { duration_us: 1_000_000,
+            video: { width: 640, height: 360, fps_num: 25, fps_den: 1 }, audio: null },
+        }),
+        hashMediaSource: async () => 'a'.repeat(64),
+      },
+      statPath: (path: string) => existsSync(path) && statSync(path).isFile()
+        ? { kind: 'file' as const, readable: true } : null,
+    }
+    const parsed = parseFcpxml(xml)
+    expect(parsed.clips[0]!.sourceIn).toEqual({ num: 40000, den: 1 })
+    expect(parsed.clips[0]!.asset.videoFormat).toBeUndefined()
+    const { project, report } = await prepareTimelineProject(document, destination,
+      undefined, seededGen(), deps, () => {})
+    expect(report.rateConformedVideoClips).toBe(1)
+    expect(() => validate(project)).not.toThrow()
+
+    await writeFile(document, xml.replace('start="1/25s"', 'start="1/30s"'))
+    await expect(prepareTimelineProject(document, destination, undefined, seededGen(), deps, () => {}))
+      .rejects.toThrow(/source in-point falls between frames/)
+  })
+
+  it('refuses mismatched video FPS or dimensions when the source format is declared', async () => {
+    const file = join(parent, 'Camera.mov')
+    await writeFile(file, 'Wrong camera video')
+    await writeFile(document, mixedVideoFixture(pathToFileURL(file).href))
+    const id = '00000000-0000-0000-0000-0000000000be'
+    await expect(prepareTimelineProject(document, destination, undefined, seededGen(), {
+      compute: {
+        probeMedia: async () => JSON.stringify({
+          ...mediaItemTemplate(id, 'Video', 1_000_000), path_abs: file,
+          file_hash_blake3: `pending-${id}`,
+          metadata: { duration_us: 1_000_000,
+            video: { width: 640, height: 360, fps_num: 24, fps_den: 1 },
+            audio: null },
+        }),
+        hashMediaSource: async () => 'a'.repeat(64),
+      },
+      statPath: path => existsSync(path) && statSync(path).isFile() ? { kind: 'file', readable: true } : null,
+    }, () => {})).rejects.toThrow(/differ from its FCPXML asset format/)
+    expect(existsSync(destination)).toBe(false)
   })
 
   it('preflights missing media before probing or creating any project folder', async () => {

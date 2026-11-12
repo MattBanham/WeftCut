@@ -181,7 +181,7 @@ function localPath(el: Element): string {
   }
 }
 
-function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: string, from: Element) => Element): Asset {
+function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Element) => Element): Asset {
   check(el, ['id', 'name', 'uid', 'src', 'start', 'duration', 'hasVideo', 'hasAudio', 'format',
     'audioSources', 'audioChannels', 'audioRate', 'videoSources'], ['media-rep'])
   const a = el.attrs
@@ -205,6 +205,7 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
   // <video> gives the duration on the edit. Do not impose video-frame/source
   // duration checks on PNG artwork (including VoiceScript viseme overlays).
   const stillImage = hasVideo && !hasAudio && duration.num === 0
+  let videoFormat: Asset['videoFormat']
   if (a.format !== undefined) {
     if (!hasVideo) fail(el, 'Audio-only assets must not refer to a video format')
     const formatNode = lookup(a.format, 'format', el)
@@ -214,10 +215,7 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
         fail(formatNode, 'Still-image dimensions must be positive')
     } else {
       const source = parseFormat(formatNode)
-      if (source.width !== format.width || source.height !== format.height ||
-          compareTime(source.frameDuration, format.frameDuration) !== 0) {
-        fail(el, 'Source size and frame rate must match the sequence. Render conforming media and export again')
-      }
+      videoFormat = { width: source.width, height: source.height, frameDuration: source.frameDuration }
     }
   }
   let path: string
@@ -231,7 +229,8 @@ function parseAsset(el: Element, format: Format, lookup: (ref: string, tag: stri
     path = localPath(rep)
   }
   if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
-  return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration, hasVideo, hasAudio, stillImage, audioChannels, audioRate }
+  return { ref: required(el, 'id'), path, start: time(el, 'start', ZERO_TIME), duration,
+    hasVideo, hasAudio, stillImage, videoFormat, audioChannels, audioRate }
 }
 
 export function parseFcpxml(xml: string): ImportTimeline {
@@ -343,7 +342,7 @@ function parseDocument(root: Element): ImportTimeline {
     const assetNode = lookup(ref, 'asset', el)
     let asset = assets.get(ref)
     if (!asset) {
-      asset = parseAsset(assetNode, format, lookup)
+      asset = parseAsset(assetNode, lookup)
       assets.set(ref, asset)
     }
     if (asset.stillImage && el.tag !== 'video')
@@ -362,7 +361,9 @@ function parseDocument(root: Element): ImportTimeline {
       fail(el, 'Trim lies outside the declared source range of the asset')
     if (asset.stillImage && sourceIn.num !== 0)
       fail(el, 'Still-image clips must start at 0s in the source')
-    if (asset.hasVideo) frames(sourceIn, format, el, 'source in')
+    if (asset.videoFormat && !asset.stillImage) {
+      frames(sourceIn, { ...asset.videoFormat, namedDefaults: false }, el, 'source in')
+    }
     const markers = el.children.filter((child) => child.tag === 'marker').map((mark) => {
       check(mark, ['start', 'duration', 'value'])
       if (compareTime(time(mark, 'duration', format.frameDuration), format.frameDuration) !== 0)

@@ -21,7 +21,7 @@ export interface TimelineMediaIssue {
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
-  kind: 'still-size' | 'video-size' | 'video-rate' | 'source-duration' | 'audio-format' | 'color-format' | 'proxy-source'
+  kind: 'still-size' | 'video-size' | 'video-rate' | 'source-duration' | 'audio-format' | 'color-format' | 'proxy-source' | 'video-timestamp'
 }
 
 export interface TimelineMediaBlocked {

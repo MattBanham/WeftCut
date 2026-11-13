@@ -21,6 +21,7 @@ import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure 
 import type { ImportTimeline, TimelineClip, TimelineSource, TimelineSourceWindow } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
+import { MAX_VIDEO_IN_POINTS, readVideoInPoints } from './videoTiming'
 
 export class TimelineMediaFailure extends Error {
   constructor(
@@ -335,12 +336,40 @@ export async function prepareTimelineProject(
       'It may have lower picture or sound quality. The original cut times stay in place.')
     mediaChanges.set(JSON.stringify([ref, kind]), { ...issue, kind, sourcePath: path })
   }
+  const pointsByPath = new Map<string, Set<number>>()
+  const maxTimingChecks = 4_096
+  let timingChecks = 0
+  for (const clip of clips) {
+    const video = itemOf(clip)?.metadata.video
+    if (!clip.hasVideo || clip.asset.stillImage || !video?.fps_num || !video.fps_den ||
+        !Number.isSafeInteger(video.fps_num) || !Number.isSafeInteger(video.fps_den)) continue
+    const frame = exactTime(1_000_000 * video.fps_den, video.fps_num)
+    if (divideTime(clip.sourceIn, frame).den === 1) continue
+    const path = itemOf(clip).path_abs
+    const points = pointsByPath.get(path) ?? new Set<number>()
+    const time = clip.sourceIn.num / clip.sourceIn.den
+    if (points.size >= MAX_VIDEO_IN_POINTS || timingChecks >= maxTimingChecks || points.has(time)) continue
+    points.add(time)
+    pointsByPath.set(path, points)
+    timingChecks++
+  }
+  const verifiedPoints = new Map<string, Map<number, number>>()
+  for (const [path, points] of pointsByPath) {
+    assertCurrent()
+    try {
+      const checked = await checkFile(path)
+      const frames = await readVideoInPoints(checked, [...points].sort((a, b) => a - b), assertCurrent)
+      verifiedPoints.set(path, frames)
+    } catch { /* Validation below gives the affected file a recovery action. */ }
+    assertCurrent()
+  }
   const incompatibilities = new Map<string, TimelineMediaIssue>()
   for (const clip of clips) {
     const item = itemOf(clip)
     if (!item) continue
     try {
-      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.ref)!.path))
+      const actualFrameUs = verifiedPoints.get(item.path_abs)?.get(clip.sourceIn.num / clip.sourceIn.den)
+      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.ref)!.path), actualFrameUs)
       sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
         const issue = mediaIssue(clip.asset, detail)
@@ -682,7 +711,7 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceIn: ExactTime, sourceO
     enabled: clip.enabled ?? true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['metadata'] | undefined) {
+function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['metadata'] | undefined, actualFrameUs?: number) {
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(message) }
   const changes: Pick<TimelineMediaChange, 'kind' | 'detail'>[] = []
@@ -753,9 +782,19 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
     const probeFrame = exactTime(1_000_000 * sourceFpsDen, sourceFpsNum)
     const differentRate = declared !== undefined && compareTime(probeFrame, declared.frameDuration) !== 0
     if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
-      fail(differentRate
-        ? 'The file’s frame rate differs from its FCPXML asset format, and this cut starts between its frames. Choose the original or export a replacement at the original rate.'
-        : 'The source in-point falls between frames at the probed source frame rate. Choose a source-frame boundary.')
+      if (actualFrameUs === undefined) {
+        const rate = differentRate ? 'The file’s frame rate differs from its FCPXML asset format. ' : ''
+        fail(rate + 'The source in-point falls between frames on the reported grid, and WeftCut could not verify a picture at the requested time. ' +
+          'Choose the original or export a constant-frame-rate copy with the same timing.')
+      } else {
+        const sourceUs = clip.sourceIn.num / clip.sourceIn.den
+        const frame = actualFrameUs / 1_000_000
+        const requested = (sourceUs / 1_000_000).toFixed(6)
+        const detail = sourceUs - actualFrameUs < 1
+          ? 'The file’s timestamps confirm a frame at the requested source in-point (' + requested + ' s).'
+          : 'The cut starts inside a displayed frame at ' + requested + ' s. WeftCut will use the frame at ' + frame.toFixed(6) + ' s in the source.'
+        changes.push({ kind: 'video-timestamp', detail: detail + ' The source in-point and timeline cut stay in place.' })
+      }
     }
     if (declared) {
       if (differentRate) {

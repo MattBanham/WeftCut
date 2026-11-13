@@ -437,6 +437,7 @@ const zhCN: Resources = {
     import_media_placements_other: "用于 {{count}} 个片段。",
     import_choose_relink_folder: "从文件夹查找原始媒体…",
     import_use_candidate: "使用 {{name}}",
+    import_use_proxy: "检查代理文件 {{name}}…",
     import_relinked_media: "导入前请核对替代媒体",
     timeline_review_audio_resample: "{{count}} 个音频片段将重采样至 WeftCut 内部使用的 48 kHz，原始媒体不会更改。",
     timeline_review_fps_conform: "{{count}} 个视频片段根据源时间戳转换帧率；目标帧率下可能重复或跳过帧，播放速度和修剪范围保持不变。",

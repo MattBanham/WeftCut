@@ -449,6 +449,7 @@ const enUS = {
     import_media_placements_other: "Used in {{count}} clips.",
     import_choose_relink_folder: "Find original media in a folder…",
     import_use_candidate: "Use {{name}}",
+    import_use_proxy: "Review proxy {{name}}…",
     import_relinked_media: "Check media replacements before importing",
     timeline_review_audio_resample: "Audio clips requiring 48 kHz resampling: {{count}}. The original media files are unchanged.",
     timeline_review_fps_conform: "Video clips using source-timestamp frame-rate conform: {{count}}. At the destination FPS, source frames may be repeated or skipped; playback speed and source trims stay unchanged.",

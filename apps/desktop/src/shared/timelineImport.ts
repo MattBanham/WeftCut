@@ -17,10 +17,11 @@ export interface TimelineMediaIssue {
   placements: number
   detail: string
   suggestedPaths?: string[]
+  proxyPaths?: string[]
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
-  kind: 'still-size' | 'video-size' | 'video-rate' | 'source-duration' | 'audio-format' | 'color-format'
+  kind: 'still-size' | 'video-size' | 'video-rate' | 'source-duration' | 'audio-format' | 'color-format' | 'proxy-source'
 }
 
 export interface TimelineMediaBlocked {

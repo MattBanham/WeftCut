@@ -137,6 +137,50 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
   } finally { await app.close() }
 })
 
+test('offers an available proxy for an offline original and imports only after approval', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-fcpxml-proxy-')
+  const original = join(folder, 'Offline Original.mov')
+  const proxy = join(folder, 'Review Copy.mov')
+  const xml = join(folder, 'Signal.fcpxml')
+  encodeSource(proxy)
+  writeFileSync(xml, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="a" format="f" hasVideo="1" duration="1001/1000s">
+      <media-rep kind="original-media" src="${pathToFileURL(original).href}"/>
+      <media-rep kind="proxy-media" src="${pathToFileURL(proxy).href}"/>
+    </asset></resources><project name="Proxy Edit"><sequence format="f" duration="3003/30000s"><spine>
+    <asset-clip ref="a" srcEnable="video" start="6006/30000s" duration="3003/30000s"/>
+    </spine></sequence></project></fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: 'Review Proxy',
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, xml)
+    await beginImport(page)
+    const blocked = page.getByRole('dialog', { name: 'Some media needs attention' })
+    await expect(blocked.getByText(/Missing or unreadable original media/)).toBeVisible()
+    await blocked.getByRole('button', { name: 'Review proxy Review Copy.mov…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/selected file is a proxy.*editing and export/)).toBeVisible()
+    const commit = review.getByRole('button', { name: 'Import', exact: true })
+    await expect(commit).toBeDisabled()
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
+    await commit.click()
+    await expect(review).toHaveCount(0)
+    const imported = await importedSummary(page)
+    expect(imported).toMatchObject({ duration_us: 100100, layer_count: 1 })
+    expect(imported.tracks.flatMap(track => track.layers)).toMatchObject([
+      { t_start_us: 0, t_end_us: 100100, params: { kind: 'VideoClip', src_in_us: 200200, src_out_us: 300300 } },
+    ])
+    expect(existsSync(original)).toBe(false)
+  } finally { await app.close() }
+})
+
 test('keeps tagged Rec. 601 video editable and discloses its SDR output conversion', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-sdr-')

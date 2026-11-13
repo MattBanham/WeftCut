@@ -530,9 +530,31 @@ describe('timeline import transaction', () => {
     expect(run.probeMedia).toHaveBeenCalledExactlyOnceWith(await realpath(media))
     expect(Object.values(project.media_pool)).toHaveLength(1)
     expect(report.compatibilityItems.flatMap(item => item.notes)).toEqual(expect.arrayContaining([
-      'Proxy media in the FCPXML is not used. WeftCut imports the original file.',
+      'WeftCut prefers the original file. A proxy must be chosen explicitly.',
       'Custom asset metadata is not copied to the project',
     ]))
+  })
+
+  it('offers a local proxy only as a reviewed replacement for an unavailable original', async () => {
+    const proxy = join(parent, 'Harbor proxy.mov')
+    await writeFile(proxy, 'Fictional proxy media')
+    const replacement = await realpath(proxy)
+    const xml = fixture(pathToFileURL(media).href).replace('</asset>',
+      `<media-rep kind="proxy-media" src="${pathToFileURL(proxy).href}"/>
+       <media-rep kind="proxy-media" src="file://example.invalid/Share/Remote.mov"/></asset>`)
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toMatchObject({ issues: [{ assetRef: 'take', proxyPaths: [proxy] }] })
+    expect(run.probeMedia).not.toHaveBeenCalled()
+    const probe = JSON.parse(await run.probeMedia())
+    probe.path_abs = replacement
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe)).mockClear()
+    const { project, report } = await run.prepareReview(undefined, [{ assetRef: 'take', path: proxy }])
+    expect(run.probeMedia).toHaveBeenCalledExactlyOnceWith(replacement)
+    expect(report.mediaChanges).toMatchObject([{ assetRef: 'take', kind: 'proxy-source', detail: expect.stringContaining('editing and export') }])
+    expect(report.relinkedMedia).toMatchObject([{ from: media, to: replacement }])
+    expect(rootComposition(project).tracks[0]!.layers[0]).toMatchObject({ t_start_us: 0, t_end_us: 100100 })
+    expect(run.actor.snapshot()).toBe(run.before)
   })
 
   it('selects projects alongside event collections and preserves disabled clips with equivalent format IDs', async () => {

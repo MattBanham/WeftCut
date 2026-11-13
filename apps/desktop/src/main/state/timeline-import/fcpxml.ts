@@ -301,19 +301,23 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
   const mediaNotices: string[] = []
   if (hasMetadata) mediaNotices.push('Custom asset metadata is not copied to the project')
   const originalReps: Element[] = []
+  const proxies: OriginalMediaPath[] = []
   for (const rep of representations) {
     check(rep, ['kind', 'src', 'sig', 'suggestedFilename'], ['bookmark'])
     if (rep.children.length > 1) fail(rep, 'A media representation can have only one bookmark')
     for (const bookmark of rep.children) check(bookmark, [])
     const kind = rep.attrs.kind ?? 'original-media'
     if (kind === 'original-media') originalReps.push(rep)
-    else if (kind !== 'proxy-media') fail(rep, 'This media representation is unsupported. Export a reference to the original file.')
+    else if (kind === 'proxy-media') {
+      try { proxies.push(originalMediaPath(required(rep, 'src'))) }
+      catch { mediaNotices.push('A proxy path is unavailable for local relinking. Choose a local copy if you need it.') }
+    } else fail(rep, 'This media representation is unsupported. Export a reference to the original file.')
   }
   if (a.src !== undefined && representations.length) fail(el, 'The asset specifies both a legacy URL and media representations. Export it with one original.')
   if (a.src === undefined && originalReps.length !== 1) {
     fail(el, 'The asset needs exactly one original media-rep. Relink the original in the source editor and export again.')
   }
-  if (representations.length > originalReps.length) mediaNotices.push('Proxy media in the FCPXML is not used. WeftCut imports the original file.')
+  if (proxies.length) mediaNotices.push('WeftCut prefers the original file. A proxy must be chosen explicitly.')
   if (representations.some(rep => rep.attrs.sig !== undefined)) mediaNotices.push('Source media signature is not retained')
   if (representations.some(rep => rep.children.length)) mediaNotices.push(
     'Apple file access bookmarks are left out. WeftCut uses the local media path or a replacement you choose.')
@@ -322,7 +326,7 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
   const original = localPath(a.src !== undefined ? el : originalReps[0]!)
 
   if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
-  return { ref: required(el, 'id'), name: a.name, ...original, start: time(el, 'start', ZERO_TIME), duration,
+  return { ref: required(el, 'id'), name: a.name, ...original, proxies, start: time(el, 'start', ZERO_TIME), duration,
     hasVideo, hasAudio, stillImage, imageSize, sourceColor, videoFormat, audioChannels, audioRate, mediaNotices }
 }
 

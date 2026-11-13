@@ -7,6 +7,7 @@ import type { OriginalMediaPath } from './mediaPath'
 export interface TimelineSource extends OriginalMediaPath {
   ref: string
   name?: string
+  proxies?: OriginalMediaPath[]
   duration: ExactTime
   hasVideo: boolean
   /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */

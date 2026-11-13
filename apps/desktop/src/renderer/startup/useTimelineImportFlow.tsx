@@ -190,6 +190,11 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
                   {t("startup.import_use_candidate", { name: path.split(/[\\/]/).pop() })}
                 </Button>
               ))}
+              {issue.proxyPaths?.map(path => (
+                <Button key={path} title={path} onClick={() => void relink(issue.assetRef, path)} disabled={busy}>
+                  {t("startup.import_use_proxy", { name: path.split(/[\\/]/).pop() })}
+                </Button>
+              ))}
               <Button onClick={() => void relink(issue.assetRef)} disabled={busy}>
                 {t("startup.import_choose_replacement")}
               </Button>

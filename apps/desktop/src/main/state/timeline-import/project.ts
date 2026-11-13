@@ -201,6 +201,11 @@ export async function prepareTimelineProject(
     const { label, placements } = originals.get(asset.ref)!
     return { assetRef: asset.ref, label, filename: asset.filename, sourcePath: asset.path, placements, detail }
   }
+  const localProxies = (asset: TimelineSource) => [...new Set(asset.proxies?.filter(proxy => proxy.local).map(proxy => proxy.path) ?? [])].slice(0, 5)
+  const replacementIssue = (asset: TimelineSource, detail: string, exclude?: string): TimelineMediaIssue => {
+    const proxyPaths = localProxies(asset).filter(path => path !== exclude && path !== asset.path)
+    return { ...mediaIssue(asset, detail), ...(proxyPaths.length ? { proxyPaths } : {}) }
+  }
   if (originals.size > FCPXML_LIMITS.mediaFiles) {
     throw new Error('This sequence references too many media assets. Export the sequence in smaller parts')
   }
@@ -244,7 +249,7 @@ export async function prepareTimelineProject(
         continue
       } catch {
         if (replacement !== undefined) {
-          missing.push(mediaIssue(asset, 'The chosen replacement is missing or unreadable. Choose another local file.'))
+          missing.push(replacementIssue(asset, 'The chosen replacement is missing or unreadable. Choose another local file.', replacement))
           continue
         }
       }
@@ -264,7 +269,7 @@ export async function prepareTimelineProject(
         continue
       } catch { /* Leave this asset unresolved. */ }
     }
-    const issue = mediaIssue(asset, 'Missing or unreadable original media: ' + asset.path +
+    const issue = replacementIssue(asset, 'Missing or unreadable original media: ' + asset.path +
       (asset.local ? '' : ' (path is from another platform)') + '. Choose the original file or look for it in a folder.')
     const suggestions = candidates?.suggestions.get(comparableFilename(asset.filename))?.filter(path => path !== candidate)
     if (suggestions?.length) issue.suggestedPaths = suggestions
@@ -282,7 +287,7 @@ export async function prepareTimelineProject(
   }
   for (const [ref, { path, choice }] of resolved) {
     if (choice !== 'folder' || originalPathsByFile.get(fileKeys.get(path)!)!.size <= 1) continue
-    missing.push({ ...mediaIssue(originals.get(ref)!.asset, 'Ambiguous media relink. More than one original matches this file. Choose the file for this asset.'),
+    missing.push({ ...replacementIssue(originals.get(ref)!.asset, 'Ambiguous media relink. More than one original matches this file. Choose the file for this asset.'),
       suggestedPaths: [path] })
     resolved.delete(ref)
   }
@@ -305,8 +310,8 @@ export async function prepareTimelineProject(
       if (choice !== 'original' && asset.path !== mediaPath) relinkedMedia.push({ assetRef: ref, label, from: asset.path, to: mediaPath })
     } catch (error) {
       assertCurrent()
-      failed.push(mediaIssue(asset, 'Could not read ' + mediaPath + '. Choose another file or export a compatible copy. ' +
-        (error instanceof Error ? error.message : String(error))))
+      failed.push(replacementIssue(asset, 'Could not read ' + mediaPath + '. Choose another file or export a compatible copy. ' +
+        (error instanceof Error ? error.message : String(error)), selected.get(ref)))
     }
   }
   assertCurrent()
@@ -315,6 +320,15 @@ export async function prepareTimelineProject(
   const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.ref)!]!
   const sourceEnds = new Map<TimelineClip, { videoEnd: ExactTime; audioEnd: ExactTime }>()
   const mediaChanges = new Map<string, TimelineMediaChange>()
+  for (const [ref, { path, choice }] of resolved) {
+    const { asset } = originals.get(ref)!
+    const chosen = selected.get(ref) ?? path
+    if (choice === 'original' || !mediaIds.has(ref) || !asset.proxies?.some(proxy => proxy.local && (proxy.path === chosen || proxy.path === path))) continue
+    const kind = 'proxy-source'
+    const issue = mediaIssue(asset, 'The selected file is a proxy. WeftCut will use this copy for editing and export. ' +
+      'It may have lower picture or sound quality. The original cut times stay in place.')
+    mediaChanges.set(JSON.stringify([ref, kind]), { ...issue, kind, sourcePath: path })
+  }
   const incompatibilities = new Map<string, TimelineMediaIssue>()
   for (const clip of clips) {
     const item = itemOf(clip)
@@ -329,7 +343,7 @@ export async function prepareTimelineProject(
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       const key = JSON.stringify([clip.asset.ref, detail])
-      incompatibilities.set(key, mediaIssue(clip.asset, detail))
+      incompatibilities.set(key, replacementIssue(clip.asset, detail, selected.get(clip.asset.ref)))
     }
   }
   if (missing.length || failed.length || incompatibilities.size) {

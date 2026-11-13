@@ -561,7 +561,7 @@ test('reviews missing media, a size mismatch and an effect together before impor
     <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
     <format id="still" name="FFVideoFormatRateUndefined" width="640" height="360"/>
     <asset id="image" format="still" duration="0s" hasVideo="1" src="${pathToFileURL(still).href}"/>
-    <asset id="a" uid="fictional-asset" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
+    <asset id="a" uid="fictional-asset" format="f" duration="1001/30000s" hasVideo="1" hasAudio="1"
       audioSources="1" audioChannels="2" audioRate="48000">
       <media-rep kind="original-media" sig="fictional-signature" src="${pathToFileURL(lost).href}"/>
     </asset>
@@ -592,9 +592,11 @@ test('reviews missing media, a size mismatch and an effect together before impor
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await problems.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const unsupported = page.getByRole('dialog', { name: 'Some edits need attention' })
+    await expect(unsupported.getByText(/The file contains that material. WeftCut can keep the original cut times/)).toBeVisible()
     await expect(unsupported.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
     await unsupported.getByRole('button', { name: 'Review without these effects…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Audio end quantized to the 48 kHz sample grid')
     await expect(review).toContainText('Check media replacements')
     await expect(review).toContainText('Source asset UID is not retained')
     await expect(review).toContainText('Source media signature is not retained')
@@ -613,6 +615,15 @@ test('reviews missing media, a size mismatch and an effect together before impor
     expect(records.map(record => readFileSync(record.path_abs))).toEqual(expect.arrayContaining([
       readFileSync(actual), readFileSync(still),
     ]))
+    const imported = (Object.values(project.compositions) as any[]).find(comp => comp.label === 'Offline')
+    const layers = imported.tracks.flatMap((track: any) => track.layers)
+    const video = layers.find((layer: any) => layer.params.kind === 'VideoClip')
+    const audio = layers.find((layer: any) => layer.params.kind === 'Audio')
+    const sequenceEnd = 100100
+    const finalSample = Math.floor(sequenceEnd * 48_000 / 1_000_000)
+    expect(video).toMatchObject({ t_start_us: 0, t_end_us: sequenceEnd, params: { src_out_us: sequenceEnd } })
+    expect(audio).toMatchObject({ t_start_us: 0, t_end_us: Math.round(finalSample * 1_000_000 / 48_000),
+      params: { src_out_us: sequenceEnd } })
   } finally { await app.close() }
 })
 

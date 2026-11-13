@@ -21,7 +21,7 @@ than one project. The importer supports the subset below with FCPXML headers
 
 | Source edit or condition | What WeftCut does |
 | --- | --- |
-| Cuts, gaps and trims | Preserves supported placement and source ranges. Named gaps keep their span and the review reports that their names are left out. |
+| Cuts, gaps and trims | Preserves supported placement and source ranges. When the XML lists too short a source duration, review can keep the original cut if every requested media stream covers it. Named gaps keep their span and the review reports that their names are left out. |
 | Video, stills and audio | Preserves enabled state, selected media components, linked A/V and supported track order. Connected clips keep their positions and become independently movable. |
 | Canvas and media size | Preserves the sequence canvas. Source media uses Fit by default or the authored Fill or None setting. Review shows declared and decoded sizes when they differ, with a choice to use the file or replace it. |
 | Different destination frame rate | Choose **Review as a new project…** to keep the sequence rate. The current project is saved before switching. If rates match and canvases differ, choose Fit, Fill or Original size for the imported Group. |

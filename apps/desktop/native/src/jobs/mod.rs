@@ -1525,6 +1525,7 @@ mod tests {
                 sample_rate: 48_000,
                 channels: 1,
                 start_pts_us: None,
+                duration_us: None,
             });
             let mut header = conform::MAGIC.to_vec();
             header.extend_from_slice(&conform::CONFORM_FORMAT_VERSION.to_le_bytes());

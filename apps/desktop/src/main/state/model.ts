@@ -217,11 +217,11 @@ export interface RoleMixSettings { gain_db: number; muted: boolean; solo: boolea
 export interface MediaVideoMetadata {
   width?: number; height?: number; fps_num?: number; fps_den?: number
   codec?: string; pix_fmt?: string; start_pts_us?: TimeUs | null
-  nb_frames?: number | null; [k: string]: unknown
+  duration_us?: TimeUs | null; nb_frames?: number | null; [k: string]: unknown
 }
 export interface MediaAudioMetadata {
   sample_rate?: number; channels?: number; codec?: string
-  start_pts_us?: TimeUs | null; [k: string]: unknown
+  start_pts_us?: TimeUs | null; duration_us?: TimeUs | null; [k: string]: unknown
 }
 export interface MediaMetadata {
   /** Normalized content duration; timeline source windows use this domain. */

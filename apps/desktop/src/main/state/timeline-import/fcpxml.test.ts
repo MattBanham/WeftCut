@@ -294,9 +294,8 @@ describe('FCPXML subset', () => {
       asset: { videoFormat: { width: 640, height: 360,
         frameDuration: { num: 40000, den: 1 } } },
     })
-    expect(() => parseFcpxml(mixedVideoFixture('file:///fictional/Camera.mov')
-      .replace('start="1/25s"', 'start="1/30s"')))
-      .toThrow(/"source in" is between frames/)
+    expect(parseFcpxml(mixedVideoFixture('file:///fictional/Camera.mov')
+      .replace('start="1/25s"', 'start="1/30s"')).clips[0]!.sourceIn).toEqual({ num: 100000, den: 3 })
   })
 
   it('accepts Illustrated Story mono narration and still PNG visemes as connected image clips', () => {
@@ -351,7 +350,7 @@ describe('FCPXML subset', () => {
     ['a remote file', (xml: string) => xml.replace(/src="file:[^"]+"/, 'src="https://example.invalid/take.mov"'), /absolute local file URL/],
     ['a gap overlapping a clip', (xml: string) => xml.replace('offset="3003/30000s"', 'offset="2002/30000s"'), /Overlaps the preceding/],
     ['a subframe cut', (xml: string) => xml.replace('offset="4004/30000s"', 'offset="4005/30000s"'), /between frames/],
-    ['an out-of-bounds trim', (xml: string) => xml.replace('108006006/30000s', '3610s'), /outside the declared source range/],
+    ['a trim before the source timecode', (xml: string) => xml.replace('108006006/30000s', '3599s'), /before the asset’s source timecode/],
     ['duplicate IDs', (xml: string) => xml.replace('id="take"', 'id="format"'), /Duplicate resource ID/],
   ])('refuses %s with a diagnostic', (_reason, change, error) => {
     const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href
@@ -779,6 +778,52 @@ describe('timeline import transaction', () => {
     expect(sourceIn(video[0]!.params as Extract<typeof video[0]['params'], { kind: 'VideoClip' }>)).toEqual({ num: 200200, den: 3 })
     expect(report.resampledAudioClips).toBe(2)
     expect(() => validate(project)).not.toThrow()
+  })
+
+  it('keeps cuts past a stale XML duration only when every requested stream covers the trim', async () => {
+    await writeFile(media, 'Fictional source')
+    await writeFile(document, fixture(pathToFileURL(media).href).replace('duration="10s"', 'duration="1/30s"'))
+    const run = setup()
+    const probe = JSON.parse(await run.probeMedia())
+    probe.metadata.video.duration_us = 10_000_000
+    probe.metadata.audio.duration_us = 10_000_000
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    const { project, report } = await run.prepareReview()
+    expect(report.mediaChanges).toMatchObject([
+      { kind: 'source-duration', assetRef: 'take', placements: 2, detail: expect.stringContaining('keep the original cut times') },
+    ])
+    const layers = rootComposition(project).tracks[0]!.layers
+    expect(layers.filter(layer => layer.params.kind === 'VideoClip')).toMatchObject([
+      { t_start_us: 0, t_end_us: 100100, params: { src_in_us: 66733, src_out_us: 166833 } },
+      { t_start_us: 133467, t_end_us: 200200, params: { src_in_us: 200200, src_out_us: 266933 } },
+    ])
+    expect(() => validate(project)).not.toThrow()
+    delete probe.metadata.audio.duration_us
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    await expect(run.prepareReview()).rejects.toThrow(/cannot verify that every requested stream covers it/)
+    probe.metadata.audio.duration_us = 90_000
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    await expect(run.prepareReview()).rejects.toThrow(/audio stream ends before this trim/)
+    expect(run.actor.snapshot()).toBe(run.before)
+    expect(existsSync(destination)).toBe(false)
+  })
+
+  it('uses a source in-point that aligns with the actual file when the XML source rate is wrong', async () => {
+    await writeFile(media, 'Fictional camera file')
+    const xml = mixedVideoFixture(pathToFileURL(media).href).replace('start="1/25s"', 'start="1/30s"')
+    await writeFile(document, xml)
+    const run = setup()
+    const probe = JSON.parse(await run.probeMedia())
+    Object.assign(probe.metadata.video, { fps_num: 30, fps_den: 1 })
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    const { project, report } = await run.prepareReview()
+    expect(report.mediaChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'video-rate', detail: expect.stringContaining('keep the cut times') }),
+    ]))
+    const layer = rootComposition(project).tracks[0]!.layers[0]!
+    if (layer.params.kind !== 'VideoClip') throw new Error('Expected video')
+    expect(sourceIn(layer.params)).toEqual({ num: 100000, den: 3 })
+    expect(layer).toMatchObject({ t_start_us: 0, t_end_us: 100000 })
   })
 
   it('preflights missing media before probing or creating any project folder', async () => {

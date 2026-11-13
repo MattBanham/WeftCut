@@ -81,7 +81,62 @@ const illustratedStoryFixture = (audioUrl: string, imageUrl: string) => `<?xml v
   </project></event></library>
 </fcpxml>`
 
+function multicamFixture() {
+  return ['<fcpxml version="1.10"><resources>',
+    '<format id="f" frameDuration="1/30s" width="320" height="240"/>',
+    '<asset id="v" format="f" hasVideo="1" start="3600s" duration="2s" src="file:///fictional/Camera.mov"/>',
+    '<asset id="a" hasAudio="1" start="2s" duration="2s" src="file:///fictional/Sound.wav"/>',
+    '<media id="m"><multicam format="f" tcStart="600s" duration="1s">',
+    '<mc-angle name="Wide" angleID="v"><asset-clip ref="v" offset="600s" start="3600s" duration="10/30s"/>',
+    '<asset-clip ref="v" offset="18010/30s" start="108020/30s" duration="20/30s"/></mc-angle>',
+    '<mc-angle name="Recorder" angleID="a"><asset-clip ref="a" offset="600s" start="2s" duration="1s"/></mc-angle>',
+    '<mc-angle name="Unused" angleID="u"><title name="Offline alternate"/></mc-angle>',
+    '</multicam></media></resources>',
+    '<project name="Fictional multicam"><sequence format="f"><spine>',
+    '<gap duration="1/30s"/><mc-clip ref="m" offset="1/30s" start="18008/30s" duration="4/30s" name="Camera edit">',
+    '<adjust-volume amount="-6dB"/><mc-source angleID="v" srcEnable="video"><adjust-conform type="fill"/></mc-source>',
+    '<mc-source angleID="a" srcEnable="audio"/><mc-source angleID="u" srcEnable="none"/>',
+    '</mc-clip></spine></sequence></project></fcpxml>'].join('')
+}
+
 describe('FCPXML subset', () => {
+  it('keeps an explicitly selected camera and separate audio across a source cut', () => {
+    const timeline = parseFcpxml(multicamFixture())
+    expect(timeline.groups).toHaveLength(1)
+    const group = timeline.groups[0]!
+    expect(group).toMatchObject({ kind: 'multicam', firstFrame: 1, endFrame: 5 })
+    expect(group.timeline.clips).toMatchObject([
+      { hasVideo: false, audioRole: 'dialogue', volumeDb: -6, asset: { ref: 'a' }, sourceIn: { num: 800000, den: 3 } },
+      { hasVideo: true, audioRole: null, conform: 'fill', firstFrame: 0, endFrame: 2, sourceIn: { num: 800000, den: 3 } },
+      { hasVideo: true, audioRole: null, conform: 'fill', firstFrame: 2, endFrame: 4, sourceIn: { num: 2000000, den: 3 } },
+    ])
+    expect(timeline.notices.flatMap(notice => notice.notes).join(' ')).toMatch(/Wide \(video\).*Recorder \(audio\).*Unused angles/)
+  })
+
+  it('keeps both streams of an explicitly selected angle and preserves an explicit gap', () => {
+    const xml = multicamFixture()
+      .replace('id="v" format="f" hasVideo="1"', 'id="v" format="f" hasVideo="1" hasAudio="1"')
+      .replace('angleID="v" srcEnable="video"', 'angleID="v" srcEnable="all"')
+      .replace('<mc-source angleID="a" srcEnable="audio"/>', '')
+      .replace('<asset-clip ref="v" offset="18010/30s" start="108020/30s" duration="20/30s"/>',
+        '<gap offset="18010/30s" duration="20/30s"/>')
+    const timeline = parseFcpxml(xml)
+    const group = timeline.groups[0]!
+    expect(group.endFrame - group.firstFrame).toBe(4)
+    expect(group.timeline.clips).toMatchObject([{ hasVideo: true, audioRole: 'dialogue', firstFrame: 0, endFrame: 2 }])
+    expect(group.timeline.clips).toHaveLength(1)
+  })
+
+  it.each([
+    ['duplicate active video', (xml: string) => xml.replace('angleID="u" srcEnable="none"', 'angleID="u" srcEnable="video"'), /More than one angle/],
+    ['uncovered selected range', (xml: string) => xml.replace('offset="18010/30s"', 'offset="18011/30s"'), /no clip or explicit gap/],
+    ['a selected component mute', (xml: string) => xml.replace('<mc-source angleID="a" srcEnable="audio"/>', '<mc-source angleID="a" srcEnable="audio"><audio-role-source role="dialogue"><mute start="0s" duration="1s"/></audio-role-source></mc-source>'), /audio-role-source/],
+    ['split audio trim', (xml: string) => xml.replace('<mc-clip ref="m"', '<mc-clip ref="m" audioStart="1s"'), /audioStart/],
+  ])('reports how to flatten multicam with %s', (_name, change, reason) => {
+    expect(() => parseFcpxml(change(multicamFixture()))).toThrow(reason)
+    expect(() => parseFcpxml(change(multicamFixture()))).toThrow(/flattening this multicam edit/)
+  })
+
   it('keeps fractional frames, source timecode origin and marker time distinct', () => {
     const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href
     const parsed = parseFcpxml(fixture(url))
@@ -182,7 +237,7 @@ describe('FCPXML subset', () => {
     ['transition', '<gap offset="3003/30000s" duration="1001/30000s"/>',
       '<transition duration="1001/30000s"/>', /Unsupported inside <spine>/],
     ['multicam clip', '<gap offset="3003/30000s" duration="1001/30000s"/>',
-      '<mc-clip ref="multicam" duration="1001/30000s"/>', /Unsupported inside <spine>/],
+      '<mc-clip ref="multicam" duration="1001/30000s"/>', /no media definition.*flattening/],
     ['motion title', '<gap offset="3003/30000s" duration="1001/30000s"/>',
       '<title ref="motion-template" duration="1001/30000s"/>', /Unsupported inside <spine>/],
   ])('blocks an unsupported %s instead of silently dropping it', (_name, find, replace, issue) => {

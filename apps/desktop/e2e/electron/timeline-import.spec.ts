@@ -763,6 +763,71 @@ test('keeps repeated compound clips editable with separate trims and one Undo', 
   } finally { await app.close() }
 })
 
+test('imports the selected multicam picture and recorder audio as editable Group clips', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-multicam-import-')
+  const source = join(folder, 'Field Notes.fcpxml')
+  const camera = join(folder, 'Camera.mov')
+  const recorder = join(folder, 'Recorder.wav')
+  const destination = join(folder, 'Field Notes')
+  encodeSource(camera)
+  execFileSync('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000',
+    '-t', '1', '-c:a', 'pcm_s16le', recorder,
+  ], { windowsHide: true })
+  writeFileSync(source, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="v" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1" src="${pathToFileURL(camera).href}"/>
+    <asset id="a" duration="1s" hasAudio="1" src="${pathToFileURL(recorder).href}"/>
+    <asset id="unused" format="f" duration="1s" hasVideo="1" src="file:///fictional/Unused.mov"/>
+    <media id="m" name="Field Cameras"><multicam format="f" duration="1s">
+      <mc-angle name="Wide camera" angleID="wide"><asset-clip ref="v" offset="0s" start="0s" duration="1s"/></mc-angle>
+      <mc-angle name="Field recorder" angleID="sound"><asset-clip ref="a" offset="0s" start="0s" duration="1s"/></mc-angle>
+      <mc-angle name="Alternate" angleID="alt"><asset-clip ref="unused" offset="0s" duration="1s"/></mc-angle>
+    </multicam></media>
+  </resources><project name="Field Notes"><sequence format="f"><spine>
+    <mc-clip ref="m" name="Selected take" start="6006/30000s" duration="5005/30000s">
+      <mc-source angleID="wide" srcEnable="video"/><mc-source angleID="sound" srcEnable="audio"/>
+      <mc-source angleID="alt" srcEnable="none"/>
+    </mc-clip>
+  </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, source)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Wide camera (video), Field recorder (audio)')
+    await expect(review).toContainText('Angle switching stays in the source editor')
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const group = (Object.values(project.compositions) as any[]).find(comp => comp.label === 'Selected take')
+    const layers = group.tracks.flatMap((track: any) => track.layers)
+    const video = layers.find((layer: any) => layer.params.kind === 'VideoClip')
+    const audio = layers.find((layer: any) => layer.params.kind === 'Audio')
+    expect(video).toMatchObject({ t_start_us: 0, params: { src_in_us: 200200 } })
+    expect(audio).toMatchObject({ t_start_us: 0, params: { src_in_us: 200200 } })
+    expect(readFileSync(project.media_pool[video.params.media].path_abs)).toEqual(readFileSync(camera))
+    expect(readFileSync(project.media_pool[audio.params.media].path_abs)).toEqual(readFileSync(recorder))
+    expect(Object.keys(project.media_pool)).toHaveLength(2)
+    await waitForHook(page, 'weftcutSampleComposite')
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(33367))
+    await expect.poll(async () => {
+      const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(160, 120))
+      return pixel?.r ?? 0
+    }).toBeGreaterThan(200)
+    await invokeCmd(page, 'project_undo')
+    const undone = await invokeCmd<ProjectSummaryWire>(page, 'project_summary')
+    expect(Object.keys(undone.compositions)).toHaveLength(1)
+  } finally { await app.close() }
+})
+
 test('imports a built-in cross dissolve and renders both clips at its midpoint', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-dissolve-import-')

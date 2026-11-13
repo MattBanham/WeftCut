@@ -12,6 +12,7 @@ interface Element {
   attrs: Record<string, string>
   children: Element[]
   line: number
+  timing?: Record<string, ExactTime>
 }
 
 interface Asset extends TimelineSource {
@@ -50,8 +51,10 @@ function location(el: Element): string {
   return `<${el.tag}> at line ${el.line}${name ? ` (${name})` : ''}`
 }
 
+class FcpxmlError extends Error {}
+
 function fail(el: Element, message: string): never {
-  throw new Error(`FCPXML ${location(el)}: ${message}`)
+  throw new FcpxmlError(`FCPXML ${location(el)}: ${message}`)
 }
 
 function readXml(xml: string): Element {
@@ -115,7 +118,7 @@ function check(el: Element, attrs: readonly string[], children: readonly string[
   for (const child of el.children) {
     if (!children.includes(child.tag)) errors.push('FCPXML ' + location(child) + ': Unsupported inside <' + el.tag + '>. Simplify the edit and export again')
   }
-  if (errors.length) throw new Error(errors.join('\n'))
+  if (errors.length) throw new FcpxmlError(errors.join('\n'))
 }
 
 function one(el: Element, tag: string): Element {
@@ -131,6 +134,8 @@ function required(el: Element, key: string): string {
 }
 
 function time(el: Element, key: string, fallback?: ExactTime): ExactTime {
+  const normalized = el.timing?.[key]
+  if (normalized !== undefined) return normalized
   if (el.attrs[key] === undefined && fallback !== undefined) return fallback
   const raw = required(el, key)
   const match = /^(\d{1,16})(?:\/(\d{1,10}))?s$/.exec(raw)
@@ -423,7 +428,9 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, effects
     if (byId.has(id)) fail(el, `Duplicate resource ID "${id}"`)
     byId.set(id, el)
   }
-  const context: SequenceContext = { byId, effects, compounds: new Map(), active: new Set() }
+  const context: SequenceContext = {
+    byId, effects, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
+  }
   const timeline = parseSequence(seq, project, context, { root, library, choices: choices.length })
   const measured = new Map<ImportTimeline, { placements: number; depth: number }>()
   function measure(current: ImportTimeline): { placements: number; depth: number } {
@@ -452,6 +459,176 @@ interface SequenceContext {
   effects: 'refuse' | 'inspect' | 'omit'
   compounds: Map<string, ImportTimeline>
   active: Set<string>
+  multicams: Map<Element, Map<string, MulticamAngle>>
+  multicamSegments: number
+}
+
+type ClipComponent = 'all' | 'audio' | 'video'
+interface MulticamAngle {
+  node: Element
+  entries?: { node: Element; start: ExactTime; end: ExactTime }[]
+}
+
+const multicamRemedy = 'Keep the selected angles by flattening this multicam edit to ordinary clips in the source editor, then export again.'
+
+function multicamSequence(el: Element, context: SequenceContext, fps: ImportTimeline['fps']): {
+  sequence: Element; names: string[]; duration: ExactTime; label: string
+} {
+  const unsupported = (node: Element, reason: string): never => fail(node, reason + ' ' + multicamRemedy)
+  check(el, ['name', 'ref', 'offset', 'start', 'duration', 'enabled', 'srcEnable', 'lane', 'modDate'],
+    ['mc-source', 'adjust-volume'])
+  if ((el.attrs.lane ?? '0') !== '0' || !['0', '1'].includes(el.attrs.enabled ?? '1')) {
+    unsupported(el, 'This multicam placement needs a primary lane and a valid enabled flag.')
+  }
+  const media = context.byId.get(required(el, 'ref'))
+  if (media?.tag !== 'media') return unsupported(el, 'This multicam clip has no media definition.')
+  const multicam = media.children[0]
+  if (media.children.length !== 1 || multicam?.tag !== 'multicam') return unsupported(el, 'This media does not define a multicam edit.')
+  const formatId = required(multicam, 'format')
+  const formatNode = context.byId.get(formatId)
+  if (formatNode?.tag !== 'format') return unsupported(multicam, 'The multicam format is missing.')
+  const format = parseFormat(formatNode)
+  if (compareTime(format.frameDuration, exactTime(1_000_000 * fps.den, fps.num)) !== 0) {
+    unsupported(multicam, 'The multicam uses a different frame rate from the sequence.')
+  }
+  const duration = time(el, 'duration')
+  const origin = time(multicam, 'tcStart', ZERO_TIME)
+  const start = time(el, 'start', origin)
+  const end = addTime(start, duration)
+  if (duration.num <= 0 || compareTime(start, origin) < 0) unsupported(el, 'The multicam cut has an invalid source range.')
+  if (multicam.attrs.duration !== undefined && compareTime(end, addTime(origin, time(multicam, 'duration'))) > 0) {
+    unsupported(el, 'The cut extends past the multicam definition.')
+  }
+  const selection = el.attrs.srcEnable ?? 'all'
+  if (selection !== 'all' && selection !== 'video' && selection !== 'audio') unsupported(el, 'The selected media components are unknown.')
+  let angles = context.multicams.get(multicam)
+  if (!angles) {
+    check(media, ['id', 'name', 'uid', 'modDate'], ['multicam'])
+    check(multicam, ['format', 'tcStart', 'tcFormat', 'duration', 'renderFormat'], ['mc-angle', 'metadata'])
+    angles = new Map()
+    for (const node of multicam.children) {
+      if (node.tag !== 'mc-angle') continue
+      const id = required(node, 'angleID')
+      if (angles.has(id)) unsupported(node, 'Two angles use the same identifier.')
+      angles.set(id, { node })
+    }
+    context.multicams.set(multicam, angles)
+  }
+
+  const picks = new Map<string, { component: ClipComponent; adjustments: Element[] }>()
+  const seen = new Set<string>()
+  let usedVideo = false
+  let usedAudio = false
+  for (const node of el.children.filter(child => child.tag === 'mc-source')) {
+    const id = required(node, 'angleID')
+    const enable = node.attrs.srcEnable ?? 'all'
+    if (!angles.has(id) || seen.has(id)) unsupported(node, 'The selected angle is missing or is listed twice.')
+    seen.add(id)
+    if (enable !== 'all' && enable !== 'video' && enable !== 'audio' && enable !== 'none') {
+      unsupported(node, 'The angle selection is unknown.')
+    }
+    const video = enable !== 'none' && enable !== 'audio' && selection !== 'audio'
+    const audio = enable !== 'none' && enable !== 'video' && selection !== 'video'
+    if (!video && !audio) continue
+    check(node, ['angleID', 'srcEnable'], ['adjust-conform', 'adjust-transform', 'adjust-blend'])
+    if ((video && usedVideo) || (audio && usedAudio)) unsupported(node, 'More than one angle is active for the same media component.')
+    usedVideo ||= video
+    usedAudio ||= audio
+    picks.set(id, { component: video && audio ? 'all' : video ? 'video' : 'audio', adjustments: node.children })
+  }
+  if (!picks.size || (selection === 'video' && !usedVideo) || (selection === 'audio' && !usedAudio)) {
+    unsupported(el, 'No usable camera or audio angle was explicitly selected.')
+  }
+
+  const label = el.attrs.name || media.attrs.name || 'Multicam edit'
+  const names: string[] = []
+  const clips: Element[] = []
+  const volume = el.children.filter(child => child.tag === 'adjust-volume')
+  for (const [id, { component, adjustments: angleAdjustments }] of picks) {
+    const angle = angles.get(id)!
+    const name = angle.node.attrs.name || id
+    names.push(name + (component === 'all' ? '' : ' (' + component + ')'))
+    if (!angle.entries) {
+      check(angle.node, ['name', 'angleID'], ['asset-clip', 'video', 'audio', 'gap'])
+      let previousEnd = origin
+      angle.entries = angle.node.children.map(node => {
+        const entryStart = time(node, 'offset', origin)
+        const asset = node.tag === 'gap' ? undefined : context.byId.get(required(node, 'ref'))
+        if (asset && asset.tag !== 'asset') unsupported(node, 'This angle contains a nested edit.')
+        const span = time(node, 'duration', asset && node.tag === 'asset-clip' ? time(asset, 'duration') : undefined)
+        const entryEnd = addTime(entryStart, span)
+        if (span.num <= 0 || compareTime(entryStart, previousEnd) < 0) {
+          unsupported(node, 'The angle has an overlap or an invalid duration.')
+        }
+        previousEnd = entryEnd
+        return { node, start: entryStart, end: entryEnd }
+      })
+    }
+    const entries = angle.entries
+    let low = 0
+    let high = entries.length
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2)
+      if (compareTime(entries[mid]!.end, start) <= 0) low = mid + 1
+      else high = mid
+    }
+    let covered = start
+    for (let index = low; index < entries.length && compareTime(covered, end) < 0; index++) {
+      const entry = entries[index]!
+      const node = entry.node
+      if (compareTime(entry.start, covered) > 0) break
+      const cutEnd = compareTime(entry.end, end) < 0 ? entry.end : end
+      if (++context.multicamSegments > FCPXML_LIMITS.expandedPlacements) {
+        unsupported(el, 'The multicam edit expands into too many segments. Export a smaller sequence.')
+      }
+      if (node.tag === 'gap') {
+        check(node, ['name', 'offset', 'start', 'duration'])
+      } else {
+        const attrs = node.attrs
+        const asset = context.byId.get(required(node, 'ref'))
+        if (asset?.tag !== 'asset') return unsupported(node, 'This angle’s file is missing from the resource list.')
+        const original = node.tag === 'video' || node.tag === 'audio' ? node.tag : attrs.srcEnable ?? 'all'
+        if (original !== 'all' && original !== 'video' && original !== 'audio') unsupported(node, 'The angle’s clip selection is unknown.')
+        const video = asset.attrs.hasVideo === '1' && original !== 'audio' && component !== 'audio'
+        const audio = asset.attrs.hasAudio === '1' && original !== 'video' && component !== 'video'
+        if ((!video && !audio) || (component === 'video' && !video) || (component === 'audio' && !audio)) {
+          unsupported(node, 'The angle’s file lacks the selected ' + component + ' media.')
+        }
+        check(node, ['name', 'ref', 'offset', 'start', 'duration', 'enabled', 'format', 'tcFormat', 'audioRole', 'videoRole', 'role',
+          ...(node.tag === 'asset-clip' ? ['srcEnable'] : [])],
+        ['adjust-conform', 'adjust-transform', 'adjust-blend', 'adjust-volume'])
+        const sourceStart = time(node, 'start', time(asset, 'start', ZERO_TIME))
+        if (asset.attrs.hasVideo === '1' && time(asset, 'duration').num === 0) {
+          unsupported(node, 'This angle contains a still image with no source clock.')
+        }
+        const adjustments = [
+          ...node.children.filter(child => child.tag === 'adjust-volume' ? audio : video),
+          ...(video ? angleAdjustments : []),
+          ...(audio ? volume : []),
+        ]
+        if (new Set(adjustments.map(child => child.tag)).size !== adjustments.length) {
+          unsupported(node, 'More than one setting controls the same angle adjustment.')
+        }
+        const { role, ...rest } = attrs
+        if (node.tag === 'video' && role !== undefined && role !== 'video') unsupported(node, 'The camera clip uses an unsupported video role.')
+        clips.push({ ...node, tag: 'asset-clip', attrs: { ...rest, name: attrs.name || name,
+          lane: video ? '1' : '-1', audioRole: attrs.audioRole ?? (node.tag === 'audio' ? role : undefined) ?? 'dialogue',
+          srcEnable: video && audio ? 'all' : video ? 'video' : 'audio' },
+        timing: { offset: subtractTime(covered, start), duration: subtractTime(cutEnd, covered),
+          start: addTime(sourceStart, subtractTime(covered, entry.start)) },
+        children: adjustments })
+      }
+      covered = cutEnd
+    }
+    if (compareTime(covered, end) < 0) unsupported(el, 'The cut reaches a part of angle “' + name + '” with no clip or explicit gap.')
+  }
+  if (!clips.length) unsupported(el, 'The selected range contains only gaps.')
+  const gap: Element = { tag: 'gap', attrs: {}, timing: { duration }, children: clips, line: el.line }
+  const spine: Element = { tag: 'spine', attrs: {}, children: [gap], line: el.line }
+  const attrs = { format: formatId, tcFormat: multicam.attrs.tcFormat, renderFormat: multicam.attrs.renderFormat }
+  return { names, duration, label, sequence: { tag: 'sequence',
+    attrs: Object.fromEntries(Object.entries(attrs).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    timing: { duration }, children: [spine, ...multicam.children.filter(child => child.tag === 'metadata')], line: el.line } }
 }
 
 function parseSequence(seq: Element, project: Element, context: SequenceContext,
@@ -493,7 +670,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       const candidateMap = child.tag !== 'timeMap' ||
         (['asset-clip', 'video', 'audio'].includes(parent.tag) && child.children.length === 2 &&
           child.children.every(point => point.tag === 'timept' && point.attrs.interp === 'linear'))
-      if (parent.tag === 'spine' && (child.tag === 'ref-clip' || (child.tag === 'transition' && dissolveFilter(child)))) {
+      if (parent.tag === 'spine' && (child.tag === 'ref-clip' || child.tag === 'mc-clip' || (child.tag === 'transition' && dissolveFilter(child)))) {
         kept.push(child)
         continue
       }
@@ -571,7 +748,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   if (tcFormat === 'DF' && !(fps.den === 1001 && [30_000, 60_000].includes(fps.num))) {
     fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
   }
-  check(spine, [], ['gap', 'asset-clip', 'video', 'audio', 'transition', 'ref-clip'])
+  check(spine, [], ['gap', 'asset-clip', 'video', 'audio', 'transition', 'ref-clip', 'mc-clip'])
   const clips: TimelineClip[] = []
   const groups: ImportTimeline['groups'] = []
   const assets = new Map<string, Asset>()
@@ -604,7 +781,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       : subtractTime(localOffset, sequenceOrigin)
     if (offset.num < 0) fail(el, 'The clip starts before the timeline origin')
     const notes: string[] = []
-    if (parent) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
+    if (parent && !el.timing) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
     if (a.tcFormat === 'DF') notes.push('Clip drop-frame display metadata becomes zero-based non-drop-frame timecode')
     if (!['0', '1'].includes(a.enabled ?? '1') || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||
         (a.videoRole ?? 'video') !== 'video') {
@@ -841,6 +1018,36 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   }
 
   for (const el of spine.children) {
+    if (el.tag === 'mc-clip') {
+      let multicam: ReturnType<typeof multicamSequence>
+      let nested: ImportTimeline
+      try {
+        multicam = multicamSequence(el, context, fps)
+        nested = parseSequence(multicam.sequence, { ...el, attrs: { name: multicam.label } }, context)
+      } catch (error) {
+        if (error instanceof FcpxmlError && !error.message.includes(multicamRemedy)) {
+          fail(el, error.message + ' ' + multicamRemedy)
+        }
+        throw error
+      }
+      const { names, duration, label } = multicam
+      const start = subtractTime(time(el, 'offset', sequenceOrigin), sequenceOrigin)
+      const end = addTime(start, duration)
+      if (pendingDissolve || start.num < 0 || compareTime(start, primaryEnd) < 0) {
+        fail(el, 'The multicam placement overlaps another edit. ' + multicamRemedy)
+      }
+      const firstFrame = frames(start, format, el, 'offset')
+      const endFrame = frames(end, format, el, 'end')
+      groups.push({ timeline: nested, label, enabled: el.attrs.enabled !== '0', firstFrame, endFrame,
+        sourceIn: ZERO_TIME, sourceOut: duration, conform: 'fit', kind: 'multicam' })
+      previousPrimary = undefined
+      primaryEnd = end
+      if (compareTime(end, lastEnd) > 0) lastEnd = end
+      notice(el, 'Selected angles become editable clips in a Group: ' + names.join(', ') +
+        '. Unused angles are left out. Angle switching stays in the source editor.')
+      if (el.attrs.modDate !== undefined) notice(el, 'The source multicam modification date is left out.')
+      continue
+    }
     if (el.tag === 'ref-clip') {
       const remedy = 'Open the compound clip in the source editor and put its contents on the timeline, or render it as one clip.'
       const attrs = el.attrs
@@ -886,7 +1093,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       const label = attrs.name || media.attrs.name || 'Compound clip'
       groups.push({ timeline: nested, label, enabled: attrs.enabled !== '0',
         firstFrame: frames(start, format, el, 'offset'), endFrame: frames(end, format, el, 'end'),
-        sourceIn, sourceOut, conform })
+        sourceIn, sourceOut, conform, kind: 'compound' })
       previousPrimary = undefined
       primaryEnd = end
       if (compareTime(end, lastEnd) > 0) lastEnd = end

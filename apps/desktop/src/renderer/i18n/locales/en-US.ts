@@ -417,6 +417,8 @@ const enUS = {
     timeline_review_continue: "Review import",
     timeline_review_preparing: "Checking media…",
     timeline_review_format: "{{width}} × {{height}} · {{rate}} · {{frames}} frames",
+    timeline_review_compound_groups_one: "1 compound clip becomes an editable Group.",
+    timeline_review_compound_groups_other: "{{count}} compound clips become editable Groups.",
     timeline_review_contents: "Video clips {{video}} · Audio clips {{audio}} · Markers {{markers}} · Media files {{media}}",
     timeline_review_lanes: "Lanes from bottom to top (0 is primary) {{lanes}}",
     timeline_review_connections_one: "{{count}} connected clip becomes an independent clip. Moving its original anchor leaves this clip in place.",

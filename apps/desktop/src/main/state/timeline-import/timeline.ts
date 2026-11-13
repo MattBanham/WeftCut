@@ -36,17 +36,30 @@ export interface TimelineClip {
   volumeDb?: number
   opacity?: number
   staticTransform?: { xPercent: number; yPercent: number; scaleX: number; scaleY: number; rotation: number }
-  markers: { label: string; frame: number; endFrame: number | null; source: ExactTime }[]
+  markers: { label: string; note?: string; frame: number; endFrame: number | null; source: ExactTime }[]
   location: string
   notes: string[]
+}
+
+export interface TimelineGroup {
+  timeline: ImportTimeline
+  label: string
+  enabled: boolean
+  firstFrame: number
+  endFrame: number
+  sourceIn: ExactTime
+  sourceOut: ExactTime
+  conform: 'fit' | 'fill' | 'none'
 }
 
 export interface ImportTimeline {
   name?: string
   canvas?: { width: number; height: number }
   fps: Rational
+  authoredDuration: ExactTime
   durationFrames: number
   clips: TimelineClip[]
+  groups: TimelineGroup[]
   dissolves?: { from: TimelineClip; to: TimelineClip; firstFrame: number; endFrame: number }[]
   notices: TimelineCompatibilityItem[]
   effectIssues?: TimelineCompatibilityItem[]

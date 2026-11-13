@@ -10,7 +10,7 @@ import {
   projectImportTimeline,
   projectPreviewTimeline,
 } from "../ipc";
-import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineMediaReplacement, TimelineSequenceChoice } from "../../shared/timelineImport";
+import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineMediaChange, TimelineMediaReplacement, TimelineSequenceChoice } from "../../shared/timelineImport";
 import { fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 import { NewProjectForm } from "./NewProjectForm";
@@ -139,6 +139,12 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               <p role="alert">{issue.notes.join(" ")}</p>
             </div>
           ))}
+          {blocked.mediaChanges.length > 0 && (
+            <section aria-label={t("startup.import_media_differences")}>
+              <p><strong>{t("startup.import_media_differences")}</strong></p>
+              <MediaDifferenceRows changes={blocked.mediaChanges} onRelink={relink} disabled={busy} />
+            </section>
+          )}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
             {blocked.canOmitEffects && <Button onClick={() => void reviewWithoutEffects()} disabled={busy}>
@@ -164,6 +170,12 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               <p>{issue.notes.join(" ")}</p>
             </div>
           ))}
+          {blocked.mediaChanges.length > 0 && (
+            <section aria-label={t("startup.import_media_differences")}>
+              <p><strong>{t("startup.import_media_differences")}</strong></p>
+              <MediaDifferenceRows changes={blocked.mediaChanges} onRelink={relink} disabled={busy} />
+            </section>
+          )}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
             {blocked.effectIssues.length > 0 && <Button onClick={() => void reviewWithoutEffects()} disabled={busy}>
@@ -250,6 +262,23 @@ function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
   );
 }
 
+function MediaDifferenceRows({ changes, onRelink, disabled }: {
+  changes: TimelineMediaChange[];
+  onRelink: (assetRef: string) => Promise<void>;
+  disabled: boolean;
+}) {
+  const { t } = useTranslation();
+  return changes.map((issue, index) => (
+    <div key={index} className="new-project-row">
+      <strong title={issue.sourcePath}>{issue.filename}</strong>
+      <p>{issue.detail} {t("startup.import_media_placements", { count: issue.placements })}</p>
+      <Button disabled={disabled} onClick={() => void onRelink(issue.assetRef)}>
+        {t("startup.import_choose_replacement")}
+      </Button>
+    </div>
+  ));
+}
+
 function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, busyRelinking }: {
   preview: TimelineImportPreview;
   onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean) => Promise<void>;
@@ -290,6 +319,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
       <p>{t("startup.timeline_review_contents", {
         video: preview.videoClips, audio: preview.audioClips, markers: preview.markers, media: preview.media,
       })}</p>
+      {preview.compoundGroups > 0 && <p>{t("startup.timeline_review_compound_groups", { count: preview.compoundGroups })}</p>}
       {preview.connectedClips > 0 && (
         <>
           <p>{t("startup.timeline_review_lanes", { lanes: preview.lanes.join(", ") })}</p>
@@ -341,15 +371,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
         <section aria-label={t("startup.import_media_differences")}>
           <p><strong>{t("startup.import_media_differences")}</strong></p>
           {preview.outputColorChange && <p>{t("startup.import_output_color_difference", { color: preview.outputColorChange })}</p>}
-          {preview.mediaChanges.map((issue, index) => (
-            <div key={index} className="new-project-row">
-              <strong title={issue.sourcePath}>{issue.filename}</strong>
-              <p>{issue.detail} {t("startup.import_media_placements", { count: issue.placements })}</p>
-              <Button disabled={busy || busyRelinking} onClick={() => void onRelink(issue.assetRef)}>
-                {t("startup.import_choose_replacement")}
-              </Button>
-            </div>
-          ))}
+          <MediaDifferenceRows changes={preview.mediaChanges} onRelink={onRelink} disabled={busy || busyRelinking} />
           <label>
             <input type="checkbox" checked={acceptMediaChanges} disabled={busy || busyRelinking}
               onChange={(event) => setAcceptMediaChanges(event.target.checked)} />

@@ -27,15 +27,16 @@ than one project. The importer supports the subset below with FCPXML headers
 | Different destination frame rate | Choose **Review as a new project…** to keep the sequence rate. The current project is saved before switching. If rates match and canvases differ, choose Fit, Fill or Original size for the imported Group. |
 | Source frame rate | Uses source timestamps, which can repeat or skip frames. A different declared source rate can proceed if source in-points still land on real frames. Review discloses the difference. |
 | Audio and timecode | Audio-only placement uses the 48 kHz sample grid. Review reports sample rounding, resampling and downmixing. Nonzero origins and supported drop-frame display normalize to zero-based non-drop-frame without changing edit positions. |
-| Markers | Keeps representable point and range markers. Review reports snapping and single-frame durations converted to points. Stills retain markers at their timeline positions. |
+| Markers | Keeps text and notes for representable point, range, to-do and chapter markers. Review reports snapping, point conversion and any chapter, poster-frame or to-do settings left out. Stills retain markers at their timeline positions. |
 | Static adjustments | Preserves supported position, scale, rotation, opacity and gain as editable values. |
 | Forward constant speed | Keeps a two-point linear speed map, when it covers the whole placement and has no markers or children. Supports frame sampling and the original audio pitch setting. |
 | Built-in Cross Dissolve | An explicit overlap between two enabled video-only clips can become an editable WeftCut crossfade. Review notes that the blend can differ. |
 | Clip filters | Where timing and structure can be preserved, **Review without these effects…** offers a version with the named filters left out. Confirm that change before importing. |
 | Color and scan | A timeline that declares HDR or wide-gamut color can use compatible SDR media with a disclosed output color change. An asset with a conflicting color declaration needs a replacement tagged SDR Rec. 709. Actual HDR files need a tone-mapped SDR copy from the source editor. Interlaced media needs a progressive export. |
-| Missing or incompatible media | Choose an individual replacement. For missing originals, you can also search one folder by exact filename. Every replacement is checked again before confirmation. |
-| Source organization and proxies | Review reports when it leaves out source metadata, collections, standalone browser clips, and proxies listed alongside an original. |
-| Other transitions, complex retimes, multicam, compound or synchronized clips, titles and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
+| Missing or incompatible media | Choose an individual replacement. For missing originals, you can also search one folder by exact filename. Review also shows known differences on the files already found and any effects that can be left out. Every replacement is checked again before confirmation. |
+| Source organization and proxies | Review reports when it leaves out source metadata, collections, standalone browser clips, Apple file access bookmarks, and proxies listed alongside an original. |
+| Compound clips | Supported same-rate primary compound clips become editable Groups. Repeated placements share the Group contents and keep their own trims. |
+| Other transitions, complex retimes, multicam, unsupported compound or synchronized clips, titles and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
 
 The importer handles local Windows drive and POSIX file URLs. A path from
 another platform can be relinked. It does not fetch media over the network or

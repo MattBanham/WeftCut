@@ -10,14 +10,14 @@ import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
 import { createActor } from '../actor'
 import { type IdGen } from '../ids'
 import { createMediaImporter, type MediaImportDeps } from '../mediaImport'
-import { blankProject, rootComposition, type AudioParams, type Layer, type MediaItem, type Project } from '../model'
-import { applyAddTrack, DEFAULT_MARKER_COLOR } from '../mutations/add'
+import { blankProject, newComposition, rootComposition, type AudioParams, type Composition, type CompositionRefParams, type Layer, type MediaItem, type Project } from '../model'
+import { applyAddTrack, DEFAULT_MARKER_COLOR, defaultTransform } from '../mutations/add'
 import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/media'
 import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml, TimelineEditFailure } from './fcpxml'
-import type { TimelineClip, TimelineSource } from './timeline'
+import type { ImportTimeline, TimelineClip, TimelineSource } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 
@@ -26,6 +26,7 @@ export class TimelineMediaFailure extends Error {
     readonly issues: TimelineMediaIssue[],
     readonly canSearchFolder: boolean,
     readonly effectIssues: TimelineCompatibilityItem[],
+    readonly mediaChanges: TimelineMediaChange[] = [],
   ) {
     super(issues.map(issue => issue.detail).join('\n'))
   }
@@ -147,10 +148,19 @@ export async function prepareTimelineProject(
       throw new Error('The selected media folder is missing or is not a regular directory')
     }
   }
-  const originals = new Map(timeline.clips.map(({ asset }) => [asset.path, asset]))
-  const references = new Map(timeline.clips.map(({ asset }) => [asset.ref, asset.path]))
+  const sequences = new Set<ImportTimeline>()
+  function visit(sequence: ImportTimeline): void {
+    if (sequences.has(sequence)) return
+    sequences.add(sequence)
+    for (const group of sequence.groups) visit(group.timeline)
+  }
+  visit(timeline)
+  const clips = [...sequences].flatMap(sequence => sequence.clips)
+  const effectIssues = [...sequences].flatMap(sequence => sequence.effectIssues ?? [])
+  const originals = new Map(clips.map(({ asset }) => [asset.path, asset]))
+  const references = new Map(clips.map(({ asset }) => [asset.ref, asset.path]))
   const counts = new Map<string, number>()
-  for (const { asset } of timeline.clips) counts.set(asset.path, (counts.get(asset.path) ?? 0) + 1)
+  for (const { asset } of clips) counts.set(asset.path, (counts.get(asset.path) ?? 0) + 1)
   const mediaIssue = (asset: TimelineSource, detail: string): TimelineMediaIssue => ({
     assetRef: asset.ref, filename: asset.filename, sourcePath: asset.path, placements: counts.get(asset.path)!, detail,
   })
@@ -233,7 +243,7 @@ export async function prepareTimelineProject(
     }
     claimed.set(key, previous ?? original)
   }
-  if (conflicts.size) throw new TimelineMediaFailure([...missing, ...conflicts.values()], offline.length > 0, timeline.effectIssues ?? [])
+  if (conflicts.size) throw new TimelineMediaFailure([...missing, ...conflicts.values()], offline.length > 0, effectIssues)
 
   const relinkedMedia = [...substitutions].filter(([from, to]) => from !== to).map(([from, to]) => ({ from, to }))
   const mediaIds = new Map<string, string>()
@@ -260,7 +270,7 @@ export async function prepareTimelineProject(
   const sourceEnds = new Map<TimelineClip, ExactTime>()
   const mediaChanges = new Map<string, TimelineMediaChange>()
   const incompatibilities = new Map<string, TimelineMediaIssue>()
-  for (const clip of timeline.clips) {
+  for (const clip of clips) {
     const item = itemOf(clip)
     if (!item) continue
     try {
@@ -277,9 +287,10 @@ export async function prepareTimelineProject(
     }
   }
   if (missing.length || failed.length || incompatibilities.size) {
-    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, timeline.effectIssues ?? [])
+    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, effectIssues,
+      [...mediaChanges.values()])
   }
-  if (timeline.effectIssues?.length) throw new TimelineEditFailure(timeline.effectIssues, true)
+  if (effectIssues.length) throw new TimelineEditFailure(effectIssues, true, [...mediaChanges.values()])
   const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0
@@ -290,28 +301,6 @@ export async function prepareTimelineProject(
   const project = { ...snapshot,
     media_pool: Object.fromEntries(Object.entries(snapshot.media_pool).filter(([id]) => usedMedia.has(id))),
     compositions: { ...snapshot.compositions, [root.id]: target } }
-  const laneIds = new Map([[0, target.tracks[0]!.id]])
-  const lanes = [...new Set(timeline.clips.map((clip) => clip.lane))].sort((a, b) => a - b)
-  let lowerTracks = 0
-  let firstOverlay = true
-  for (const lane of lanes) {
-    if (lane < 0) laneIds.set(lane, applyAddTrack(project, idGen, null, lowerTracks++))
-    if (lane > 0) {
-      laneIds.set(lane, firstOverlay ? target.tracks[lowerTracks + 1]!.id : applyAddTrack(project, idGen, null))
-      firstOverlay = false
-    }
-  }
-  const tracks = new Map(target.tracks.map((track) => [track.id, track]))
-  const boundary = (frame: number) => timeUsAtFrame(frame, target.fps.num, target.fps.den)
-  const samplesPerUs = exactTime(AUDIO_GRID.num, 1_000_000)
-  const sequenceEnd = boundary(timeline.durationFrames)
-  const sampleBoundary = (time: ExactTime) => {
-    const sample = multiplyTime(time, samplesPerUs)
-    const nearest = timeUsAtGridIndex(roundTime(sample), AUDIO_GRID)
-    // A terminal sample boundary past the last frame would extend the project
-    // by a whole frame when WeftCut fits its duration to the last clip.
-    return nearest <= sequenceEnd ? nearest : timeUsAtGridIndex(floorTime(sample), AUDIO_GRID)
-  }
   let videoClips = 0
   let audioClips = 0
   let roundedEnds = 0
@@ -320,151 +309,208 @@ export async function prepareTimelineProject(
   let rateConformedVideoClips = 0
   let resizedVideoClips = 0
   const videoConversions = new Map<string, TimelineImportReport['videoConversions'][number]>()
-  const visualLayers = new Map<TimelineClip, Layer>()
-  const compatibilityItems: TimelineCompatibilityItem[] = [...timeline.notices]
-  for (const clip of timeline.clips) {
-    const item = itemOf(clip)
-    const notes = [...clip.notes]
-    let approximation = false
-    let converted = notes.length > 0
-    const adjustment = (value: ExactTime) => (value.num / value.den).toFixed(6).replace(/\.?0+$/, '')
-    const audioStart = sampleBoundary(clip.timelineStart)
-    const audioEnd = sampleBoundary(clip.timelineEnd)
-    if (clip.audioRole) {
-      if (audioEnd <= audioStart) {
-        throw new Error(clip.location + ': This audio clip is too short to occupy a 48 kHz sample. Extend it in the source editor and export again.')
+  const compatibilityItems: TimelineCompatibilityItem[] = [...sequences].flatMap(sequence => sequence.notices)
+  const built = new Map<ImportTimeline, Composition>([[timeline, target]])
+  const allLanes = [...new Set(clips.map(clip => clip.lane).concat(timeline.groups.length ? [0] : []))].sort((a, b) => a - b)
+
+  function mapSequence(sequence: ImportTimeline, target: Composition): void {
+    const laneIds = new Map([[0, target.tracks[0]!.id]])
+    const lanes = [...new Set(sequence.clips.map((clip) => clip.lane))].sort((a, b) => a - b)
+    let lowerTracks = 0
+    let firstOverlay = true
+    for (const lane of lanes) {
+      if (lane < 0) laneIds.set(lane, applyAddTrack(project, idGen, null, lowerTracks++, target.id))
+      if (lane > 0) {
+        laneIds.set(lane, firstOverlay ? target.tracks[lowerTracks + 1]!.id : applyAddTrack(project, idGen, null, undefined, target.id))
+        firstOverlay = false
       }
-      for (const [label, time, snapped] of [['start', clip.timelineStart, audioStart], ['end', clip.timelineEnd, audioEnd]] as const) {
-        const delta = subtractTime(exactTime(snapped), time)
-        if (delta.num !== 0) {
-          notes.push('Audio ' + label + ' quantized to the 48 kHz sample grid: ' + adjustment(delta) + ' µs')
-          converted = true
+    }
+    const tracks = new Map(target.tracks.map((track) => [track.id, track]))
+    const boundary = (frame: number) => timeUsAtFrame(frame, target.fps.num, target.fps.den)
+    const samplesPerUs = exactTime(AUDIO_GRID.num, 1_000_000)
+    const sequenceEnd = boundary(sequence.durationFrames)
+    const sampleBoundary = (time: ExactTime) => {
+      const sample = multiplyTime(time, samplesPerUs)
+      const nearest = timeUsAtGridIndex(roundTime(sample), AUDIO_GRID)
+      // A terminal sample boundary past the last frame would extend the project
+      // by a whole frame when WeftCut fits its duration to the last clip.
+      return nearest <= sequenceEnd ? nearest : timeUsAtGridIndex(floorTime(sample), AUDIO_GRID)
+    }
+    const visualLayers = new Map<TimelineClip, Layer>()
+    for (const clip of sequence.clips) {
+      const item = itemOf(clip)
+      const notes = [...clip.notes]
+      let approximation = false
+      let converted = notes.length > 0
+      const adjustment = (value: ExactTime) => (value.num / value.den).toFixed(6).replace(/\.?0+$/, '')
+      const audioStart = sampleBoundary(clip.timelineStart)
+      const audioEnd = sampleBoundary(clip.timelineEnd)
+      if (clip.audioRole) {
+        if (audioEnd <= audioStart) {
+          throw new Error(clip.location + ': This audio clip is too short to occupy a 48 kHz sample. Extend it in the source editor and export again.')
+        }
+        for (const [label, time, snapped] of [['start', clip.timelineStart, audioStart], ['end', clip.timelineEnd, audioEnd]] as const) {
+          const delta = subtractTime(exactTime(snapped), time)
+          if (delta.num !== 0) {
+            notes.push('Audio ' + label + ' quantized to the 48 kHz sample grid: ' + adjustment(delta) + ' µs')
+            converted = true
+          }
         }
       }
-    }
-    if (clip.markers.length && clip.asset.stillImage) {
-      converted = true
-      notes.push('Still-image markers keep their timeline positions as independent markers')
-    }
-    if (clip.asset.stillImage) {
-      converted = true
-      notes.push('Still image uses ' + (clip.conform ?? 'fit') + ' spatial conform from its original dimensions to the sequence canvas')
-    }
-    const sourceOut = sourceEnds.get(clip)!
-    if (sourceOut !== clip.sourceOut) {
-      roundedEnds++
-      converted = true
-      notes.push('Source out-point rounded to the probed file endpoint: ' + adjustment(subtractTime(sourceOut, clip.sourceOut)) + ' µs')
-    }
-    if (clip.hasVideo && !clip.asset.stillImage && item.metadata.video) {
-      const sourceVideo = item.metadata.video
-      const rateConformed = sourceVideo.fps_num! * target.fps.den !== sourceVideo.fps_den! * target.fps.num
-      const aspect = clip.asset.videoFormat
-      const nonSquarePixels = aspect !== undefined && aspect.paspH !== aspect.paspV
-      const scaledToFit = sourceVideo.width !== width || sourceVideo.height !== height || nonSquarePixels ||
-        (clip.conform !== undefined && clip.conform !== 'fit')
-      if (rateConformed) {
-        rateConformedVideoClips++
+      if (clip.markers.length && clip.asset.stillImage) {
         converted = true
-        notes.push('Source-timestamp FPS conform: output may repeat or skip source frames')
-        approximation = true
+        notes.push('Still-image markers keep their timeline positions as independent markers')
       }
-      if (scaledToFit) {
-        resizedVideoClips++
+      if (clip.asset.stillImage) {
         converted = true
-        notes.push(clip.conform === 'fill' ? 'Spatial conform: fill the canvas (may crop)'
-          : clip.conform === 'none' ? 'Spatial conform: preserve source pixel dimensions (may crop)'
-            : nonSquarePixels
-              ? 'Source pixel aspect ' + aspect.paspH + ':' + aspect.paspV + ' is conformed and scaled to fit'
-              : 'Source resolution is scaled uniformly to fit the canvas')
+        notes.push('Still image uses ' + (clip.conform ?? 'fit') + ' spatial conform from its original dimensions to the sequence canvas')
       }
-      const conversionKey = item.path_abs + '|' + (clip.conform ?? 'fit')
-      if ((rateConformed || scaledToFit) && !videoConversions.has(conversionKey)) {
-        videoConversions.set(conversionKey, { source: item.path_abs,
-          sourceWidth: sourceVideo.width!, sourceHeight: sourceVideo.height!,
-          sourceFps: { num: sourceVideo.fps_num!, den: sourceVideo.fps_den! },
-          pixelAspect: nonSquarePixels ? { h: aspect.paspH, v: aspect.paspV } : null,
-          spatialConform: clip.conform ?? 'fit',
-          rateConformed, scaledToFit })
-      }
-    }
-    if (clip.audioRole && item.metadata.audio) {
-      if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) {
-        resampledAudioClips++
+      const sourceOut = sourceEnds.get(clip)!
+      if (sourceOut !== clip.sourceOut) {
+        roundedEnds++
         converted = true
-        notes.push('Audio resampled to the 48 kHz editing mix')
+        notes.push('Source out-point rounded to the probed file endpoint: ' + adjustment(subtractTime(sourceOut, clip.sourceOut)) + ' µs')
       }
-      if ((item.metadata.audio.channels ?? 0) > 2) {
-        downmixedAudioClips++
-        converted = true
-        notes.push('Discrete multichannel audio downmixed to stereo')
-        approximation = true
+      if (clip.hasVideo && !clip.asset.stillImage && item.metadata.video) {
+        const sourceVideo = item.metadata.video
+        const rateConformed = sourceVideo.fps_num! * target.fps.den !== sourceVideo.fps_den! * target.fps.num
+        const aspect = clip.asset.videoFormat
+        const nonSquarePixels = aspect !== undefined && aspect.paspH !== aspect.paspV
+        const scaledToFit = sourceVideo.width !== target.width || sourceVideo.height !== target.height || nonSquarePixels ||
+          (clip.conform !== undefined && clip.conform !== 'fit')
+        if (rateConformed) {
+          rateConformedVideoClips++
+          converted = true
+          notes.push('Source-timestamp FPS conform: output may repeat or skip source frames')
+          approximation = true
+        }
+        if (scaledToFit) {
+          resizedVideoClips++
+          converted = true
+          notes.push(clip.conform === 'fill' ? 'Spatial conform: fill the canvas (may crop)'
+            : clip.conform === 'none' ? 'Spatial conform: preserve source pixel dimensions (may crop)'
+              : nonSquarePixels
+                ? 'Source pixel aspect ' + aspect.paspH + ':' + aspect.paspV + ' is conformed and scaled to fit'
+                : 'Source resolution is scaled uniformly to fit the canvas')
+        }
+        const conversionKey = item.path_abs + '|' + (clip.conform ?? 'fit')
+        if ((rateConformed || scaledToFit) && !videoConversions.has(conversionKey)) {
+          videoConversions.set(conversionKey, { source: item.path_abs,
+            sourceWidth: sourceVideo.width!, sourceHeight: sourceVideo.height!,
+            sourceFps: { num: sourceVideo.fps_num!, den: sourceVideo.fps_den! },
+            pixelAspect: nonSquarePixels ? { h: aspect.paspH, v: aspect.paspV } : null,
+            spatialConform: clip.conform ?? 'fit',
+            rateConformed, scaledToFit })
+        }
+      }
+      if (clip.audioRole && item.metadata.audio) {
+        if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) {
+          resampledAudioClips++
+          converted = true
+          notes.push('Audio resampled to the 48 kHz editing mix')
+        }
+        if ((item.metadata.audio.channels ?? 0) > 2) {
+          downmixedAudioClips++
+          converted = true
+          notes.push('Discrete multichannel audio downmixed to stereo')
+          approximation = true
+        }
+      }
+      if (clip.volumeDb) notes.push('Static clip gain: ' + clip.volumeDb + 'dB (editable)')
+      if (clip.staticTransform) notes.push('Static position/scale/rotation (editable)')
+      if (clip.opacity !== undefined && clip.opacity !== 1) {
+        notes.push('Static opacity: ' + clip.opacity + ' (editable)')
+      }
+      compatibilityItems.push({ location: clip.location,
+        label: clip.label || clip.asset.ref, lane: clip.lane,
+        status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
+        notes })
+      const track = tracks.get(laneIds.get(clip.lane)!)!
+      const video = clip.hasVideo && !clip.asset.stillImage
+        ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
+          visualAdjustments(fitVideoParams(item, target, clip), clip, target))
+        : null
+      const image = clip.asset.stillImage
+        ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
+          visualAdjustments(fitVisualParams(imageOverlayParams(item.id, target) as Extract<Layer['params'], { kind: 'ImageOverlay' }>, item, target, clip), clip, target))
+        : null
+      const audio = clip.audioRole
+        ? newLayer(idGen, clip, sourceOut, audioStart, audioEnd,
+          { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
+        : null
+      if (video || image) {
+        const layer = (video ?? image)!
+        track.layers.push(layer)
+        visualLayers.set(clip, layer)
+        videoClips++
+      }
+      if (audio) { track.layers.push(audio); audioClips++ }
+      if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
+      for (const mark of clip.markers) {
+        const { whole, fraction } = splitExact(mark.source)
+        target.markers.push({
+          id: idGen(), t_us: boundary(mark.frame), end_t_us: mark.endFrame === null ? null : boundary(mark.endFrame),
+          label: mark.label, note: mark.note ?? '', color: DEFAULT_MARKER_COLOR,
+          anchor: image ? null : { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
+        })
       }
     }
-    if (clip.volumeDb) notes.push('Static clip gain: ' + clip.volumeDb + 'dB (editable)')
-    if (clip.staticTransform) notes.push('Static position/scale/rotation (editable)')
-    if (clip.opacity !== undefined && clip.opacity !== 1) {
-      notes.push('Static opacity: ' + clip.opacity + ' (editable)')
-    }
-    compatibilityItems.push({ location: clip.location,
-      label: clip.label || clip.asset.ref, lane: clip.lane,
-      status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
-      notes })
-    const track = tracks.get(laneIds.get(clip.lane)!)!
-    const video = clip.hasVideo && !clip.asset.stillImage
-      ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
-        visualAdjustments(fitVideoParams(item, target, clip), clip, target))
-      : null
-    const image = clip.asset.stillImage
-      ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
-        visualAdjustments(fitVisualParams(imageOverlayParams(item.id, { width, height }) as Extract<Layer['params'], { kind: 'ImageOverlay' }>, item, target, clip), clip, target))
-      : null
-    const audio = clip.audioRole
-      ? newLayer(idGen, clip, sourceOut, audioStart, audioEnd,
-        { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
-      : null
-    if (video || image) {
-      const layer = (video ?? image)!
-      track.layers.push(layer)
-      visualLayers.set(clip, layer)
-      videoClips++
-    }
-    if (audio) { track.layers.push(audio); audioClips++ }
-    if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
-    for (const mark of clip.markers) {
-      const { whole, fraction } = splitExact(mark.source)
-      target.markers.push({
-        id: idGen(), t_us: boundary(mark.frame), end_t_us: mark.endFrame === null ? null : boundary(mark.endFrame),
-        label: mark.label, note: '', color: DEFAULT_MARKER_COLOR,
-        anchor: image ? null : { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
+    for (const dissolve of sequence.dissolves ?? []) {
+      target.transitions.push({
+        id: idGen(), from_layer: visualLayers.get(dissolve.from)!.id, to_layer: visualLayers.get(dissolve.to)!.id,
+        duration_us: boundary(dissolve.endFrame) - boundary(dissolve.firstFrame), kind: { kind: 'Crossfade' }, extended_us: 0,
       })
     }
+    for (const group of sequence.groups) {
+      let child = built.get(group.timeline)
+      if (!child) {
+        const { width, height } = group.timeline.canvas!
+        child = newComposition(idGen(), idGen, group.timeline.name ?? 'Compound clip', project.next_group_ordinal++, {
+          width, height, fps: target.fps, sample_rate: target.sample_rate, channels: target.channels,
+          color_space: target.color_space, background: { r: 0, g: 0, b: 0, a: 0 },
+        })
+        built.set(group.timeline, child)
+        project.compositions[child.id] = child
+        mapSequence(group.timeline, child)
+      }
+      const scale = group.conform === 'none' ? 1
+        : (group.conform === 'fill' ? Math.max : Math.min)(target.width / child.width, target.height / child.height)
+      const transform = defaultTransform(target.width / 2, target.height / 2)
+      transform.scale_x = { mode: 'Static', value: scale }
+      transform.scale_y = { mode: 'Static', value: scale }
+      const params: CompositionRefParams = {
+        kind: 'CompositionRef', composition: child.id, src_in_us: 0, src_out_us: 0,
+        transform, opacity: { mode: 'Static', value: 1 }, blend_mode: 'Normal',
+      }
+      writeSourceWindow(params, group.sourceIn, group.sourceOut)
+      tracks.get(laneIds.get(0)!)!.layers.push({
+        id: idGen(), label: group.label, enabled: group.enabled, locked: false, metadata: {}, effects: [], params,
+        t_start_us: boundary(group.firstFrame), t_end_us: boundary(group.endFrame),
+      })
+    }
+    for (const track of target.tracks) track.layers.sort((a, b) => a.t_start_us - b.t_start_us)
+    target.markers.sort((a, b) => a.t_us - b.t_us)
+    applyDurationAutofit(target)
+    if (sequenceEnd > target.duration_us) {
+      target.duration_us = sequenceEnd
+      target.duration_pinned = true
+    }
   }
-  for (const dissolve of timeline.dissolves ?? []) {
-    target.transitions.push({
-      id: idGen(), from_layer: visualLayers.get(dissolve.from)!.id, to_layer: visualLayers.get(dissolve.to)!.id,
-      duration_us: boundary(dissolve.endFrame) - boundary(dissolve.firstFrame), kind: { kind: 'Crossfade' }, extended_us: 0,
-    })
-  }
-  for (const track of target.tracks) track.layers.sort((a, b) => a.t_start_us - b.t_start_us)
-  target.markers.sort((a, b) => a.t_us - b.t_us)
-  applyDurationAutofit(target)
-  if (sequenceEnd > target.duration_us) {
-    target.duration_us = sequenceEnd
-    target.duration_pinned = true
-  }
+
+  mapSequence(timeline, target)
   validate(project)
   return { project, report: {
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
-    outputColorChange: timeline.sourceColor && videoClips ? timeline.sourceColor : null,
-    mediaChanges: [...mediaChanges.values()], omittedEffects: timeline.omittedEffects ?? [],
-    videoClips, audioClips, markers: target.markers.length, media: Object.keys(project.media_pool).length,
-    lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
+    outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
+    compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.length, 0),
+    mediaChanges: [...mediaChanges.values()], omittedEffects: [...sequences].flatMap(sequence => sequence.omittedEffects ?? []),
+    videoClips, audioClips, markers: Object.values(project.compositions).reduce((count, composition) => count + composition.markers.length, 0), media: Object.keys(project.media_pool).length,
+    lanes: allLanes, connectedClips: clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
     resampledAudioClips, downmixedAudioClips,
     rateConformedVideoClips, resizedVideoClips, videoConversions: [...videoConversions.values()],
-    normalizedTimecode: timeline.normalizedTimecode ?? false,
-    dropFrameTimecode: timeline.dropFrameTimecode ?? false,
-    namedFormatDefaults: timeline.namedFormatDefaults ?? false,
+    normalizedTimecode: [...sequences].some(sequence => sequence.normalizedTimecode),
+    dropFrameTimecode: [...sequences].some(sequence => sequence.dropFrameTimecode),
+    namedFormatDefaults: [...sequences].some(sequence => sequence.namedFormatDefaults),
     bundleSource: extension === '.fcpxmld', relinkedMedia, compatibilityItems,
     compatibilityCounts: {
       exact: compatibilityItems.filter(i => i.status === 'exact').length,

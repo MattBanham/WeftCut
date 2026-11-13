@@ -15,6 +15,19 @@ const fixture = () => `<fcpxml version="1.10"><resources>
   </spine></sequence></project></fcpxml>`
 
 describe('bounded untrusted FCPXML parsing', () => {
+  it('bounds the repeated placements of a compound graph before allocating a project', () => {
+    const media = Array.from({ length: 6 }, (_, i) => {
+      const clips = Array.from({ length: 10 }, (_, j) => i === 0
+        ? '<asset-clip ref="a" offset="' + j + 's" duration="1s"/>'
+        : '<ref-clip ref="m' + (i - 1) + '" offset="' + j + 's" duration="1s"/>')
+      return '<media id="m' + i + '"><sequence format="f" duration="10s"><spine>' +
+        clips.join('') + '</spine></sequence></media>'
+    })
+    const xml = fixture().replace('</resources>', media.join('') + '</resources>')
+      .replace('<asset-clip ref="a" start="0s" duration="1s"/>', '<ref-clip ref="m5" duration="1s"/>')
+    expect(() => parseFcpxml(xml)).toThrow(/Repeated compound clips make this timeline too large/)
+  })
+
   it.each([
     ['external DTD', () => '<!DOCTYPE fcpxml SYSTEM "https://example.invalid/evil.dtd">' + fixture(), /plain.*DOCTYPE/],
     ['external entity', () => '<!DOCTYPE fcpxml [<!ENTITY x SYSTEM "file:///home/u/private">]>' + fixture(), /plain.*DOCTYPE/],
@@ -31,7 +44,7 @@ describe('bounded untrusted FCPXML parsing', () => {
     ['cyclic structure', () => fixture()
       .replace('</resources>', '<media id="cycle"><sequence format="f" duration="1s">' +
         '<spine><ref-clip ref="cycle" duration="1s"/></spine></sequence></media></resources>')
-      .replace('<asset-clip ref="a"', '<ref-clip ref="cycle"'), /<ref-clip>.*Unsupported/],
+      .replace('<asset-clip ref="a"', '<ref-clip ref="cycle"'), /compound clip refers to itself/],
     ['relative path', () => fixture().replace(/src="[^"]+"/, 'src="../Lantern.mov"'), /absolute local file/],
     ['encoded traversal', () => fixture().replace(/src="[^"]+"/, 'src="file:///home/u/%2e%2e/Lantern.mov"'), /absolute local file/],
     ['traversal', () => fixture().replace(/src="[^"]+"/, 'src="file:///home/u/../Lantern.mov"'), /absolute local file/],

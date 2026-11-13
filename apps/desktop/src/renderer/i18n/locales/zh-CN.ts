@@ -405,6 +405,8 @@ const zhCN: Resources = {
     timeline_review_continue: "检查导入",
     timeline_review_preparing: "正在检查媒体…",
     timeline_review_format: "{{width}} × {{height}} · {{rate}} · {{frames}} 帧",
+    timeline_review_compound_groups_one: "{{count}} 个复合片段将成为可编辑组。",
+    timeline_review_compound_groups_other: "{{count}} 个复合片段将成为可编辑组。",
     timeline_review_contents: "视频片段 {{video}} · 音频片段 {{audio}} · 标记 {{markers}} · 媒体文件 {{media}}",
     timeline_review_lanes: "从下到上的轨道（0 为主轨道）{{lanes}}",
     timeline_review_connections_one: "{{count}} 个连接片段会变为独立片段。移动原锚点时，这些片段会留在原位。",

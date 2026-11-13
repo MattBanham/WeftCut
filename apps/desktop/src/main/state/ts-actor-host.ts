@@ -960,10 +960,12 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         } catch (error) {
           assertCurrent()
           if (error instanceof TimelineEditFailure) {
-            return { kind: 'edit-blocked', issues: error.issues, canOmitEffects: error.canOmitEffects } satisfies TimelineEditBlocked
+            return { kind: 'edit-blocked', issues: error.issues, canOmitEffects: error.canOmitEffects,
+              mediaChanges: error.mediaChanges } satisfies TimelineEditBlocked
           }
           if (error instanceof TimelineMediaFailure) {
-            return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder, effectIssues: error.effectIssues } satisfies TimelineMediaBlocked
+            return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder,
+              effectIssues: error.effectIssues, mediaChanges: error.mediaChanges } satisfies TimelineMediaBlocked
           }
           throw error
         }

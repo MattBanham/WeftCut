@@ -4,6 +4,7 @@ import { AppIcon } from "../components/AppIcon";
 import { LoaderCircle } from "lucide-react";
 import { resourceFailureReason } from '../../shared/export-resources';
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { AppDialog } from "../components/AppDialog";
 import { Button } from "@/components/ui/button";
@@ -24,7 +25,7 @@ export interface ExportComplete {
   durationUs: number;
 }
 
-export type ExportState = ExportPhase & { job?: import('../../shared/exportJob').ExportJob; onCancel?: () => void };
+export type ExportState = ExportPhase & { background?: boolean; job?: import('../../shared/exportJob').ExportJob; onCancel?: () => void };
 type ExportPhase =
   // Readiness waits and frame export provide their own cancellation handler.
   | { kind: "starting" }
@@ -53,6 +54,21 @@ const FINALIZE_STEP_KEY: Record<FinalizeStep, string> = {
   audio: "export.finalize_audio",
   mux: "export.finalize_mux",
 };
+
+/// What a running export is doing, in the words both progress surfaces show
+/// (this dialog and the status-bar pill during preview-during-export).
+/// `percent` exists only while frames encode: the other phases have no
+/// measurable fraction, so their surfaces spin instead.
+export function exportPhaseView(state: ExportState, t: TFunction): { phase: string; percent?: number } {
+  if (state.job?.phase === "cancelling") return { phase: t("export.cancelling") };
+  switch (state.kind) {
+    case "progress":
+      return { phase: t("export.phase_encode"), percent: Math.max(0, Math.min(100, Math.round(state.progress.progress * 100))) };
+    case "finalizing": return { phase: t(FINALIZE_STEP_KEY[state.step]) };
+    case "preparing": return { phase: state.message ?? t("export.phase_prepare") };
+    default: return { phase: t("export.starting") };
+  }
+}
 
 /// The reveal button names the file manager per OS ("Reveal in Finder",
 /// "Reveal in Explorer"), the way Premiere and Resolve label it. Spelled out
@@ -103,12 +119,9 @@ export function ExportPanel({
   const separator = outputPath ? Math.max(outputPath.lastIndexOf("/"), outputPath.lastIndexOf("\\")) : -1;
   const filename = outputPath?.slice(separator + 1) || state.job?.filename;
   const directory = outputPath?.slice(0, separator + 1);
-  const percent = !cancelling && state.kind === "progress" ? Math.max(0, Math.min(100, Math.round(state.progress.progress * 100))) : undefined;
   const title = cancelling ? t("export.title") : state.kind === "complete" ? t("export.notify_done_title")
     : state.kind === "error" ? t(retryable ? "export.pending_title" : "export.notify_failed_title") : t("export.title");
-  const phase = cancelling ? t("export.cancelling") : state.kind === "progress" ? t("export.phase_encode")
-    : state.kind === "finalizing" ? t(FINALIZE_STEP_KEY[state.step])
-      : state.kind === "preparing" ? state.message ?? t("export.phase_prepare") : t("export.starting");
+  const { phase, percent } = exportPhaseView(state, t);
 
   const runAction = async (action: () => Promise<void>) => {
     if (pendingAction) return;

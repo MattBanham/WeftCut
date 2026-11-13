@@ -33,7 +33,12 @@ vi.mock("dockview-react", async () => {
   return {
     DockviewReact: (props: Record<string, unknown>) => {
       dockHarness.captures.push(props);
+      // dockview-react keeps its instance across StrictMode's effect replay
+      // and fires `onReady` once per instance, not once per effect setup.
+      const ready = React.useRef(false);
       React.useEffect(() => {
+        if (ready.current) return;
+        ready.current = true;
         dockHarness.readyCalls += 1;
         (props.onReady as (event: { api: unknown }) => void)({
           api: dockHarness.api,
@@ -164,6 +169,7 @@ import {
   type DockPanelContracts,
 } from "./DockWorkspace";
 import { DOCK_COMPONENT_ID, DOCK_TAB_COMPONENT_ID, PANEL_KINDS } from "./panelRegistry";
+import { type DockWorkspaceController } from "./dockWorkspaceAdapter";
 import {
   focusedCompositionId,
   openComposition,
@@ -492,15 +498,21 @@ describe("DockWorkspace React integration", () => {
     const dock = strictModeApi();
     dockHarness.api = dock.api;
 
+    const controllers: (DockWorkspaceController | null)[] = [];
     render(
       <StrictMode>
-        <DockWorkspace contracts={contracts} />
+        <DockWorkspace
+          contracts={contracts}
+          onControllerReady={(controller) => controllers.push(controller)}
+        />
       </StrictMode>,
     );
 
-    // StrictMode intentionally repeats effect setup, while the WeftCut
-    // adapter recognizes the same API and leaves registration idempotent.
-    expect(dockHarness.readyCalls).toBe(2);
+    // The Dock is ready once, but StrictMode repeats this component's effect
+    // setup: the replay rebinds a fresh adapter to the same API, whose layout
+    // registration is idempotent, and leaves a live controller behind.
+    expect(dockHarness.readyCalls).toBe(1);
+    expect(controllers.at(-1)).not.toBeNull();
     expect(dock.addPanel).toHaveBeenCalledTimes(8);
     expect(dock.panels.size).toBe(8);
     // StrictMode tears the first ready effect down and recreates it. Each API
@@ -558,6 +570,25 @@ describe("DockWorkspace React integration", () => {
     view.unmount();
     expect(visibility.listenerCount()).toBe(0);
     expect(previewHarness.unmounts).toBe(previewHarness.mounts);
+  });
+
+  it.each([
+    ["media", true], ["playhead", true], ["preview", false], ["timeline", false],
+  ])("applies the export lock to the %s panel according to its role", (kind, locked) => {
+    dockHarness.api = strictModeApi().api;
+    dockHarness.contentApi = visibilityApi(true).api;
+    dockHarness.contentKind = kind;
+    const view = render(<DockWorkspace contracts={{ ...contracts, editingLocked: true }} />);
+    const panel = document.querySelector(`.weft-dock-panel[data-panel-kind="${kind}"]`)!;
+
+    expect(panel.hasAttribute("inert")).toBe(locked);
+    const lock = document.querySelector(".weft-dock-panel-lock");
+    expect(!!lock).toBe(locked);
+    expect(lock?.closest("[inert]") ?? null).toBeNull();
+
+    view.rerender(<DockWorkspace contracts={contracts} />);
+    expect(panel.hasAttribute("inert")).toBe(false);
+    expect(document.querySelector(".weft-dock-panel-lock")).toBeNull();
   });
 
   it("maximizes from the tab chrome", () => {

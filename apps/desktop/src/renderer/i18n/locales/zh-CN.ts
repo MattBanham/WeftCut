@@ -15,6 +15,8 @@ const zhCN: Resources = {
     disk_hint: '用于可重新生成的缩略图、动画画面、波形和音频效果缓存。保留原始素材、模型和工程文件。默认取工作区所在磁盘总容量的 10%（4–64 GiB）。',
     background: '播放时继续后台处理',
     background_hint: '关闭后，新的后台媒体任务等待播放结束；已开始的任务正常完成。',
+    preview_during_export: '导出时预览（测试版）',
+    preview_during_export_hint: '编码时可播放和拖动只读时间轴。可用资源不足时，预览可能受限。',
     constrained: '内存紧张，新的处理任务正在等待现有任务完成。',
     normal: '资源可用。', usage: '应用内存约 {{used}} GiB。', waiting: '{{count}} 个任务等待中。',
   },
@@ -296,7 +298,7 @@ const zhCN: Resources = {
       evaluation_runtime: "预览计算引擎",
       motif_capture_runtime: "动效捕获运行时",
       motif_catalog: "动效目录",
-      motif_catalog_listener: "动效变更监听",
+      motif_catalog_listener: "动效监听",
     },
   },
   keyframe: {
@@ -574,8 +576,10 @@ const zhCN: Resources = {
   },
   diagnostics: {
     title: '报告问题',
-    previous_title: '上次运行未正常退出',
-    previous_description: 'WeftCut 检测到上次运行未完成退出，或有进程发生故障。强制结束或断电也可能导致这种情况。你可以通过 GitHub 报告问题，帮助我们排查。',
+    unclean_exit_title: '上次未正常关闭',
+    unclean_exit_body: 'WeftCut 检测到上次运行未正常关闭。如果不是你手动结束的，请报告此问题。',
+    process_failure_title: '上次运行时有进程出错',
+    process_failure_body: 'WeftCut 检测到上次运行时有进程崩溃或报错。报告此问题可以帮助我们修复。',
     description: '导出诊断 ZIP，检查内容后将它作为附件上传到 GitHub issue。打开 GitHub 只会准备草稿，由你决定是否提交。',
     privacy: '包含应用和系统版本、CPU / 内存 / GPU 信息、近期资源采样和脱敏日志，不包含项目文件或媒体。错误文字中仍可能存在私人信息。GitHub issue 及附件是公开的，应用不会自动上传。',
     export: '导出诊断包…',
@@ -1147,6 +1151,8 @@ const zhCN: Resources = {
     empty_hint: "添加片段后预览将自动启动",
     preparing: "正在准备预览…",
     suspended_export: "正在导出",
+    suspended_export_preparing: "正在准备导出",
+    export_capacity: "导出期间，预览正在等待可用资源。",
     suspended_agent: "Agent 正在查看",
     target_label: "预览内容",
     target_follow_focus: "跟随焦点",
@@ -1751,6 +1757,10 @@ const zhCN: Resources = {
 
     title: "导出",
     phase_encode: "编码中",
+    pill: "导出 {{percent}}%",
+    pill_rate: "{{fps}} fps · {{speed}}×",
+    pill_elapsed: "已用 {{time}}",
+    cancel_export: "取消导出",
     starting: "正在启动导出…",
     preparing: "正在为 {{labels}} 准备优化媒体 —— 准备好后将自动开始导出。",
     preparing_cancel: "取消",
@@ -2136,7 +2146,7 @@ const zhCN: Resources = {
       "移走或删除轨道中的最后一个片段时，自动删除该轨道。关闭后保留空轨道；预留轨道和锁定轨道始终保留。适用于所有项目。",
     tail_snap_enabled: "启用片段吸附",
     tail_snap_enabled_hint:
-      "拖拽或修剪片段时，自动对齐到附近的片段边界或播放头。",
+      "拖拽或修剪片段时，自动对齐到附近的片段边界或播放头。按住 {{mod}} 可临时关闭。",
     tail_snap_strength: "吸附强度",
     tail_snap_strength_hint:
       "以屏幕像素为单位。",
@@ -2191,7 +2201,7 @@ const zhCN: Resources = {
     preview_heading: "预览",
     preview_snap_enabled: "启用画面吸附",
     preview_snap_enabled_hint:
-      "在预览中移动或缩放片段时，自动对齐到画面边缘、中线以及其它片段。按住 Ctrl 可临时关闭。",
+      "在预览中移动或缩放片段时，自动对齐到画面边缘、中线以及其它片段。按住 {{mod}} 可临时关闭。",
     preview_snap_strength: "吸附强度",
     preview_snap_strength_hint:
       "以屏幕像素为单位。",

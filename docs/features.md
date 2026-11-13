@@ -747,6 +747,31 @@ Chromium page zoom, so a chorded binding would never reach the renderer. Both ar
 commands, **unscoped** (they zoom the timeline whatever has focus) and inert in
 text fields.
 
+## Timeline snapping
+
+The magnet (`toggleTailSnap`) turns clip snapping on or off with one click; the
+radius is a Settings field in screen px (`tail_snap_enabled`,
+`tail_snap_strength_px`). Clip moves and trims, media drops, cross-Panel drags,
+marker drags and blade cuts snap to the frame-rounded edges of other visible
+clips and to the playhead; the dragged clips, and their link members unless the
+link override is on, are never targets. While a drag is snapped, one dashed line
+from the ruler's bottom edge down marks the boundary it snapped to, and every
+way out of the gesture clears it. The Blade draws no separate line: its own mark
+turns the guide's colour while the cut is snapped. That mark runs from the
+ruler's bottom edge down, faint except over the clips the click would split (the
+hovered clip and, unless the link override is on, the link members spanning the
+cut); in the ruler it hangs the cut's timecode on a flag, in the label band and
+clear of the ticks. The playhead, the guide and the blade mark share one
+geometry and one overlay (Time mark in [CONTEXT.md](../CONTEXT.md)). Holding
+Mod (Ctrl; ⌘ on macOS) suspends the magnet for that event, including when held
+before the press; the frame and audio sample grids still apply. The chosen target never depends on the lane under the pointer: a
+vertical-only move keeps its time, and a landing that does not fit shows as a
+collision at the aligned position. Escape, pointer cancel or a tool change
+abandons a clip drag; Escape or pointer cancel abandons a marker drag. Solver:
+`renderer/timeline/snapping.ts`; guide: `TimelineSnapGuide.tsx`,
+`timelineSnapFeedbackStore.ts`; marks: `TimeMarkOverlay.tsx`,
+`TimelineBladeMark.tsx`.
+
 ## Preview zoom and pan
 
 The wheel or a trackpad pinch over the preview zooms about the pointer;
@@ -1193,10 +1218,11 @@ changing geometry or progress.
   lines and every other staged layer's bounds, **each axis independently**; ties
   go to composition lines. Radius is in screen px (`preview_snap_strength_px`,
   default 12; `preview_snap_enabled`), its own app setting, separate from the
-  timeline's. Holding Ctrl suppresses snapping (not Alt, which opens the Windows
-  menu bar). Guides are magenta, one per axis at most. A uniform resize solves
-  the snap by ray/line intersection, ranked by displacement. Targets are frozen
-  at pointer-down. Solver: `preview/previewSnap.ts`, run before the override is
+  timeline's. Holding Mod (Ctrl; ⌘ on macOS) suppresses snapping. Not Alt, which
+  opens the Windows menu bar; not a bare Ctrl on macOS, where Chromium turns a
+  Ctrl+press into a context-menu click. Guides are magenta, one per axis at
+  most. A uniform resize solves the snap by ray/line intersection, ranked by
+  displacement. Targets are frozen at pointer-down. Solver: `preview/previewSnap.ts`, run before the override is
   written.
 
 **Implementation invariants** (each one looks fixable and is not):

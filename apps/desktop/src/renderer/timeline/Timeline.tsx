@@ -49,6 +49,7 @@ import {
 import { useShortcuts, type OverrideMap } from "../shortcuts/useShortcuts";
 import { ACTION_DEFS } from "../shortcuts/defs";
 import { useCommandProvider } from "../commands/registry";
+import { exportReviewCommands, exportReviewShortcuts } from "../commands/exportReview";
 import {
   NUDGE_MS,
   NUDGE_SAMPLE,
@@ -68,6 +69,7 @@ import {
   linkFanoutActive,
   linkToggleState,
 } from "./linkEligibility";
+import { useLinkOverride } from "../state/linkOverrideStore";
 import {
   canDeselectAll,
   canSelectAll,
@@ -78,6 +80,7 @@ import { requestPrebake } from "../render/motifs/prebakeIntents";
 import {
   DROP_STRIP_SEAM_OVERLAP_PX,
   headerColumnPx,
+  RULER_HEIGHT_PX,
   trackHeightPx,
   computeTimelineExtent,
   indexLinks,
@@ -136,7 +139,11 @@ import { useLayerDrag } from "./hooks/useLayerDrag";
 import { LayerDragTrimMonitor } from "./LayerDragTrimMonitor";
 import { useIsLayerDragging } from "./layerDragStore";
 import { layerIsReadOnly } from "../state/layerEditability";
-import { snapTimeToTimelineBoundary } from "./snapping";
+import { resolveTimelineTimeSnap } from "./snapping";
+import { TimelineSnapGuide } from "./TimelineSnapGuide";
+import { TimeMarkOverlay } from "./TimeMarkOverlay";
+import { TimelineBladeMark } from "./TimelineBladeMark";
+import { bladeCutLayerIds } from "./bladeCut";
 import {
   localClockUsOf,
   playheadClockUs,
@@ -250,6 +257,7 @@ interface TimelineProps {
   /// Same capability verdict as the media pool; independent of copy progress.
   readinessOf: (id: string) => MediaReadiness;
   visible?: boolean;
+  editingLocked?: boolean;
   onExitBlade: () => void;
   /// Park the film at this ROOT moment. A Panel scrubs on its own clock, so it
   /// projects up before calling (`state/playheadProjection.ts`); a composition
@@ -282,6 +290,7 @@ export const Timeline = memo(function Timeline({
   media,
   readinessOf,
   visible = true,
+  editingLocked = false,
   onExitBlade,
   onSeek,
   onMutated,
@@ -325,6 +334,7 @@ export const Timeline = memo(function Timeline({
   const [bladePreview, setBladePreview] = useState<{
     layerId: string;
     atUs: number;
+    snapped: boolean;
   } | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -757,7 +767,7 @@ export const Timeline = memo(function Timeline({
   useShortcuts({
     disabled: !isFocusedTimeline,
     overrides: shortcutOverrides,
-    handlers: {
+    handlers: exportReviewShortcuts({
       selectAll: handleSelectAll,
       deselectAll,
       toggleLinkSelected: handleToggleLinkSelected,
@@ -768,7 +778,7 @@ export const Timeline = memo(function Timeline({
       resyncAudioToVideo: handleResyncAudioToVideo,
       zoomTimelineIn: handleZoomTimelineIn,
       zoomTimelineOut: handleZoomTimelineOut,
-    },
+    }, editingLocked),
   });
 
   // Gated on the same predicate as the shortcuts above, for the ADR 0053 reason
@@ -778,7 +788,7 @@ export const Timeline = memo(function Timeline({
   // necessarily the one holding the keyboard — so ungated, the palette's
   // Select All and Ctrl+A would act on DIFFERENT timelines, and every lookup
   // would log the collision (25 of them per Quick Actions strip render).
-  useCommandProvider(() => [
+  useCommandProvider(() => exportReviewCommands([
     // Timeline's provider rather than App's catalogue, which is also why neither
     // appears in the Edit menu: a menu-bar row backed by this provider would
     // vanish whenever the Timeline Panel is closed
@@ -853,7 +863,7 @@ export const Timeline = memo(function Timeline({
       labelKey: ACTION_DEFS.zoomTimelineOut.labelKey,
       run: handleZoomTimelineOut,
     },
-  ], { enabled: isFocusedTimeline });
+  ], editingLocked), { enabled: isFocusedTimeline });
 
   // Live lane-element registry. The drag hit-test measures these nodes rather
   // than recomputing row offsets from track heights — a row's on-screen extent
@@ -1469,13 +1479,13 @@ export const Timeline = memo(function Timeline({
   );
 
   const bladeCutTimeFromClientX = useCallback(
-    (layer: LayerSummary, clientX: number): number | null => {
+    (layer: LayerSummary, clientX: number, snapSuspended = false): { atUs: number; boundaryUs: number | null } | null => {
       if (!canvasRef.current) return null;
       const rect = canvasRef.current.getBoundingClientRect();
       const x = clientX - rect.left;
       const rawUs = Math.max(0, Math.round((x / pxPerSec) * 1_000_000));
       const frameUs = snapFrameRound(rawUs, fpsNum, fpsDen);
-      const atUs = snapTimeToTimelineBoundary({
+      const snapResult = resolveTimelineTimeSnap({
         timeUs: frameUs,
         layerId: layer.id,
         // Escaped under the link override: the split then cuts this layer
@@ -1492,12 +1502,14 @@ export const Timeline = memo(function Timeline({
         fpsNum,
         fpsDen,
         pxPerSec,
-        enabled: tailSnapEnabled,
+        enabled: tailSnapEnabled && !snapSuspended,
         strengthPx: tailSnapStrengthPx,
         isValidSnap: (boundaryUs) =>
           boundaryUs > layer.t_start_us && boundaryUs < layer.t_end_us,
       });
-      return atUs > layer.t_start_us && atUs < layer.t_end_us ? atUs : null;
+      const atUs = snapResult.timeUs;
+      return atUs > layer.t_start_us && atUs < layer.t_end_us
+        ? { atUs, boundaryUs: snapResult.boundaryUs } : null;
     },
     [
       compositionId,
@@ -1513,13 +1525,12 @@ export const Timeline = memo(function Timeline({
   );
 
   const updateBladePreview = useCallback(
-    (layer: LayerSummary | null, clientX?: number) => {
-      if (!bladeMode || !layer || clientX === undefined) {
-        setBladePreview(null);
-        return;
-      }
-      const atUs = bladeCutTimeFromClientX(layer, clientX);
-      setBladePreview(atUs === null ? null : { layerId: layer.id, atUs });
+    (layer: LayerSummary | null, clientX?: number, snapSuspended = false) => {
+      const snapResult = bladeMode && layer && clientX !== undefined
+        ? bladeCutTimeFromClientX(layer, clientX, snapSuspended) : null;
+      setBladePreview(snapResult === null || !layer ? null : {
+        layerId: layer.id, atUs: snapResult.atUs, snapped: snapResult.boundaryUs !== null,
+      });
     },
     [bladeCutTimeFromClientX, bladeMode],
   );
@@ -1528,6 +1539,15 @@ export const Timeline = memo(function Timeline({
     if (!bladeMode) setBladePreview(null);
   }, [bladeMode]);
 
+  // Subscribed, not read at event time: flipping the override while hovering
+  // changes what the click would cut, and the blade mark must say so.
+  const linkOverride = useLinkOverride();
+  const bladeCutIds = useMemo(
+    () => bladePreview === null ? [] :
+      bladeCutLayerIds(bladePreview.layerId, bladePreview.atUs, tracks, links, !linkOverride),
+    [bladePreview, links, linkOverride, tracks],
+  );
+
   // Blade-tool click handler: convert clientX → frame-snapped composition
   // timestamp and ask the actor to split the layer at that point. Reject
   // only when the snapped point lands exactly on a layer edge — the
@@ -1535,9 +1555,10 @@ export const Timeline = memo(function Timeline({
   // frame-precise cuts. After a split the user stays in blade mode
   // (NLE convention); press `C` or `Esc` to exit.
   const splitFromClientX = useCallback(
-    async (layer: LayerSummary, clientX: number) => {
-      const atUs = bladeCutTimeFromClientX(layer, clientX);
-      if (atUs === null) return;
+    async (layer: LayerSummary, clientX: number, snapSuspended = false) => {
+      const snapResult = bladeCutTimeFromClientX(layer, clientX, snapSuspended);
+      if (snapResult === null) return;
+      const atUs = snapResult.atUs;
       setBladePreview(null);
       try {
         // Link-aware, as `splitAtPlayhead` sends it; escaped only under the
@@ -1821,14 +1842,15 @@ export const Timeline = memo(function Timeline({
             fpsDen={fpsDen}
           />
           <TimelineFixedRow compositionId={compositionId} widthPx={widthPx}
-            header={<div data-testid="timeline-ruler-corner" className="h-5 border-b border-border-soft bg-card" />}>
+            header={<div data-testid="timeline-ruler-corner" className="border-b border-border-soft bg-card"
+              style={{ height: RULER_HEIGHT_PX }} />}>
             <TimelineRuler
               compositionId={compositionId} pxPerSec={pxPerSec} totalSec={totalSec}
               widthPx={widthPx} viewportWidthPx={viewportWidthPx}
               fpsNum={fpsNum} fpsDen={fpsDen} onScrub={beginRulerScrub}
             />
           </TimelineFixedRow>
-          <TimelineFixedRow compositionId={compositionId} widthPx={widthPx} header={<MarkerLaneHeader />}>
+          <TimelineFixedRow compositionId={compositionId} widthPx={widthPx} inert={editingLocked} header={<MarkerLaneHeader />}>
             <MarkerLane compositionId={compositionId} pxPerSec={pxPerSec} widthPx={widthPx}
               viewportWidthPx={viewportWidthPx} fpsNum={fpsNum} fpsDen={fpsDen} />
           </TimelineFixedRow>
@@ -1838,7 +1860,7 @@ export const Timeline = memo(function Timeline({
             <ReviewLane compositionId={compositionId} pxPerSec={pxPerSec} widthPx={widthPx}
               viewportWidthPx={viewportWidthPx} fpsNum={fpsNum} fpsDen={fpsDen} />
           </TimelineFixedRow>
-          <TimelineFixedRow compositionId={compositionId} widthPx={widthPx} header={<DropStripHeader />}>
+          <TimelineFixedRow compositionId={compositionId} widthPx={widthPx} inert={editingLocked} header={<DropStripHeader />}>
             <DropStrip elRef={dropStripElRef} compositionId={compositionId} pxPerSec={pxPerSec}
               fpsNum={fpsNum} fpsDen={fpsDen} mediaDropSnap={mediaDropSnap}
               pendingPlacements={pendingPlacements} pendingLayerById={pendingLayerById} onMediaDrop={onMediaDrop} />
@@ -1866,7 +1888,7 @@ export const Timeline = memo(function Timeline({
                 }
             }
           >
-            <div ref={(el) => { trackReorder.containerRef.current = el; }} className="relative flex min-h-full flex-col" style={{ width: headerColPx + widthPx }}>
+            <div inert={editingLocked} ref={(el) => { trackReorder.containerRef.current = el; }} className="relative flex min-h-full flex-col" style={{ width: headerColPx + widthPx }}>
               <DropStripSeam intoLanePx={dropSeamIntoLanePx} />
               {/* Reserve the first lane's upward link badge inside the viewport.
                   Carry the sticky header through this gap so scrolled badges
@@ -1980,13 +2002,6 @@ export const Timeline = memo(function Timeline({
               </div>
               <div ref={canvasRef} data-testid="timeline-canvas" className="pointer-events-none absolute inset-y-0"
                 style={{ left: headerColPx, width: widthPx }}>
-                {bladePreview && (
-                  <BladeCutPreview
-                    x={(bladePreview.atUs / 1_000_000) * pxPerSec}
-                    label={formatTimecode(bladePreview.atUs, fpsNum, fpsDen)}
-                    width={widthPx}
-                  />
-                )}
                 <OutOfRangeDim pxPerSec={pxPerSec} />
                 {/* Draws only while a clip from ANOTHER Panel is over this one.
                 A leaf, so following the pointer costs this Panel one render
@@ -2012,8 +2027,23 @@ export const Timeline = memo(function Timeline({
               </div>
             </div>
           </div>
-          <TimelinePlayhead compositionId={compositionId} anchorFrame={anchorFrame}
-            pxPerSec={pxPerSec} fpsNum={fpsNum} fpsDen={fpsDen} visible={visible} />
+          {/* Paint order: the transient marks over the playhead they may sit on. */}
+          <TimeMarkOverlay compositionId={compositionId} visible={visible}>
+            <TimelinePlayhead compositionId={compositionId} anchorFrame={anchorFrame}
+              pxPerSec={pxPerSec} fpsNum={fpsNum} fpsDen={fpsDen} visible={visible} />
+            <TimelineSnapGuide compositionId={compositionId} pxPerSec={pxPerSec} />
+            {bladePreview && (
+              <TimelineBladeMark
+                atUs={bladePreview.atUs}
+                snapped={bladePreview.snapped}
+                cutLayerIds={bladeCutIds}
+                label={formatTimecode(bladePreview.atUs, fpsNum, fpsDen)}
+                pxPerSec={pxPerSec}
+                widthPx={widthPx}
+                trackViewportRef={rootRef}
+              />
+            )}
+          </TimeMarkOverlay>
         </div>
         {contextMenu && (
           <LayerContextMenu
@@ -2065,8 +2095,8 @@ export const Timeline = memo(function Timeline({
  * lives elsewhere — see `RangeCap` in TimelineRuler.tsx for the permanent-mark
  * vs transient-wash split.
  *
- * `z-[4]` clears every LayerBlock (max `z-[3]`) while staying under the blade
- * preview (`z-[5]`) and the playhead, which must never read as out-of-range.
+ * `z-[4]` clears every LayerBlock (max `z-[3]`). The Time marks draw in their
+ * own overlay above the track viewport, so none of them reads as out-of-range.
  * The node stays mounted at zero opacity so the fade is a CSS transition
  * rather than a pop; `pointer-events-none` keeps it inert either way.
  */
@@ -2108,40 +2138,6 @@ function OutOfRangeDim({ pxPerSec }: { pxPerSec: number }) {
     </div>
   );
 }
-
-function BladeCutPreview({
-  x,
-  label,
-  width,
-}: {
-  x: number;
-  label: string;
-  width: number;
-}) {
-  const labelX = Math.min(Math.max(x, 44), Math.max(44, width - 44));
-  return (
-    <>
-      <div
-        data-testid="timeline-blade-preview"
-        className="pointer-events-none absolute bottom-0 top-0 z-[5]"
-        style={{ left: x }}
-        aria-hidden="true"
-      >
-        <div className="absolute bottom-0 top-0 w-px -translate-x-1/2 bg-amber-300 shadow-[0_0_0_0.5px_rgba(0,0,0,0.65),0_0_8px_rgba(251,191,36,0.55)]" />
-        <div className="absolute -left-1.5 top-0 h-3 w-3 bg-amber-300 shadow-[0_1px_2px_rgba(0,0,0,0.55)] [clip-path:polygon(50%_100%,0_0,100%_0)]" />
-      </div>
-      <div
-        className="pointer-events-none absolute top-1 z-[6] -translate-x-1/2 whitespace-nowrap rounded-sm border border-amber-200/50 bg-black/80 px-1.5 py-0.5 font-mono text-[length:var(--font-size-micro)] font-medium leading-none text-amber-100 shadow-[0_1px_5px_rgba(0,0,0,0.45)]"
-        style={{ left: labelX }}
-        aria-hidden="true"
-      >
-        {label}
-      </div>
-    </>
-  );
-}
-
-
 
 function EmptyHint({ mode }: { mode?: "AbRoll" | "AllTracks" }) {
   const { t } = useTranslation();

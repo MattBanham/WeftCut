@@ -13,6 +13,8 @@ const enUS = {
     disk_hint: 'Space for replaceable thumbnails, animation frames, waveforms and audio-effect caches. Original media, models and project files are kept. By default, 10% of the total size of the workspace\'s disk (4–64 GiB).',
     background: 'Continue background processing during playback',
     background_hint: 'When off, new background media tasks wait until playback stops. Tasks already running finish normally.',
+    preview_during_export: 'Preview during export (beta)',
+    preview_during_export_hint: 'Play and scrub the read-only timeline while encoding. Preview may be limited by available resources.',
     constrained: 'Memory is under pressure. New processing waits while existing work finishes.',
     normal: 'Resources available.', usage: 'App memory: about {{used}} GiB.', waiting: '{{count}} tasks waiting.',
   },
@@ -304,7 +306,7 @@ const enUS = {
       evaluation_runtime: "evaluation engine",
       motif_capture_runtime: "Motif capture runtime",
       motif_catalog: "Motif catalog",
-      motif_catalog_listener: "Motif change listener",
+      motif_catalog_listener: "Motif listeners",
     },
   },
   keyframe: {
@@ -590,8 +592,10 @@ const enUS = {
   },
   diagnostics: {
     title: 'Report an Issue',
-    previous_title: 'The previous session did not exit normally',
-    previous_description: 'WeftCut found an unfinished session or a process failure. This can also happen after a forced quit or power loss. You can help us investigate by reporting it on GitHub.',
+    unclean_exit_title: 'WeftCut did not close normally last time',
+    unclean_exit_body: "WeftCut detected that the last session did not close normally. If you didn't end it yourself, please report it.",
+    process_failure_title: 'A WeftCut process failed last time',
+    process_failure_body: 'WeftCut detected that a process crashed or failed in the last session. Reporting it helps us fix it.',
     description: 'Export a diagnostic ZIP, review its contents, then attach it to a GitHub issue. Opening GitHub prepares a draft; you choose when to submit it.',
     privacy: 'Includes app and system versions, CPU / memory / GPU information, recent resource samples and redacted logs. No project files or media are included. Error text may still contain private information. GitHub issues and attachments are public; nothing is uploaded automatically.',
     export: 'Export Diagnostic Bundle…',
@@ -1296,6 +1300,8 @@ const enUS = {
     // Shown over the preview while the export pipeline holds its decoders:
     // an export, or an agent's `render_frames`.
     suspended_export: "Exporting",
+    suspended_export_preparing: "Preparing export",
+    export_capacity: "Preview is waiting for resources while the export runs.",
     suspended_agent: "An agent is viewing",
     // What the preview renders. The list names the timeline and every Group;
     // the default follows whichever timeline holds the keyboard.
@@ -1961,6 +1967,10 @@ const enUS = {
 
     title: "Export",
     phase_encode: "Encoding",
+    pill: "Export {{percent}}%",
+    pill_rate: "{{fps}} fps · {{speed}}×",
+    pill_elapsed: "Elapsed {{time}}",
+    cancel_export: "Cancel export",
     starting: "Starting export…",
     preparing:
       "Preparing optimized media for {{labels}} — export will start automatically.",
@@ -2380,7 +2390,7 @@ const enUS = {
       "Remove a track when its last clip is moved or deleted. Turn off to keep empty tracks; reserved and locked tracks always stay. Applies to all projects.",
     tail_snap_enabled: "Clip snapping",
     tail_snap_enabled_hint:
-      "Snap clips to nearby clip edges or the playhead while dragging or trimming.",
+      "Snap clips to nearby clip edges or the playhead while dragging or trimming. Hold {{mod}} to override.",
     tail_snap_strength: "Snap strength",
     tail_snap_strength_hint:
       "Measured in screen pixels.",
@@ -2439,7 +2449,7 @@ const enUS = {
     preview_heading: "Preview",
     preview_snap_enabled: "Canvas snapping",
     preview_snap_enabled_hint:
-      "Align clips to the frame's edges and centre lines, and to other clips, while moving or resizing them on the preview. Hold Ctrl to override.",
+      "Align clips to the frame's edges and centre lines, and to other clips, while moving or resizing them on the preview. Hold {{mod}} to override.",
     preview_snap_strength: "Snap strength",
     preview_snap_strength_hint:
       "Measured in screen pixels.",

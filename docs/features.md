@@ -36,7 +36,8 @@ than one project. The importer supports the subset below with FCPXML headers
 | Missing or incompatible media | Choose an individual replacement. For missing originals, you can also search one folder by exact filename. Review also shows known differences on the files already found and any effects that can be left out. Every replacement is checked again before confirmation. |
 | Source organization and proxies | Review reports when it leaves out source metadata, collections, standalone browser clips, Apple file access bookmarks, and proxies listed alongside an original. |
 | Compound clips | Supported same-rate primary compound clips become editable Groups. Repeated placements share the Group contents and keep their own trims. |
-| Other transitions, complex retimes, multicam, unsupported compound or synchronized clips, titles and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
+| Multicam | Supported primary cuts import the explicitly selected picture and audio as editable Group clips. Review names the angles used. Switching angles remains available in the source editor. |
+| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, titles and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
 
 The importer handles local Windows drive and POSIX file URLs. A path from
 another platform can be relinked. It does not fetch media over the network or

@@ -158,10 +158,14 @@ export async function prepareTimelineProject(
     }
   }
   const sequences = new Set<ImportTimeline>()
+  const multicamSequences = new Set<ImportTimeline>()
   function visit(sequence: ImportTimeline): void {
     if (sequences.has(sequence)) return
     sequences.add(sequence)
-    for (const group of sequence.groups) visit(group.timeline)
+    for (const group of sequence.groups) {
+      if (group.kind === 'multicam') multicamSequences.add(group.timeline)
+      visit(group.timeline)
+    }
   }
   visit(timeline)
   const clips = [...sequences].flatMap(sequence => sequence.clips)
@@ -511,10 +515,11 @@ export async function prepareTimelineProject(
   return { project, report: {
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
     outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
-    compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.length, 0),
+    compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.filter(group => group.kind === 'compound').length, 0),
     mediaChanges: [...mediaChanges.values()], omittedEffects: [...sequences].flatMap(sequence => sequence.omittedEffects ?? []),
     videoClips, audioClips, markers: Object.values(project.compositions).reduce((count, composition) => count + composition.markers.length, 0), media: Object.keys(project.media_pool).length,
-    lanes: allLanes, connectedClips: clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
+    lanes: allLanes, connectedClips: [...sequences].filter(sequence => !multicamSequences.has(sequence))
+      .reduce((count, sequence) => count + sequence.clips.filter(clip => clip.lane !== 0).length, 0), roundedEnds,
     resampledAudioClips, downmixedAudioClips,
     rateConformedVideoClips, resizedVideoClips, videoConversions: [...videoConversions.values()],
     normalizedTimecode: [...sequences].some(sequence => sequence.normalizedTimecode),

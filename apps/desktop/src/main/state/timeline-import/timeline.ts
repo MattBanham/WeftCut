@@ -43,6 +43,7 @@ export interface TimelineClip {
 }
 
 export interface TimelineGroup {
+  kind: 'compound' | 'multicam'
   timeline: ImportTimeline
   label: string
   enabled: boolean

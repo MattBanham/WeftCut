@@ -14,6 +14,7 @@ import { AUDIO_GRID, isCanonicalOnGrid, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import { listFcpxmlSequences, parseFcpxml } from './fcpxml'
 import { prepareTimelineProject } from './project'
+import type { TimelineMediaReplacement } from '../../../shared/timelineImport'
 
 const fixture = (url = 'file:///fictional/Harbor%20Lights.mov') => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -135,6 +136,21 @@ describe('FCPXML subset', () => {
   ])('reports how to flatten multicam with %s', (_name, change, reason) => {
     expect(() => parseFcpxml(change(multicamFixture()))).toThrow(reason)
     expect(() => parseFcpxml(change(multicamFixture()))).toThrow(/flattening this multicam edit/)
+  })
+
+  it('keeps a connected title interval in the parent clock after explicitly leaving it out', () => {
+    const xml = fixture().replace('<marker value="Signal seen"',
+      '<title name="Lower Third" ref="motion" lane="1" offset="108003003/30000s" duration="1001/30000s"><text><text-style>Field Notes</text-style></text></title><marker value="Signal seen"')
+    const inspect = parseFcpxml(xml, 0, 'inspect')
+    expect(inspect.editIssues).toMatchObject([{ label: 'Lower Third', recovery: 'leave-title-gap',
+      timelineFrames: { start: 1, end: 2 } }])
+    const fallback = parseFcpxml(xml, 0, 'inspect', true)
+    expect(fallback.clips).toEqual(parseFcpxml(fixture()).clips)
+    expect(fallback.omittedTitles).toMatchObject([{ label: 'Lower Third', timelineFrames: { start: 1, end: 2 } }])
+    expect(() => parseFcpxml(xml.replace('</title>', '<audio ref="take" lane="-1" offset="0s" duration="1s"/></title>'),
+      0, 'inspect', true)).toThrow(/Unsupported inside/)
+    expect(() => parseFcpxml(fixture().replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
+      '<title-gap offset="3003/30000s" duration="1001/30000s"/>'), 0, 'inspect', true)).toThrow(/Unsupported inside/)
   })
 
   it('keeps fractional frames, source timecode origin and marker time distinct', () => {
@@ -443,10 +459,10 @@ describe('timeline import transaction', () => {
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
     const assertCurrent = vi.fn()
-    const prepareReview = (relinkDirectory?: string) => prepareTimelineProject(document, destination, idGen, {
+    const prepareReview = (relinkDirectory?: string, replacements?: TimelineMediaReplacement[]) => prepareTimelineProject(document, destination, idGen, {
       compute: { probeMedia, hashMediaSource },
       statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
-    }, assertCurrent, relinkDirectory)
+    }, assertCurrent, relinkDirectory, undefined, undefined, replacements)
     const prepare = async () => (await prepareReview()).project
     return { prepare, prepareReview, before, actor, probeMedia, hashMediaSource }
   }
@@ -970,7 +986,7 @@ describe('timeline import transaction', () => {
         audio: { channels: 2, sample_rate: 48000 } },
     }))
     const { project, report } = await run.prepareReview(folder)
-    expect(report.relinkedMedia).toEqual([{ from: media, to: replacement }])
+    expect(report.relinkedMedia).toMatchObject([{ assetRef: 'take', from: media, to: replacement }])
     expect(run.probeMedia).toHaveBeenCalledWith(replacement)
     expect(Object.values(project.media_pool)[0]?.path_abs).toBe(replacement)
     expect(() => validate(project)).not.toThrow()
@@ -999,28 +1015,27 @@ describe('timeline import transaction', () => {
     expect(notes).toMatch(/Audio start quantized to the 48 kHz sample grid: -?\d+\.\d+ µs/)
   })
 
-  it('relinks a foreign-platform path without probing it or folding the filename case', async () => {
+  it('suggests a different case spelling for a foreign path and waits for the user to choose it', async () => {
     const folder = join(parent, 'Found')
     await mkdir(folder)
     const source = process.platform === 'win32' ? 'file:///home/u/Harbor%20Lights.mov' : 'file:///C:/Media/Harbor%20Lights.mov'
     await writeFile(document, fixture(source))
-    await writeFile(join(folder, 'harbor lights.mov'), 'Fictional replacement')
-    const run = setup()
-    await expect(run.prepareReview(folder)).rejects.toThrow(/path is from another platform/)
-    expect(run.probeMedia).not.toHaveBeenCalled()
-    await rm(join(folder, 'harbor lights.mov'))
-    const candidate = join(folder, 'Harbor Lights.mov')
+    const candidate = join(folder, 'harbor lights.mov')
     await writeFile(candidate, 'Fictional replacement')
     const replacement = await realpath(candidate)
+    const run = setup()
+    await expect(run.prepareReview(folder)).rejects.toMatchObject({ issues: [{ assetRef: 'take',
+      detail: expect.stringContaining('path is from another platform'), suggestedPaths: [replacement] }] })
+    expect(run.probeMedia).not.toHaveBeenCalled()
     run.probeMedia.mockImplementation(async () => JSON.stringify({
       ...mediaItemTemplate(id, 'Video', 10_000_000, true), path_abs: replacement,
       metadata: { duration_us: 10_000_000,
         video: { width: 320, height: 240, fps_num: 30000, fps_den: 1001 },
         audio: { channels: 2, sample_rate: 48000 } },
     }))
-    const { report } = await run.prepareReview(folder)
+    const { report } = await run.prepareReview(folder, [{ assetRef: 'take', path: replacement }])
     expect(run.probeMedia).toHaveBeenCalledExactlyOnceWith(replacement)
-    expect(report.relinkedMedia).toEqual([{ from: expect.stringContaining('Harbor Lights.mov'), to: replacement }])
+    expect(report.relinkedMedia).toMatchObject([{ assetRef: 'take', from: expect.stringContaining('Harbor Lights.mov'), to: replacement }])
   })
 
   it('rejects ambiguous replacement filenames without touching disk or project state', async () => {
@@ -1037,10 +1052,52 @@ describe('timeline import transaction', () => {
       .replace('ref="take" name="Dock"', 'ref="take2" name="Dock"')
     await writeFile(document, xml)
     const run = setup()
-    await expect(run.prepareReview(folder)).rejects.toThrow(/Ambiguous media relink/)
+    const candidate = await realpath(join(folder, 'Harbor Lights.mov'))
+    await expect(run.prepareReview(folder)).rejects.toMatchObject({ issues: [
+      { assetRef: 'take', label: 'Signal', suggestedPaths: [candidate], detail: expect.stringContaining('Ambiguous media relink') },
+      { assetRef: 'take2', label: 'Dock', suggestedPaths: [candidate], detail: expect.stringContaining('Ambiguous media relink') },
+    ] })
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)
     expect(run.probeMedia).not.toHaveBeenCalled()
+  })
+
+  it('can keep or replace each asset independently when their original path is shared', async () => {
+    const url = pathToFileURL(media).href
+    const xml = fixture(url)
+      .replace('</resources>', `<asset id="take2" name="Alternate Camera" hasVideo="1" hasAudio="1"
+        format="format" start="3600s" duration="10s" src="${url}"/></resources>`)
+      .replace('ref="take" name="Dock"', 'ref="take2" name="Dock"')
+    await writeFile(document, xml)
+    await writeFile(media, 'Fictional original video')
+    const alternate = join(parent, 'Alternate.mov')
+    await writeFile(alternate, 'Fictional alternate video')
+    const original = await realpath(media)
+    const replacement = await realpath(alternate)
+    const replacementId = '00000000-0000-0000-0000-0000000000ac'
+    const run = setup()
+    run.probeMedia.mockImplementation(async (path?: string) => JSON.stringify({
+      ...mediaItemTemplate(path === replacement ? replacementId : id, 'Video', 10_000_000, true),
+      path_abs: path, metadata: { duration_us: 10_000_000,
+        video: { width: 320, height: 240, fps_num: 30000, fps_den: 1001 },
+        audio: { channels: 2, sample_rate: 48000 } },
+    }))
+    run.hashMediaSource.mockImplementation(async (path?: string) => (path === replacement ? 'b' : 'a').repeat(64))
+    const importedVideos = (project: Awaited<ReturnType<typeof run.prepare>>) => rootComposition(project).tracks
+      .flatMap(track => track.layers).filter(layer => layer.params.kind === 'VideoClip')
+    const unchanged = await run.prepareReview()
+    expect(run.probeMedia).toHaveBeenCalledExactlyOnceWith(original)
+    expect(importedVideos(unchanged.project)).toMatchObject([
+      { label: 'Signal', params: { media: id } }, { label: 'Dock', params: { media: id } },
+    ])
+    run.probeMedia.mockClear()
+    const changed = await run.prepareReview(undefined, [{ assetRef: 'take2', path: replacement }])
+    expect(run.probeMedia.mock.calls).toEqual([[original], [replacement]])
+    expect(changed.report.relinkedMedia).toEqual([{ assetRef: 'take2', label: 'Alternate Camera', from: media, to: replacement }])
+    expect(importedVideos(changed.project)).toMatchObject([
+      { label: 'Signal', params: { media: id } }, { label: 'Dock', params: { media: replacementId } },
+    ])
+    expect(run.actor.snapshot()).toBe(run.before)
   })
 
   it('leaves the current project and disk untouched on a hash or source-range failure', async () => {

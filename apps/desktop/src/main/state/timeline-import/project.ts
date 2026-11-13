@@ -25,7 +25,7 @@ export class TimelineMediaFailure extends Error {
   constructor(
     readonly issues: TimelineMediaIssue[],
     readonly canSearchFolder: boolean,
-    readonly effectIssues: TimelineCompatibilityItem[],
+    readonly editIssues: TimelineCompatibilityItem[],
     readonly mediaChanges: TimelineMediaChange[] = [],
   ) {
     super(issues.map(issue => issue.detail).join('\n'))
@@ -88,28 +88,46 @@ export async function listTimelineSequences(path: unknown, deps: MediaDeps): Pro
   return { documentId: documentId(xml), choices: listFcpxmlSequences(xml) }
 }
 
-async function findRelinkCandidates(directory: string, wanted: ReadonlySet<string>): Promise<Map<string, string>> {
+function comparableFilename(name: string): string {
+  return name.normalize('NFC').toLowerCase()
+}
+
+async function findRelinkCandidates(directory: string, wanted: ReadonlySet<string>): Promise<{
+  exact: Map<string, string>; suggestions: Map<string, string[]>
+}> {
   const root = await realpath(directory)
   const entries = await opendir(root)
-  const matches = new Map<string, string>()
+  const exact = new Map<string, string>()
+  const suggestions = new Map<string, string[]>()
+  const wantedNames = new Set([...wanted].map(comparableFilename))
+  const maxSuggestions = 5
   let scanned = 0
   for await (const entry of entries) {
     if (++scanned > FCPXML_LIMITS.directoryEntries) throw new Error('The relink folder contains too many entries. Choose a smaller folder containing the original files')
-    if (!wanted.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) continue
+    if (!entry.isFile() || entry.isSymbolicLink()) continue
+    const key = comparableFilename(entry.name)
+    if (!wantedNames.has(key)) continue
+    const isExact = wanted.has(entry.name)
+    const matches = suggestions.get(key) ?? []
+    if (!isExact && matches.length > maxSuggestions) continue
     const candidate = join(root, entry.name)
     const actual = await realpath(candidate).catch(() => null)
     const info = await lstat(candidate).catch(() => null)
-    if (actual && info?.isFile() && !info.isSymbolicLink() && relative(root, dirname(actual)) === '') {
-      matches.set(entry.name, actual)
-      if (matches.size === wanted.size) break
-    }
+    if (!actual || !info?.isFile() || info.isSymbolicLink() || relative(root, dirname(actual)) !== '') continue
+    if (isExact) exact.set(entry.name, actual)
+    if (matches.length <= maxSuggestions) suggestions.set(key, [...matches, actual])
+    if (exact.size === wanted.size) break
   }
-  return matches
+  for (const [key, matches] of suggestions) {
+    if (matches.length > maxSuggestions) suggestions.delete(key)
+    else matches.sort()
+  }
+  return { exact, suggestions }
 }
 
 export async function prepareTimelineProject(
   path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
-  relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false,
+  relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false, leaveTitleGaps = false,
 ): Promise<{ project: Project; report: TimelineImportReport }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
@@ -120,7 +138,7 @@ export async function prepareTimelineProject(
   if (expectedDocument !== undefined && expectedDocument !== documentId(document)) {
     throw new Error('The FCPXML file changed since you opened it. Choose it again to review the updated timeline.')
   }
-  const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects ? 'omit' : 'inspect')
+  const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects ? 'omit' : 'inspect', leaveTitleGaps)
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(inputFile, extname(inputFile)))
   rootComposition(initial).fps = timeline.fps
@@ -169,32 +187,35 @@ export async function prepareTimelineProject(
   }
   visit(timeline)
   const clips = [...sequences].flatMap(sequence => sequence.clips)
-  const effectIssues = [...sequences].flatMap(sequence => sequence.effectIssues ?? [])
-  const originals = new Map(clips.map(({ asset }) => [asset.path, asset]))
-  const references = new Map(clips.map(({ asset }) => [asset.ref, asset.path]))
-  const counts = new Map<string, number>()
-  for (const { asset } of clips) counts.set(asset.path, (counts.get(asset.path) ?? 0) + 1)
-  const mediaIssue = (asset: TimelineSource, detail: string): TimelineMediaIssue => ({
-    assetRef: asset.ref, filename: asset.filename, sourcePath: asset.path, placements: counts.get(asset.path)!, detail,
-  })
+  const editIssues = [...sequences].flatMap(sequence => sequence.editIssues ?? [])
+  const originals = new Map<string, { asset: TimelineSource; label: string; placements: number }>()
+  for (const clip of clips) {
+    const { asset } = clip
+    const original = originals.get(asset.ref)
+    if (original) original.placements++
+    else originals.set(asset.ref, { asset, label: asset.name || clip.label || asset.ref, placements: 1 })
+  }
+  const mediaIssue = (asset: TimelineSource, detail: string): TimelineMediaIssue => {
+    const { label, placements } = originals.get(asset.ref)!
+    return { assetRef: asset.ref, label, filename: asset.filename, sourcePath: asset.path, placements, detail }
+  }
   if (originals.size > FCPXML_LIMITS.mediaFiles) {
-    throw new Error('This sequence references too many original files. Export the sequence in smaller parts')
+    throw new Error('This sequence references too many media assets. Export the sequence in smaller parts')
   }
   const selected = new Map<string, string>()
   if (replacements !== undefined) {
     if (!Array.isArray(replacements) || replacements.length > originals.size) {
-      throw new Error('Choose at most one replacement per source file')
+      throw new Error('Choose at most one replacement per media asset')
     }
     for (const choice of replacements) {
       if (!choice || typeof choice.assetRef !== 'string' || typeof choice.path !== 'string' || !isAbsolute(choice.path)) {
         throw new Error('Choose a local replacement file for each source')
       }
-      const original = references.get(choice.assetRef)
-      if (original === undefined || selected.has(original)) {
-        throw new Error('The replacement does not identify a unique source in this sequence')
+      if (!originals.has(choice.assetRef) || selected.has(choice.assetRef)) {
+        throw new Error('The replacement does not identify a unique asset in this sequence')
       }
       // Check the spelling before any filesystem access, just as for URLs in XML.
-      selected.set(original, originalMediaPath(pathToFileURL(choice.path).href).path)
+      selected.set(choice.assetRef, originalMediaPath(pathToFileURL(choice.path).href).path)
     }
   }
 
@@ -206,70 +227,80 @@ export async function prepareTimelineProject(
     return importer.checkPath(actual)
   }
 
-  const resolved = new Map<string, string>()
+  const resolved = new Map<string, { path: string; choice: 'original' | 'selected' | 'folder' }>()
   const offline: TimelineSource[] = []
-  const substitutions = new Map<string, string>()
   const missing: TimelineMediaIssue[] = []
-  for (const asset of originals.values()) {
-    const replacement = selected.get(asset.path)
-    if (replacement !== undefined) {
+  const checkedPaths = new Map<string, Promise<string>>()
+  for (const { asset } of originals.values()) {
+    const replacement = selected.get(asset.ref)
+    const candidate = replacement ?? (asset.local ? asset.path : undefined)
+    if (candidate !== undefined) {
+      const checked = checkedPaths.get(candidate) ?? checkFile(candidate)
+      checkedPaths.set(candidate, checked)
       try {
-        const path = await checkFile(replacement)
-        resolved.set(asset.path, path)
-        substitutions.set(asset.path, path)
+        resolved.set(asset.ref, { path: await checked, choice: replacement === undefined ? 'original' : 'selected' })
+        continue
       } catch {
-        missing.push(mediaIssue(asset, 'The chosen replacement is missing or unreadable. Choose another local file.'))
+        if (replacement !== undefined) {
+          missing.push(mediaIssue(asset, 'The chosen replacement is missing or unreadable. Choose another local file.'))
+          continue
+        }
       }
-    } else if (asset.local) {
-      try { resolved.set(asset.path, await checkFile(asset.path)) }
-      catch { offline.push(asset) }
-    } else {
-      offline.push(asset)
     }
+    offline.push(asset)
   }
   const candidates = relinkRoot && offline.length
     ? await findRelinkCandidates(relinkRoot, new Set(offline.map(asset => asset.filename)))
-    : new Map<string, string>()
+    : undefined
   for (const asset of offline) {
-    const candidate = candidates.get(asset.filename)
-    if (candidate) {
+    const candidate = candidates?.exact.get(asset.filename)
+    if (candidate !== undefined) {
+      const checked = checkedPaths.get(candidate) ?? checkFile(candidate)
+      checkedPaths.set(candidate, checked)
       try {
-        const path = await checkFile(candidate)
-        resolved.set(asset.path, path)
-        substitutions.set(asset.path, path)
+        resolved.set(asset.ref, { path: await checked, choice: 'folder' })
         continue
       } catch { /* Leave this asset unresolved. */ }
     }
-    missing.push(mediaIssue(asset, 'Missing or unreadable original media: ' + asset.path +
-      (asset.local ? '' : ' (path is from another platform)') + '. Choose the original file or look for it in a folder.'))
+    const issue = mediaIssue(asset, 'Missing or unreadable original media: ' + asset.path +
+      (asset.local ? '' : ' (path is from another platform)') + '. Choose the original file or look for it in a folder.')
+    const suggestions = candidates?.suggestions.get(comparableFilename(asset.filename))?.filter(path => path !== candidate)
+    if (suggestions?.length) issue.suggestedPaths = suggestions
+    missing.push(issue)
   }
-  const claimed = new Map<string, string>()
-  const conflicts = new Map<string, TimelineMediaIssue>()
-  for (const [original, actual] of resolved) {
-    const key = deps.fileKey?.(actual) ?? deps.realPath?.(actual) ?? actual
-    const previous = claimed.get(key)
-    if (previous !== undefined && (substitutions.has(original) || substitutions.has(previous))) {
-      for (const path of [previous, original]) {
-        conflicts.set(path, mediaIssue(originals.get(path)!, 'Ambiguous media relink: two sources point to ' +
-          actual + '. Choose distinct originals.'))
-      }
-    }
-    claimed.set(key, previous ?? original)
-  }
-  if (conflicts.size) throw new TimelineMediaFailure([...missing, ...conflicts.values()], offline.length > 0, effectIssues)
 
-  const relinkedMedia = [...substitutions].filter(([from, to]) => from !== to).map(([from, to]) => ({ from, to }))
+  const fileKeys = new Map<string, string>()
+  const originalPathsByFile = new Map<string, Set<string>>()
+  for (const [ref, { path }] of resolved) {
+    const key = fileKeys.get(path) ?? deps.fileKey?.(path) ?? deps.realPath?.(path) ?? path
+    fileKeys.set(path, key)
+    const originalsForFile = originalPathsByFile.get(key) ?? new Set<string>()
+    originalsForFile.add(originals.get(ref)!.asset.path)
+    originalPathsByFile.set(key, originalsForFile)
+  }
+  for (const [ref, { path, choice }] of resolved) {
+    if (choice !== 'folder' || originalPathsByFile.get(fileKeys.get(path)!)!.size <= 1) continue
+    missing.push({ ...mediaIssue(originals.get(ref)!.asset, 'Ambiguous media relink. More than one original matches this file. Choose the file for this asset.'),
+      suggestedPaths: [path] })
+    resolved.delete(ref)
+  }
+
+  const relinkedMedia: TimelineImportReport['relinkedMedia'] = []
   const mediaIds = new Map<string, string>()
   const failed: TimelineMediaIssue[] = []
-  for (const [original, mediaPath] of resolved) {
+  const importedPaths = new Map<string, ReturnType<typeof importer.ensureImported>>()
+  for (const [ref, { path: mediaPath, choice }] of resolved) {
     assertCurrent()
-    const asset = originals.get(original)!
+    const { asset, label } = originals.get(ref)!
     try {
-      const result = await importer.ensureImported(mediaPath)
+      const imported = importedPaths.get(mediaPath) ?? importer.ensureImported(mediaPath)
+      importedPaths.set(mediaPath, imported)
+      const result = await imported
       if (result.disposition === 'relinked' && existing?.media_pool[result.mediaId]) {
         throw new Error('An existing pool item needs repair. Relink it through the media pool before reviewing this timeline')
       }
-      mediaIds.set(original, result.mediaId)
+      mediaIds.set(ref, result.mediaId)
+      if (choice !== 'original' && asset.path !== mediaPath) relinkedMedia.push({ assetRef: ref, label, from: asset.path, to: mediaPath })
     } catch (error) {
       assertCurrent()
       failed.push(mediaIssue(asset, 'Could not read ' + mediaPath + '. Choose another file or export a compatible copy. ' +
@@ -279,7 +310,7 @@ export async function prepareTimelineProject(
   assertCurrent()
   const snapshot = actor.snapshot()
   const root = rootComposition(snapshot)
-  const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.path)!]!
+  const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.ref)!]!
   const sourceEnds = new Map<TimelineClip, { videoEnd: ExactTime; audioEnd: ExactTime }>()
   const mediaChanges = new Map<string, TimelineMediaChange>()
   const incompatibilities = new Map<string, TimelineMediaIssue>()
@@ -287,23 +318,23 @@ export async function prepareTimelineProject(
     const item = itemOf(clip)
     if (!item) continue
     try {
-      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.path)!))
+      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.ref)!.path))
       sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
-        const issue = mediaIssue(originals.get(clip.asset.path)!, detail)
-        mediaChanges.set(JSON.stringify([clip.asset.path, kind, detail]), { ...issue, kind, sourcePath: item.path_abs })
+        const issue = mediaIssue(clip.asset, detail)
+        mediaChanges.set(JSON.stringify([clip.asset.ref, kind, detail]), { ...issue, kind, sourcePath: item.path_abs })
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      const key = JSON.stringify([clip.asset.path, detail])
-      incompatibilities.set(key, mediaIssue(originals.get(clip.asset.path)!, detail))
+      const key = JSON.stringify([clip.asset.ref, detail])
+      incompatibilities.set(key, mediaIssue(clip.asset, detail))
     }
   }
   if (missing.length || failed.length || incompatibilities.size) {
-    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, effectIssues,
+    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, editIssues,
       [...mediaChanges.values()])
   }
-  if (effectIssues.length) throw new TimelineEditFailure(effectIssues, true, [...mediaChanges.values()])
+  if (editIssues.length) throw new TimelineEditFailure(editIssues, editIssues.some(issue => issue.recovery === 'omit-effect'), [...mediaChanges.values()])
   const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0
@@ -543,6 +574,7 @@ export async function prepareTimelineProject(
     outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
     compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.filter(group => group.kind === 'compound').length, 0),
     mediaChanges: [...mediaChanges.values()], omittedEffects: [...sequences].flatMap(sequence => sequence.omittedEffects ?? []),
+    omittedTitles: [...sequences].flatMap(sequence => sequence.omittedTitles ?? []),
     videoClips, audioClips, markers: Object.values(project.compositions).reduce((count, composition) => count + composition.markers.length, 0), media: Object.keys(project.media_pool).length,
     lanes: allLanes, connectedClips: [...sequences].filter(sequence => !multicamSequences.has(sequence))
       .reduce((count, sequence) => count + sequence.clips.filter(clip => clip.lane !== 0).length, 0), roundedEnds,

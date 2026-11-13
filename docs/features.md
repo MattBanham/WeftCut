@@ -34,11 +34,12 @@ than one project. The importer supports the subset below with FCPXML headers
 | Built-in Cross Dissolve | An explicit overlap between two enabled video-only clips can become an editable WeftCut crossfade. Review notes that the blend can differ. |
 | Clip filters | Where timing and structure can be preserved, **Review without these effects…** offers a version with the named filters left out. Confirm that change before importing. |
 | Color and scan | A timeline that declares HDR or wide-gamut color can use compatible SDR media with a disclosed output color change. An asset with a conflicting color declaration needs a replacement tagged SDR Rec. 709. Actual HDR files need a tone-mapped SDR copy from the source editor. Interlaced media needs a progressive export. |
-| Missing or incompatible media | Choose an individual replacement. For missing originals, you can also search one folder by exact filename. Review also shows known differences on the files already found and any effects that can be left out. Every replacement is checked again before confirmation. |
+| Missing or incompatible media | Choose a replacement for each timeline asset, even when two assets refer to the same file. Search a folder for exact filenames. Differences in letter case or Unicode spelling and ambiguous matches need a choice. Review also shows known differences and recoverable edits. Every replacement is checked again before confirmation. |
 | Source organization and proxies | Review reports when it leaves out source metadata, collections, standalone browser clips, Apple file access bookmarks, and proxies listed alongside an original. |
 | Compound clips | Supported same-rate primary compound clips become editable Groups. Repeated placements share the Group contents and keep their own trims. |
 | Multicam | Supported primary cuts import the explicitly selected picture and audio as editable Group clips. Review names the angles used. Switching angles remains available in the source editor. |
-| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, titles and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
+| Titles | **Review without these titles…** can leave out a presentation-only primary or connected title after approval. Review shows its frame range. A primary title leaves a gap and a connected title reveals the picture underneath. Other media and cut times are kept. Render a title in the source editor to keep its appearance. |
+| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
 
 The importer handles local Windows drive and POSIX file URLs. A path from
 another platform can be relinked. It does not fetch media over the network or

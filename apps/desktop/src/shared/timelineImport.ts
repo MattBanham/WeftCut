@@ -5,14 +5,18 @@ export interface TimelineCompatibilityItem {
   lane: number
   status: TimelineCompatibilityStatus
   notes: string[]
+  recovery?: 'omit-effect' | 'leave-title-gap'
+  timelineFrames?: { start: number; end: number }
 }
 
 export interface TimelineMediaIssue {
   assetRef: string
+  label: string
   filename: string
   sourcePath: string
   placements: number
   detail: string
+  suggestedPaths?: string[]
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
@@ -23,7 +27,7 @@ export interface TimelineMediaBlocked {
   kind: 'media-blocked'
   issues: TimelineMediaIssue[]
   canSearchFolder: boolean
-  effectIssues: TimelineCompatibilityItem[]
+  editIssues: TimelineCompatibilityItem[]
   mediaChanges: TimelineMediaChange[]
 }
 
@@ -45,6 +49,7 @@ export interface TimelineImportReport {
   mediaChanges: TimelineMediaChange[]
   outputColorChange: string | null
   omittedEffects: TimelineCompatibilityItem[]
+  omittedTitles: TimelineCompatibilityItem[]
   name: string
   destination: string | null
   width: number
@@ -77,7 +82,7 @@ export interface TimelineImportReport {
   dropFrameTimecode: boolean
   namedFormatDefaults: boolean
   bundleSource: boolean
-  relinkedMedia: { from: string; to: string }[]
+  relinkedMedia: { assetRef: string; label: string; from: string; to: string }[]
   compatibilityItems: TimelineCompatibilityItem[]
   compatibilityCounts: { exact: number; converted: number; approximated: number; unsupported: number }
 }

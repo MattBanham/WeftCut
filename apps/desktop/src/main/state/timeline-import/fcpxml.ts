@@ -13,6 +13,7 @@ interface Element {
   children: Element[]
   line: number
   timing?: Record<string, ExactTime>
+  titleGap?: TimelineCompatibilityItem
 }
 
 interface Asset extends TimelineSource {
@@ -95,9 +96,10 @@ function readXml(xml: string): Element {
     const parent = stack.at(-2)?.tag
     const inMetadata = el.tag === 'string' && parent === 'array' &&
       stack.at(-3)?.tag === 'md' && stack.at(-4)?.tag === 'metadata' &&
-      ['asset', 'sequence'].includes(stack.at(-5)?.tag ?? '')
+      ['asset', 'sequence', 'title'].includes(stack.at(-5)?.tag ?? '')
     const inOmittedText = (el.tag === 'bookmark' && parent === 'media-rep') ||
-      (el.tag === 'note' && parent === 'sequence')
+      (el.tag === 'note' && (parent === 'sequence' || parent === 'title')) ||
+      (el.tag === 'data' && stack.some(node => node.tag === 'title'))
     // Title text is interpreted only by the title importer. Keep reading here
     // so an unsupported title can give a remedy instead of an XML error.
     const inTitle = ['text', 'text-style'].includes(el.tag) && stack.some(node => node.tag === 'title')
@@ -317,7 +319,7 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
   const original = localPath(a.src !== undefined ? el : originalReps[0]!)
 
   if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
-  return { ref: required(el, 'id'), ...original, start: time(el, 'start', ZERO_TIME), duration,
+  return { ref: required(el, 'id'), name: a.name, ...original, start: time(el, 'start', ZERO_TIME), duration,
     hasVideo, hasAudio, stillImage, imageSize, sourceColor, videoFormat, audioChannels, audioRate, mediaNotices }
 }
 
@@ -402,15 +404,17 @@ export class TimelineEditFailure extends Error {
   }
 }
 
-export function parseFcpxml(xml: string, sequenceIndex?: number, effects: 'refuse' | 'inspect' | 'omit' = 'refuse'): ImportTimeline {
-  try { return parseDocument(readXml(xml), sequenceIndex, effects) }
+type EffectsPolicy = 'refuse' | 'inspect' | 'omit'
+
+export function parseFcpxml(xml: string, sequenceIndex?: number, effects: EffectsPolicy = 'refuse', leaveTitleGaps = false): ImportTimeline {
+  try { return parseDocument(readXml(xml), sequenceIndex, effects, leaveTitleGaps) }
   catch (error) {
     if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
     throw error
   }
 }
 
-function parseDocument(root: Element, sequenceIndex: number | undefined, effects: 'refuse' | 'inspect' | 'omit'): ImportTimeline {
+function parseDocument(root: Element, sequenceIndex: number | undefined, effects: EffectsPolicy, leaveTitleGaps: boolean): ImportTimeline {
   const choices = collectProjects(root)
   if (sequenceIndex === undefined && choices.length > 1) {
     fail(root, `Found ${choices.length} project sequences. Choose which one to import`)
@@ -430,7 +434,7 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, effects
     byId.set(id, el)
   }
   const context: SequenceContext = {
-    byId, effects, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
+    byId, effects, leaveTitleGaps, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
   }
   const timeline = parseSequence(seq, project, context, { root, library, choices: choices.length })
   const measured = new Map<ImportTimeline, { placements: number; depth: number }>()
@@ -457,7 +461,8 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, effects
 
 interface SequenceContext {
   byId: Map<string, Element>
-  effects: 'refuse' | 'inspect' | 'omit'
+  effects: EffectsPolicy
+  leaveTitleGaps: boolean
   compounds: Map<string, ImportTimeline>
   active: Set<string>
   multicams: Map<Element, Map<string, MulticamAngle>>
@@ -635,7 +640,7 @@ function multicamSequence(el: Element, context: SequenceContext, fps: ImportTime
 function parseSequence(seq: Element, project: Element, context: SequenceContext,
   selection?: { root: Element; library?: Element; choices: number },
 ): ImportTimeline {
-  const { effects, byId, compounds, active } = context
+  const { effects, leaveTitleGaps, byId, compounds, active } = context
   check(seq, ['format', 'tcStart', 'tcFormat', 'duration', 'audioLayout', 'audioRate', 'renderFormat', 'keywords'],
     ['spine', 'note', 'metadata'])
   const hasMetadata = checkMetadata(seq)
@@ -651,7 +656,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   }
   const unsupported: TimelineCompatibilityItem[] = []
   const omittedEffects: TimelineCompatibilityItem[] = []
-  let canOmitEffects = true
+  const omittedTitles: TimelineCompatibilityItem[] = []
   const supportedStory = new Set(['spine', 'gap', 'asset-clip', 'video', 'audio', 'marker', 'chapter-marker',
     'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap', 'timept'])
   const remedies: Record<string, string> = {
@@ -663,7 +668,16 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     'filter-video': 'WeftCut cannot recreate this effect. Render the clip with the effect applied or remove the effect before exporting.',
     param: 'WeftCut cannot recreate these effect parameters. Render the effect or replace it with a supported static adjustment.',
   }
-  function scanStory(parent: Element) {
+  const clipElements = ['asset-clip', 'video', 'audio']
+  const parameterTree = (node: Element): boolean =>
+    ['param', 'keyframeAnimation', 'keyframe', 'data'].includes(node.tag) && node.children.every(parameterTree)
+  const titlePresentation = new Set(['param', 'keyframeAnimation', 'keyframe', 'data', 'text', 'text-style',
+    'text-style-def', 'note', 'adjust-conform', 'adjust-transform', 'adjust-blend', 'adjust-crop', 'crop-rect',
+    'trim-rect', 'pan-rect', 'adjust-corners', 'filter-video', 'metadata', 'md', 'array', 'string'])
+  const titleAttributes = new Set(['ref', 'name', 'lane', 'offset', 'start', 'duration', 'enabled', 'role', 'modDate'])
+  const safeTitleChild = (node: Element): boolean =>
+    titlePresentation.has(node.tag) && node.children.every(safeTitleChild)
+  function scanStory(parent: Element, depth: number) {
     const kept: Element[] = []
     for (const child of parent.children) {
       // Nonlinear, reverse and incomplete maps get the ordinary retime remedy.
@@ -675,35 +689,56 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
         kept.push(child)
         continue
       }
+      const title = child.tag === 'title'
+      const primaryTitle = title && depth === 0 && (child.attrs.lane ?? '0') === '0'
+      const connectedTitle = title && depth === 1 && [...clipElements, 'gap'].includes(parent.tag) &&
+        /^[1-9]\d*$/.test(child.attrs.lane ?? '') && Number.isSafeInteger(Number(child.attrs.lane))
+      const canLeaveTitleGap = (primaryTitle || connectedTitle) &&
+        Object.keys(child.attrs).every(key => titleAttributes.has(key)) &&
+        ['0', '1'].includes(child.attrs.enabled ?? '1') && child.children.every(safeTitleChild)
+      if (canLeaveTitleGap && effects !== 'refuse') {
+        const info = { location: location(child), label: child.attrs.name || 'Title',
+          lane: Number(child.attrs.lane ?? 0), recovery: 'leave-title-gap' as const }
+        const issue: TimelineCompatibilityItem = leaveTitleGaps
+          ? { ...info, status: 'approximated',
+            notes: ['This title will be left out. Its timeline interval stays in place, with underlying picture and sound kept.'] }
+          : { ...info, status: 'unsupported', notes: [remedies.title!,
+            'You can also leave this title out and keep its timeline interval.'] }
+        if (leaveTitleGaps) omittedTitles.push(issue)
+        else unsupported.push(issue)
+        const { offset, duration, lane, start } = child.attrs
+        const timingAttrs = Object.fromEntries(Object.entries({ offset, duration, lane, start })
+          .filter((entry): entry is [string, string] => entry[1] !== undefined))
+        kept.push({ ...child, tag: primaryTitle ? 'gap' : 'title', attrs: timingAttrs, children: [], titleGap: issue })
+        continue
+      }
       if (!candidateMap || !supportedStory.has(child.tag)) {
         const remedy = Object.hasOwn(remedies, child.tag) ? remedies[child.tag]
           : 'Simplify or render this part in the source editor before exporting.'
-        const parameterTree = (node: Element): boolean =>
-          ['param', 'keyframeAnimation', 'keyframe', 'data'].includes(node.tag) && node.children.every(parameterTree)
-        const safeToOmit = ['asset-clip', 'video', 'audio'].includes(parent.tag) &&
+        const safeToOmit = clipElements.includes(parent.tag) &&
           ['filter-video', 'filter-audio'].includes(child.tag) && child.children.every(parameterTree)
         const info = { location: location(child), label: child.attrs.name || child.tag,
-          lane: Number(parent.attrs.lane ?? 0) || 0 }
+          lane: Number(parent.attrs.lane ?? 0) || 0,
+          ...(safeToOmit ? { recovery: 'omit-effect' as const } : {}) }
         if (effects === 'omit' && safeToOmit) {
           omittedEffects.push({ ...info, status: 'approximated',
             notes: ['This effect will be left out. The clip and its cut times will be kept.'] })
           continue
         }
-        canOmitEffects &&= safeToOmit
         unsupported.push({ ...info, status: 'unsupported',
           notes: ['FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. ' + remedy] })
         if (effects === 'inspect' && safeToOmit) continue
-      } else scanStory(child)
+      } else scanStory(child, depth + 1)
       kept.push(child)
     }
     parent.children = kept
   }
   const spine = one(seq, 'spine')
-  scanStory(spine)
-  if (unsupported.length && (effects !== 'inspect' || !canOmitEffects)) {
-    throw new TimelineEditFailure(unsupported, canOmitEffects)
+  scanStory(spine, 0)
+  if (unsupported.some(issue => !issue.recovery) || (effects === 'refuse' && unsupported.length)) {
+    throw new TimelineEditFailure(unsupported, false)
   }
-  const notices: TimelineCompatibilityItem[] = [...omittedEffects]
+  const notices: TimelineCompatibilityItem[] = [...omittedEffects, ...omittedTitles]
   const notice = (el: Element, note: string) => notices.push({ location: location(el),
     label: el.attrs.name || el.tag, lane: 0, status: 'converted', notes: [note] })
   if (selection && selection.choices > 1) notice(project, 'Only the selected sequence is imported; other sequences remain in the source document')
@@ -763,14 +798,14 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
 
   function readClip(el: Element, parent?: { offset: ExactTime; start: ExactTime }) {
     const a = el.attrs
-    const gap = el.tag === 'gap'
+    const gap = el.tag === 'gap' || el.titleGap !== undefined
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
       : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat', 'srcEnable', 'role',
         ...(el.tag === 'asset-clip' ? ['audioStart', 'audioDuration'] : [])],
     parent ? ['marker', 'chapter-marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap']
-      : gap ? ['asset-clip', 'video', 'audio']
-        : ['marker', 'chapter-marker', 'asset-clip', 'video', 'audio', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap'])
+      : gap ? ['asset-clip', 'video', 'audio', 'title']
+        : ['marker', 'chapter-marker', 'asset-clip', 'video', 'audio', 'title', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap'])
     const lane = Number(a.lane ?? '0')
     if (parent) {
       if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
@@ -816,6 +851,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     const firstFrame = audioOnly ? floorTime(divideTime(offset, format.frameDuration)) : frames(offset, format, el, 'offset')
     const endFrame = audioOnly ? ceilTime(divideTime(end, format.frameDuration)) : frames(end, format, el, 'end')
     if (!audioOnly && endFrame <= firstFrame) fail(el, 'Duration must span at least one video frame')
+    if (el.titleGap) el.titleGap.timelineFrames = { start: firstFrame, end: endFrame }
     if (!parent) {
       if (compareTime(offset, primaryEnd) < 0 && !pendingDissolve) {
         fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
@@ -825,7 +861,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     if (compareTime(end, lastEnd) > 0) lastEnd = end
     const start = time(el, 'start', asset?.start ?? ZERO_TIME)
     for (const child of el.children) {
-      if (['asset-clip', 'video', 'audio'].includes(child.tag)) readClip(child, { offset, start })
+      if (clipElements.includes(child.tag) || child.titleGap) readClip(child, { offset, start })
     }
     if (!asset || !assetNode) {
       if (a.name) notice(el, 'Named gap is represented as empty timeline space; its label is not retained')
@@ -1191,9 +1227,11 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const frameCount = divideTime(sequenceDuration, format.frameDuration)
   const durationFrames = ceilTime(frameCount)
   if (frameCount.den !== 1) notice(seq, 'The timeline end was extended to the next video frame to contain the final audio sample')
-  if (!clips.length && !groups.length) fail(spine, 'The primary storyline needs at least one asset or compound clip')
+  if (!clips.length && !groups.length && !omittedTitles.length && !unsupported.length) {
+    fail(spine, 'The primary storyline needs at least one asset or compound clip')
+  }
   return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
-    fps: { num: fps.num, den: fps.den }, authoredDuration: sequenceDuration, durationFrames, clips, groups, dissolves, notices, omittedEffects, effectIssues: unsupported,
+    fps: { num: fps.num, den: fps.den }, authoredDuration: sequenceDuration, durationFrames, clips, groups, dissolves, notices, omittedEffects, omittedTitles, editIssues: unsupported,
     normalizedTimecode: sequenceOrigin.num !== 0, dropFrameTimecode: tcFormat === 'DF',
     namedFormatDefaults: format.namedDefaults, sourceColor: outputColor }
 }

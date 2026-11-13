@@ -962,7 +962,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         let preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
         try {
           preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
-            args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true)
+            args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true, args.leaveTitleGaps === true)
         } catch (error) {
           assertCurrent()
           if (error instanceof TimelineEditFailure) {
@@ -971,7 +971,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           }
           if (error instanceof TimelineMediaFailure) {
             return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder,
-              effectIssues: error.effectIssues, mediaChanges: error.mediaChanges } satisfies TimelineMediaBlocked
+              editIssues: error.editIssues, mediaChanges: error.mediaChanges } satisfies TimelineMediaBlocked
           }
           throw error
         }
@@ -999,6 +999,9 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         }
         if (report.omittedEffects.length && args.acceptOmittedEffects !== true) {
           throw new Error('Review and accept the omitted effects before importing')
+        }
+        if (report.omittedTitles.length && args.acceptTitleGaps !== true) {
+          throw new Error('Review and accept the titles that will be left out before importing')
         }
         let destination: TimelineProjectDestination | undefined
         if (startup) {

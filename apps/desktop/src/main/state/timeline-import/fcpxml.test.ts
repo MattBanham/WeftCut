@@ -1005,6 +1005,36 @@ describe('timeline import transaction', () => {
     expect(layer).toMatchObject({ t_start_us: 0, t_end_us: 100000 })
   })
 
+  it('reports an unsupported transition alongside missing media without making a partial project', async () => {
+    const xml = fixture(pathToFileURL(media).href).replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
+      '<transition name="Ripple" offset="3003/30000s" duration="1001/30000s"/>')
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toMatchObject({
+      issues: [{ assetRef: 'take', placements: 2, detail: expect.stringContaining('Missing or unreadable original media') }],
+      editIssues: [{ label: 'Ripple', status: 'unsupported', timelineFrames: { start: 3, end: 4 } }],
+    })
+    await writeFile(media, 'Fictional original video')
+    await expect(run.prepareReview()).rejects.toMatchObject({
+      issues: [{ label: 'Ripple', status: 'unsupported' }], canOmitEffects: false,
+    })
+    expect(run.probeMedia).not.toHaveBeenCalled()
+    expect(run.actor.snapshot()).toBe(run.before)
+    expect(existsSync(destination)).toBe(false)
+  })
+
+  it('never inventories assets from inside an unsupported edit', async () => {
+    const extra = join(parent, 'Unknown Angle.mov')
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('</resources>', `<asset id="hidden" hasVideo="1" duration="1s" src="${pathToFileURL(extra).href}"/></resources>`)
+      .replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
+        '<sync-clip name="Hidden Take" offset="3003/30000s" duration="1001/30000s"><video ref="hidden" duration="1s"/></sync-clip>')
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toMatchObject({ issues: [{ assetRef: 'take' }], editIssues: [{ label: 'Hidden Take' }] })
+    expect(run.probeMedia).not.toHaveBeenCalled()
+  })
+
   it('preflights missing media before probing or creating any project folder', async () => {
     const run = setup()
     await expect(run.prepare()).rejects.toThrow(/Missing or unreadable original media.*Harbor Lights/)

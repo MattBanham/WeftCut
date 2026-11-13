@@ -41,7 +41,7 @@ than one project. The importer supports the subset below with FCPXML headers
 | Compound clips | Supported same-rate primary compound clips become editable Groups. Repeated placements share the Group contents and keep their own trims. |
 | Multicam | Supported primary cuts import the explicitly selected picture and audio as editable Group clips. Review names the angles used. Switching angles remains available in the source editor. |
 | Titles | **Review without these titles…** can leave out a presentation-only primary or connected title after approval. Review shows its frame range. A primary title leaves a gap and a connected title reveals the picture underneath. Other media and cut times are kept. Render a title in the source editor to keep its appearance. |
-| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, and unsupported adjustments | The importer identifies the affected edit and explains how to render, flatten or simplify it in the source editor. |
+| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, and unsupported adjustments | Review identifies the affected edit and explains how to render, flatten or simplify it. For unsupported story elements, review also checks whether independent media is available. Fix those paths while the edit still needs attention, then refresh the review after re-exporting. |
 
 The importer handles local Windows drive and POSIX file URLs. A path from
 another platform can be relinked. It does not fetch media over the network or

@@ -137,6 +137,59 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
   } finally { await app.close() }
 })
 
+test('keeps missing media actionable while an unsupported transition needs a source edit', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-fcpxml-structural-')
+  const movedFolder = join(folder, 'Relocated')
+  mkdirSync(movedFolder)
+  const media = join(movedFolder, 'Signal.mov')
+  const missing = join(folder, 'Offline', 'Signal.mov')
+  const xml = join(folder, 'Signal.fcpxml')
+  encodeSource(media)
+  const transition = '<transition name="Ripple" offset="1001/30000s" duration="1001/30000s"/>'
+  const original = `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="a" format="f" hasVideo="1" duration="1001/1000s" src="${pathToFileURL(missing).href}"/>
+    </resources><project name="Signal"><sequence format="f" duration="3003/30000s"><spine>
+    <asset-clip ref="a" offset="0s" start="0s" duration="1001/30000s"/>
+    ${transition}
+    <asset-clip ref="a" offset="2002/30000s" start="6006/30000s" duration="1001/30000s"/>
+    </spine></sequence></project></fcpxml>`
+  writeFileSync(xml, original)
+
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: 'Review Edit',
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, input) => {
+      dialog.showOpenDialog = async (_window, options) => ({
+        canceled: false, filePaths: [options.properties?.includes('openDirectory') ? input.movedFolder : input.xml],
+      })
+    }, { xml, movedFolder })
+    await beginImport(page)
+    const mediaIssues = page.getByRole('dialog', { name: 'Some media needs attention' })
+    await expect(mediaIssues.getByText(/Missing or unreadable original media/)).toBeVisible()
+    await expect(mediaIssues.getByText('Ripple', { exact: true })).toBeVisible()
+    await expect(mediaIssues.getByText('From frame 1 to the start of frame 2')).toBeVisible()
+    await mediaIssues.getByRole('button', { name: 'Find original media in a folder…' }).click()
+    const editIssues = page.getByRole('dialog', { name: 'Some edits need attention' })
+    await expect(editIssues.getByText(/Render the adjoining clips with the transition/)).toBeVisible()
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    writeFileSync(xml, original.replace(transition, '<gap offset="1001/30000s" duration="1001/30000s"/>'))
+    await editIssues.getByRole('button', { name: 'Review timeline again…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(`${missing} → ${await realpath(media)}`, { exact: true })).toBeVisible()
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    const imported = await importedSummary(page)
+    expect(imported.tracks.flatMap(track => track.layers)).toMatchObject([
+      { t_start_us: 0, t_end_us: 33367, params: { src_in_us: 0 } },
+      { t_start_us: 66733, t_end_us: 100100, params: { src_in_us: 200200 } },
+    ])
+  } finally { await app.close() }
+})
+
 test('offers an available proxy for an offline original and imports only after approval', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-proxy-')

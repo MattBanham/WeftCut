@@ -765,6 +765,26 @@ describe('timeline import transaction', () => {
     expect(() => validate(project)).not.toThrow()
   })
 
+  it.each([
+    ['6-1-6 (Rec. 601 NTSC)', 'smpte170m', 'smpte170m', 'smpte170m', 'Rec. 601 NTSC'],
+    ['Rec. 601 (PAL)', 'bt470bg', 'bt470bg', 'bt709', 'Rec. 601 PAL'],
+    ['6-1-6', null, null, null, 'Rec. 601 NTSC'],
+  ])('reviews usable SDR with declaration %s and keeps the cut', async (declared, matrix, primaries, transfer, name) => {
+    await writeFile(media, 'Fictional SDR video')
+    await writeFile(document, fixture(pathToFileURL(media).href).replace('height="240"', `height="240" colorSpace="${declared}"`))
+    const run = setup()
+    const probe = JSON.parse(await run.probeMedia())
+    Object.assign(probe.metadata.video, { color_matrix: matrix, color_primaries: primaries, color_transfer: transfer })
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    const { project, report } = await run.prepareReview()
+    expect(report.outputColorChange).toBe(name)
+    expect(report.mediaChanges).toMatchObject([{ kind: 'color-format', detail: expect.stringContaining('render in SDR Rec. 709') }])
+    expect(report.mediaChanges[0]!.detail.includes('missing color tags')).toBe(matrix === null)
+    const video = rootComposition(project).tracks[0]!.layers[0]!
+    expect(video).toMatchObject({ t_start_us: 0, t_end_us: 100100, params: { kind: 'VideoClip', src_in_us: 66733 } })
+    expect(Object.values(project.media_pool)[0]!.metadata.video).toMatchObject({ color_matrix: matrix, color_primaries: primaries, color_transfer: transfer })
+  })
+
   it('requires a tagged SDR file before setting aside an HDR format declaration', async () => {
     await writeFile(media, 'Fictional SDR media')
     await writeFile(document, fixture(pathToFileURL(media).href).replace('height="240"', 'height="240" colorSpace="9-18-9"'))

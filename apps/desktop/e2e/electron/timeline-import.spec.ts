@@ -137,6 +137,47 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
   } finally { await app.close() }
 })
 
+test('keeps tagged Rec. 601 video editable and discloses its SDR output conversion', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-fcpxml-sdr-')
+  const media = join(folder, 'Signal.mov')
+  const xml = join(folder, 'Signal.fcpxml')
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+    '-i', 'color=c=red:size=320x240:rate=30', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-colorspace', 'smpte170m', '-color_primaries', 'smpte170m', '-color_trc', 'smpte170m', media], { windowsHide: true })
+  writeFileSync(xml, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1/30s" colorSpace="6-1-6 (Rec. 601 NTSC)"/>
+    <asset id="a" format="f" hasVideo="1" duration="1s" src="${pathToFileURL(media).href}"/>
+    </resources><project name="Signal"><sequence format="f" duration="1s"><spine>
+    <asset-clip ref="a" start="0s" duration="1s"/>
+    </spine></sequence></project></fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: 'Review SDR',
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, xml)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/source timeline uses Rec. 601 NTSC.*use SDR Rec. 709/)).toBeVisible()
+    const commit = review.getByRole('button', { name: 'Import', exact: true })
+    await expect(commit).toBeDisabled()
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
+    await commit.click()
+    await expect(review).toHaveCount(0)
+    expect(await importedSummary(page)).toMatchObject({ duration_us: 1_000_000, layer_count: 1 })
+    await waitForHook(page, 'weftcutSampleComposite')
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(300000))
+    await expect.poll(async () => {
+      const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(160, 120))
+      return pixel != null && pixel.r > 200 && pixel.g < 35 && pixel.b < 35
+    }).toBe(true)
+  } finally { await app.close() }
+})
+
 test('imports from the startup screen into a new editable project at the sequence rate', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-startup-import-')

@@ -23,6 +23,7 @@ export interface TimelineMediaBlocked {
   kind: 'media-blocked'
   issues: TimelineMediaIssue[]
   canSearchFolder: boolean
+  effectIssues: TimelineCompatibilityItem[]
 }
 
 export interface TimelineEditBlocked {

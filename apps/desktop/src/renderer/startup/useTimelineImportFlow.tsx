@@ -158,8 +158,17 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               </Button>
             </div>
           ))}
+          {blocked.effectIssues.map((issue, index) => (
+            <div key={index} className="new-project-row">
+              <strong>{issue.label}</strong>
+              <p>{issue.notes.join(" ")}</p>
+            </div>
+          ))}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
+            {blocked.effectIssues.length > 0 && <Button onClick={() => void reviewWithoutEffects()} disabled={busy}>
+              {t("startup.import_review_without_effects")}
+            </Button>}
             {blocked.canSearchFolder && <Button onClick={() => void relink()} disabled={busy}>
               {t("startup.import_choose_relink_folder")}
             </Button>}

@@ -49,6 +49,7 @@ export interface ImportTimeline {
   clips: TimelineClip[]
   dissolves?: { from: TimelineClip; to: TimelineClip; firstFrame: number; endFrame: number }[]
   notices: TimelineCompatibilityItem[]
+  effectIssues?: TimelineCompatibilityItem[]
   omittedEffects?: TimelineCompatibilityItem[]
   normalizedTimecode?: boolean
   dropFrameTimecode?: boolean

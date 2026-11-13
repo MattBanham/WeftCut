@@ -23,11 +23,9 @@ import {
 } from "../shortcuts/useShortcuts";
 import { wireDecodeComponent } from "../settings/decodeComponentStore";
 import { SettingsPanel } from "../settings/SettingsPanel";
-import { AppDialog } from "../components/AppDialog";
 import { WindowControls } from "../components/WindowControls";
 import { DiagnosticReport } from '../app/DiagnosticReport';
 import { UpdateButton } from '../app/UpdateButton';
-import { Button } from "@/components/ui/button";
 import {
   ChevronDownIcon,
   BugIcon,

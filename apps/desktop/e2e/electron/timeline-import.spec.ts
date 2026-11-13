@@ -4,7 +4,7 @@ import { realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
-import { invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary, type ProjectSummaryWire } from './helpers/driver'
+import { driveExport, invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary, type ProjectSummaryWire } from './helpers/driver'
 
 function encodeSource(media: string) {
   execFileSync('ffmpeg', [
@@ -134,6 +134,62 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
     expect(readFileSync(projectFile, 'utf8')).toContain('Glass edit')
     await invokeCmd(page, 'project_open', { path: destination })
     expect(await importedSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
+  } finally { await app.close() }
+})
+
+test('verifies variable-rate in-points and preserves their selected pictures through export', async () => {
+  test.setTimeout(150_000)
+  const folder = tmpDir('weftcut-fcpxml-vfr-')
+  const media = join(folder, 'Field Signal.mov')
+  const xml = join(folder, 'Field Signal.fcpxml')
+  const output = join(folder, 'Rendered Signal.mp4')
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+    '-i', "nullsrc=size=320x240:rate=30,geq=lum='if(eq(N,2),235,16)':cb=128:cr=128",
+    '-vf', "settb=1/3000,setpts='if(lt(N,2),N*100,N*100+10)'", '-frames:v', '6',
+    '-fps_mode', 'vfr', '-enc_time_base', '1:3000', '-video_track_timescale', '3000',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', media], { windowsHide: true })
+  writeFileSync(xml, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1/30s"/>
+    <asset id="a" format="f" hasVideo="1" duration="1/5s" src="${pathToFileURL(media).href}"/>
+    </resources><project name="Field Signal"><sequence format="f" duration="2/30s"><spine>
+    <asset-clip ref="a" start="7/100s" duration="1/30s"/>
+    <asset-clip ref="a" offset="1/30s" start="8/100s" duration="1/30s"/>
+    </spine></sequence></project></fcpxml>`)
+
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: 'Review Field Signal',
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, xml)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/timestamps confirm a frame at the requested source in-point/)).toBeVisible()
+    await expect(review.getByText(/cut starts inside a displayed frame.*0.070000 s/)).toBeVisible()
+    const commit = review.getByRole('button', { name: 'Import', exact: true })
+    await expect(commit).toBeDisabled()
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
+    await commit.click()
+    await expect(review).toHaveCount(0)
+    const imported = await importedSummary(page)
+    expect(imported.tracks.flatMap(track => track.layers)).toMatchObject([
+      { t_start_us: 0, t_end_us: 33333, params: { kind: 'VideoClip', src_in_us: 70000 } },
+      { t_start_us: 33333, t_end_us: 66667, params: { kind: 'VideoClip', src_in_us: 80000 } },
+    ])
+    await waitForHook(page, 'weftcutSampleComposite')
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(33333))
+    await expect.poll(async () => {
+      const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(160, 120))
+      return pixel != null && pixel.r > 200 && pixel.g > 200 && pixel.b > 200
+    }).toBe(true)
+    const result = await driveExport(page, { outputAbsPath: output, settings: { audio: { include: false } } }, { hook: 'exportTimeline' })
+    expect(result.done).toMatchObject({ ok: true })
+    const pixels = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', output,
+      '-vf', 'crop=2:2:160:120', '-frames:v', '2', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { windowsHide: true })
+    expect(pixels).toHaveLength(24)
+    expect([...pixels].every(channel => channel > 200)).toBe(true)
   } finally { await app.close() }
 })
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import nodePath from 'node:path'
@@ -217,11 +217,12 @@ describe('createTsActorHost — persistence-route integration', () => {
       const f = timelineFixture()
       const replacement = nodePath.join(f.folder, 'SDR Copy.mov')
       try {
+        writeFileSync(f.path, readFileSync(f.path, 'utf8').replace('width="320"', 'width="320" colorSpace="9-16-9"'))
         writeFileSync(replacement, 'Fictional SDR replacement')
         const normal = JSON.parse(await f.deps.compute.probeMedia(f.source))
         f.deps.compute.probeMedia = async path => JSON.stringify({
           ...normal, path_abs: path, metadata: { ...normal.metadata, video: { ...normal.metadata.video,
-            width: 640, height: 360, color_transfer: path === realpathSync(f.source) ? 'smpte2084' : 'bt709',
+            width: 640, height: 360, color_primaries: 'bt709', color_transfer: nodePath.basename(path) === 'Lantern.mov' ? 'smpte2084' : 'bt709',
           } },
         })
         const preview = (replacements?: unknown) => f.host.handleInvoke('project_preview_timeline',
@@ -230,7 +231,8 @@ describe('createTsActorHost — persistence-route integration', () => {
         expect(await preview()).toMatchObject({ kind: 'media-blocked',
           issues: [{ assetRef: 'a', detail: expect.stringContaining('Export an SDR Rec. 709 copy') }] })
         const ready = await preview([{ assetRef: 'a', path: replacement }]) as TimelineImportPreview
-        expect(ready.mediaChanges).toMatchObject([{ kind: 'video-size', assetRef: 'a' }])
+        expect(ready.outputColorChange).toBe('HDR (Rec. 2020 PQ)')
+        expect(ready.mediaChanges).toMatchObject([{ kind: 'color-format', assetRef: 'a' }, { kind: 'video-size', assetRef: 'a' }])
         expect(ready.relinkedMedia).toMatchObject([{ from: f.source }])
         const args = { id: ready.id, destination: { parentFolder: f.folder, name: 'New Edit' } }
         await expect(f.host.handleInvoke('project_import_timeline', args)).rejects.toThrow(/accept the media differences/)

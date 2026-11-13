@@ -941,9 +941,8 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       case 'previewTimeline': {
         if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
         const startup = args.newProject === true
-        if (startup && opened) throw new Error('Close the current project before importing into a new project')
         if (!startup && !opened) throw new Error('Open a project before importing FCPXML')
-        const dir = opened?.dir ?? null
+        const dir = startup ? null : opened!.dir
         const original = actor.snapshot()
         const id = idGen()
         timelineReviewId = id
@@ -951,7 +950,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         const assertSession = captureImportSession(hybridDeps)
         const assertCurrent = () => {
           assertSession()
-          if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
+          if (quitting || workspaceTransitions > 0 || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
         }
         const media = startup ? { ...hybridDeps, compute: deps.timelineReviewCompute ?? deps.compute } : hybridDeps
         let preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
@@ -987,7 +986,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
         const { preparation: { project, report }, assertCurrent, original, startup } = review
         assertCurrent()
-        if (report.mediaChanges.length && args.acceptMediaChanges !== true) {
+        if ((report.mediaChanges.length || report.outputColorChange) && args.acceptMediaChanges !== true) {
           throw new Error('Review and accept the media differences before importing')
         }
         if (report.omittedEffects.length && args.acceptOmittedEffects !== true) {

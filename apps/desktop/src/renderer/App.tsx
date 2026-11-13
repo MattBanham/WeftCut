@@ -194,7 +194,7 @@ interface AppProps {
 
 export function App({ onCloseProject, onWorkspaceReady }: AppProps) {
   const { t } = useTranslation();
-  const timelineImport = useTimelineImportFlow();
+  const timelineImport = useTimelineImportFlow({ fromStartup: false, onWorkspaceReady });
   const summary = useProjectSummary();
   // The timeline the panels, the shortcuts and the Insert menu act on. Export
   // and Settings read the root below regardless (compositionAnchorStore.ts

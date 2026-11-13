@@ -683,7 +683,64 @@ test('imports into the current project as one undoable Group without replacing i
   } finally { await app.close() }
 })
 
-test('refuses current-project FPS conflict before import', async () => {
+test('imports a built-in cross dissolve and renders both clips at its midpoint', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-dissolve-import-')
+  const source = join(folder, 'Dissolve.fcpxml')
+  const destination = join(folder, 'Imported Dissolve')
+  const files = ['red', 'blue'].map(color => {
+    const path = join(folder, color + '.mov')
+    execFileSync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=' + color + ':s=320x240:r=30',
+      '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', path,
+    ], { windowsHide: true })
+    return pathToFileURL(path).href
+  })
+  writeFileSync(source, `<fcpxml version="1.10">
+    <resources>
+      <format id="f" frameDuration="1/30s" width="320" height="240"/>
+      <effect id="d" uid="FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"/>
+      <asset id="r" format="f" duration="1s" hasVideo="1" src="${files[0]}"/>
+      <asset id="b" format="f" duration="1s" hasVideo="1" src="${files[1]}"/>
+    </resources><project name="Two Colors"><sequence format="f" duration="50/30s">
+      <spine>
+        <asset-clip ref="r" name="Red" duration="1s"/>
+        <transition name="Cross Dissolve" offset="20/30s" duration="10/30s"><filter-video ref="d"/></transition>
+        <asset-clip ref="b" name="Blue" offset="20/30s" duration="1s"/>
+      </spine>
+    </sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, source)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/uses its editable crossfade over the original overlap/)).toBeVisible()
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    const saved = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const imported = importedComposition(saved)
+    const [red, blue] = imported.tracks[0].layers
+    expect([red.label, blue.label]).toEqual(['Red', 'Blue'])
+    expect(imported.transitions).toMatchObject([{
+      from_layer: red.id, to_layer: blue.id, duration_us: red.t_end_us - blue.t_start_us,
+      kind: { kind: 'Crossfade' }, extended_us: 0,
+    }])
+    await waitForHook(page, 'weftcutSampleComposite')
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(833333))
+    await expect.poll(async () => {
+      const p = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(160, 120))
+      return p != null && p.r > 70 && p.b > 70 && p.g < 40
+    }).toBe(true)
+  } finally { await app.close() }
+})
+
+test('offers a separate project at the sequence rate and saves the current edit before switching', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-conflict-import-')
   const media = join(folder, 'Source.mov')
@@ -705,20 +762,31 @@ audioSources="1" audioChannels="2" audioRate="48000">
       canvas: { width: 320, height: 240, fpsNum: 30, fpsDen: 1 },
     })
     const state = await invokeCmd(page, 'project_open_state')
+    await invokeCmd(page, 'add_marker', { tUs: 0, label: 'Keep this cut note' })
     const otherDestination = join(folder, 'Imported as New')
-    await app.evaluate(({ dialog }, { path, otherDestination }) => {
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
-      dialog.showSaveDialog = async () => ({ canceled: false, filePath: otherDestination })
-    }, { path: xml, otherDestination })
+    await app.evaluate(({ dialog }, { path, parent }) => {
+      dialog.showOpenDialog = async (_window, options) => ({
+        canceled: false, filePaths: [options.properties?.includes('openDirectory') ? parent : path],
+      })
+    }, { path: xml, parent: folder })
     await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
     await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
     await page.getByRole('button', { name: 'Choose FCPXML file…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/These frame rates differ/)).toBeVisible()
     await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
-    await review.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await review.getByRole('button', { name: 'Review as a new project…' }).click()
+    await expect(review.getByRole('button', { name: 'Choose project location…' })).toBeEnabled()
     expect(await invokeCmd(page, 'project_open_state')).toEqual(state)
-    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    await review.getByRole('button', { name: 'Choose project location…' }).click()
+    const create = page.getByRole('dialog', { name: 'Create project from timeline' })
+    await create.getByRole('textbox', { name: 'Project name' }).fill('Imported as New')
+    await create.getByRole('button', { name: 'Choose…', exact: true }).click()
+    await create.getByRole('button', { name: 'Create', exact: true }).click()
+    await expect(create).toHaveCount(0)
+    expect(await invokeCmd(page, 'project_open_state')).toEqual({ dir: otherDestination })
+    expect(await importedSummary(page)).toMatchObject({ fps_num: 30000, fps_den: 1001, layer_count: 2 })
+    expect(readFileSync(join(folder, 'Original', 'project.json'), 'utf8')).toContain('Keep this cut note')
   } finally { await app.close() }
 })
 

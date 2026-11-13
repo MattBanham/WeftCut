@@ -5,7 +5,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import { pathToFileURL } from 'node:url'
 import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
-import { compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
+import { affineTimeMap, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
 import { createActor } from '../actor'
 import { type IdGen } from '../ids'
@@ -315,6 +315,7 @@ export async function prepareTimelineProject(
   let rateConformedVideoClips = 0
   let resizedVideoClips = 0
   const videoConversions = new Map<string, TimelineImportReport['videoConversions'][number]>()
+  const visualLayers = new Map<TimelineClip, Layer>()
   const compatibilityItems: TimelineCompatibilityItem[] = [...timeline.notices]
   for (const clip of timeline.clips) {
     const item = itemOf(clip)
@@ -417,7 +418,12 @@ export async function prepareTimelineProject(
       ? newLayer(idGen, clip, sourceOut, audioStart, audioEnd,
         { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
       : null
-    if (video || image) { track.layers.push((video ?? image)!); videoClips++ }
+    if (video || image) {
+      const layer = (video ?? image)!
+      track.layers.push(layer)
+      visualLayers.set(clip, layer)
+      videoClips++
+    }
     if (audio) { track.layers.push(audio); audioClips++ }
     if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
     for (const mark of clip.markers) {
@@ -429,6 +435,12 @@ export async function prepareTimelineProject(
       })
     }
   }
+  for (const dissolve of timeline.dissolves ?? []) {
+    target.transitions.push({
+      id: idGen(), from_layer: visualLayers.get(dissolve.from)!.id, to_layer: visualLayers.get(dissolve.to)!.id,
+      duration_us: boundary(dissolve.endFrame) - boundary(dissolve.firstFrame), kind: { kind: 'Crossfade' }, extended_us: 0,
+    })
+  }
   for (const track of target.tracks) track.layers.sort((a, b) => a.t_start_us - b.t_start_us)
   target.markers.sort((a, b) => a.t_us - b.t_us)
   applyDurationAutofit(target)
@@ -439,6 +451,7 @@ export async function prepareTimelineProject(
   validate(project)
   return { project, report: {
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
+    outputColorChange: timeline.sourceColor && videoClips ? timeline.sourceColor : null,
     mediaChanges: [...mediaChanges.values()], omittedEffects: timeline.omittedEffects ?? [],
     videoClips, audioClips, markers: target.markers.length, media: Object.keys(project.media_pool).length,
     lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
@@ -510,7 +523,11 @@ function visualAdjustments<T extends Extract<Layer['params'], { kind: 'VideoClip
 function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }> | AudioParams): Layer {
   // A still image has no moving source clock. Its authored span is on the
   // composition timeline, not a range within a zero-duration image asset.
-  if (params.kind !== 'ImageOverlay') writeSourceWindow(params, clip.sourceIn, sourceOut)
+  if (params.kind !== 'ImageOverlay') {
+    writeSourceWindow(params, clip.sourceIn, sourceOut)
+    if (clip.playbackRate) params.time_map = affineTimeMap(clip.playbackRate)
+    if (params.kind === 'Audio' && clip.preservePitch !== undefined) params.preserve_pitch = clip.preservePitch
+  }
   return { id: idGen(), label: clip.label ?? null, t_start_us: start, t_end_us: end,
     enabled: clip.enabled ?? true, locked: false, metadata: {}, params, effects: [] }
 }
@@ -533,6 +550,16 @@ function validateSource(clip: TimelineClip, item: MediaItem) {
     fail('WeftCut cannot match this file’s HDR or wide-gamut colors. The file has an unsupported color transfer or gamut (' +
       (transfer ?? 'unspecified transfer') + ', ' + (primaries ?? 'unspecified primaries') +
       '). Export an SDR Rec. 709 copy with the same timing, then choose it as the replacement.')
+  }
+  if (clip.hasVideo && clip.asset.sourceColor !== undefined) {
+    // An explicitly tagged SDR copy is evidence that the XML's color
+    // declaration can be set aside. An untagged file cannot prove this.
+    if (primaries !== 'bt709' || (transfer !== 'bt709' && transfer !== 'iec61966-2-1')) {
+      fail('The timeline describes this file as ' + clip.asset.sourceColor +
+        '. Export an SDR Rec. 709 copy with color tags and the same timing, then choose it as the replacement.')
+    }
+    changes.push({ kind: 'color-format', detail: 'The timeline describes this file as ' + clip.asset.sourceColor +
+      ', but the selected file is tagged SDR Rec. 709. WeftCut can use its SDR colors and keep the cut times.' })
   }
   if (clip.asset.stillImage) {
     // The normal image probe may report width/height in metadata.video even

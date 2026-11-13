@@ -322,6 +322,25 @@ describe('createTsActorHost — persistence-route integration', () => {
       } finally { f.close() }
     })
 
+    it('requires a fresh review if the XML changes after preflight', async () => {
+      const f = timelineFixture()
+      try {
+        const before = f.host.actor.snapshot()
+        const review = async () => await f.host.handleInvoke('project_preview_timeline', { path: f.path, newProject: true }) as TimelineImportPreview
+        const previous = await review()
+        const destination = { parentFolder: f.folder, name: 'Updated project' }
+        writeFileSync(f.path, readFileSync(f.path, 'utf8').replace('name="Lantern"', 'name="Updated Edit"'))
+        await expect(f.host.handleInvoke('project_import_timeline', { id: previous.id, destination })).rejects.toThrow(/FCPXML file changed/)
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.deps.workspaceDir()).toBeNull()
+        expect(f.copy).not.toHaveBeenCalled()
+        const current = await review()
+        expect(current.name).toBe('Updated Edit')
+        await f.host.handleInvoke('project_import_timeline', { id: current.id, destination })
+        expect(Object.values(f.host.actor.snapshot().compositions).some(comp => comp.label === 'Updated Edit')).toBe(true)
+      } finally { f.close() }
+    })
+
     it('refuses changed source bytes and malformed XML without modifying project content', async () => {
       const f = timelineFixture()
       try {

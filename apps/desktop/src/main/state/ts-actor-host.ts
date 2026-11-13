@@ -992,7 +992,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         deps.exportJobs?.assertWritable()
         const review = timelineReview
         if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
-        const { preparation: { project, report }, assertCurrent, original, startup } = review
+        const { preparation: { project, report, assertDocumentUnchanged }, assertCurrent, original, startup } = review
         assertCurrent()
         if ((report.mediaChanges.length || report.outputColorChange) && args.acceptMediaChanges !== true) {
           throw new Error('Review and accept the media differences before importing')
@@ -1030,6 +1030,8 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           if (hash !== item.file_hash_blake3)
             throw new Error('Original media changed or became unreadable after review. Review the timeline again')
         }
+        await assertDocumentUnchanged()
+        assertCurrent()
         if (actor.snapshot() !== original) throw new Error('The current project changed during confirmation. Review the import again')
         deps.exportJobs?.assertWritable()
         if (args.canvas !== undefined && !['fit', 'fill', 'original'].includes(args.canvas as string)) {

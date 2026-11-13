@@ -24,7 +24,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
   const [blocked, setBlocked] = useState<TimelineMediaBlocked | TimelineEditBlocked | null>(null);
   const [request, setRequest] = useState<ReviewRequest | null>(null);
-  const [sequenceImport, setSequenceImport] = useState<{ source: string; documentId: string; choices: TimelineSequenceChoice[] } | null>(null);
+  const [sequenceImport, setSequenceImport] = useState<{ source: string; documentId: string; choices: TimelineSequenceChoice[]; newProject: boolean } | null>(null);
 
   const begin = () => {
     if (!busy && !error && !blocked && !sequenceImport && !timelinePreview && !projectForm) setSourcePicker(true);
@@ -52,7 +52,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
       });
       if (typeof source !== "string") return;
       const { choices, documentId } = await projectListTimelineSequences(source);
-      if (choices.length > 1) setSequenceImport({ source, choices, documentId });
+      if (choices.length > 1) setSequenceImport({ source, choices, documentId, newProject: fromStartup });
       else await review({ source, documentId, index: 0, newProject: fromStartup, replacements: [] });
     } catch (cause) { reportError(cause); }
     finally { setBusy(false); }
@@ -60,10 +60,10 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
 
   async function chooseSequence(index: number) {
     if (!sequenceImport || busy) return;
-    const { source, documentId } = sequenceImport;
+    const { source, documentId, newProject } = sequenceImport;
     setSequenceImport(null);
     setBusy(true);
-    try { await review({ source, documentId, index, newProject: fromStartup, replacements: [] }); }
+    try { await review({ source, documentId, index, newProject, replacements: [] }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -102,6 +102,20 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     setTimelinePreview(null);
     try { await review({ ...request, newProject: true }); }
     catch (cause) { reportError(cause); }
+    finally { setBusy(false); }
+  }
+
+  async function refreshReview() {
+    if (!request || busy) return;
+    setBusy(true);
+    setTimelinePreview(null);
+    setProjectForm(null);
+    try {
+      const { choices, documentId } = await projectListTimelineSequences(request.source);
+      if (documentId === request.documentId) await review(request);
+      else if (choices.length > 1) setSequenceImport({ source: request.source, choices, documentId, newProject: request.newProject });
+      else await review({ source: request.source, documentId, index: 0, newProject: request.newProject, replacements: [] });
+    } catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
 
@@ -215,7 +229,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
         />
       )}
       {projectForm && (
-        <NewProjectForm timeline={projectForm} onCancel={cancel} onCreated={() => {
+        <NewProjectForm timeline={projectForm} onCancel={cancel} onReviewTimeline={refreshReview} onCreated={() => {
           setProjectForm(null);
           setRequest(null);
           onWorkspaceReady();
@@ -227,6 +241,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           busyRelinking={busy}
           onRelink={relink}
           onReviewAsNewProject={reviewAsNewProject}
+          onRefreshReview={refreshReview}
           onCancel={cancel}
           onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps) => {
             if (timelinePreview.current === null) setProjectForm(timelinePreview);
@@ -300,11 +315,12 @@ function MediaDifferenceRows({ changes, onRelink, disabled }: {
   ));
 }
 
-function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, busyRelinking }: {
+function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, onRefreshReview, busyRelinking }: {
   preview: TimelineImportPreview;
   onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean, acceptTitleGaps: boolean) => Promise<void>;
   onRelink: (assetRef: string) => Promise<void>;
   onReviewAsNewProject: () => Promise<void>;
+  onRefreshReview: () => Promise<void>;
   busyRelinking: boolean;
   onCancel: () => void;
 }) {
@@ -475,6 +491,11 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
       {error && <p className="new-project-error" role="alert">{error}</p>}
       <footer className="new-project-actions">
         <Button size="lg" onClick={onCancel} disabled={busy || busyRelinking}>{t("new_project.cancel")}</Button>
+        {error && (
+          <Button size="lg" onClick={() => void onRefreshReview()} disabled={busy || busyRelinking}>
+            {t("startup.import_refresh_review")}
+          </Button>
+        )}
         {fpsMismatch && (
           <Button size="lg" onClick={() => void onReviewAsNewProject()} disabled={busy || busyRelinking}>
             {t("startup.import_review_as_new")}

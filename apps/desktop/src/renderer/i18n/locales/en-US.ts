@@ -409,6 +409,7 @@ const enUS = {
     import_conflict_fps: "Frame rate — current: {{current}}; imported: {{imported}}.",
     import_fps_unsupported: "These frame rates differ. Create a separate project to keep the timeline’s frame rate. WeftCut will save the current project before switching.",
     import_review_as_new: "Review as a new project…",
+    import_refresh_review: "Review timeline again…",
     import_fps_match: "Frame rates match. Source clip timing will be preserved.",
     import_conflict_size: "Canvas — current: {{current}}; imported: {{imported}}.",
     import_canvas_choice: "Imported Group placement",

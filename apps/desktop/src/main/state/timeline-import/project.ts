@@ -128,14 +128,15 @@ async function findRelinkCandidates(directory: string, wanted: ReadonlySet<strin
 export async function prepareTimelineProject(
   path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
   relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false, leaveTitleGaps = false,
-): Promise<{ project: Project; report: TimelineImportReport }> {
+): Promise<{ project: Project; report: TimelineImportReport; assertDocumentUnchanged: () => Promise<void> }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
       (!Number.isSafeInteger(sequenceIndex) || (sequenceIndex as number) < 0)) {
     throw new Error('Choose a valid FCPXML sequence index')
   }
   const document = await readTimelineDocument(inputFile, deps)
-  if (expectedDocument !== undefined && expectedDocument !== documentId(document)) {
+  const reviewedDocumentId = documentId(document)
+  if (expectedDocument !== undefined && expectedDocument !== reviewedDocumentId) {
     throw new Error('The FCPXML file changed since you opened it. Choose it again to review the updated timeline.')
   }
   const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects ? 'omit' : 'inspect', leaveTitleGaps)
@@ -569,7 +570,12 @@ export async function prepareTimelineProject(
 
   mapSequence(timeline, target)
   validate(project)
-  return { project, report: {
+  async function assertDocumentUnchanged() {
+    const currentId = await resolveTimelineInput(path)
+      .then(input => readTimelineDocument(input.inputFile, deps)).then(documentId).catch(() => null)
+    if (currentId !== reviewedDocumentId) throw new Error('The FCPXML file changed or became unreadable after review. Review the timeline again.')
+  }
+  return { project, assertDocumentUnchanged, report: {
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
     outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
     compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.filter(group => group.kind === 'compound').length, 0),

@@ -17,7 +17,7 @@ import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml, TimelineEditFailure } from './fcpxml'
-import type { ImportTimeline, TimelineClip, TimelineSource } from './timeline'
+import type { ImportTimeline, TimelineClip, TimelineSource, TimelineSourceWindow } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 
@@ -280,7 +280,7 @@ export async function prepareTimelineProject(
   const snapshot = actor.snapshot()
   const root = rootComposition(snapshot)
   const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.path)!]!
-  const sourceEnds = new Map<TimelineClip, ExactTime>()
+  const sourceEnds = new Map<TimelineClip, { videoEnd: ExactTime; audioEnd: ExactTime }>()
   const mediaChanges = new Map<string, TimelineMediaChange>()
   const incompatibilities = new Map<string, TimelineMediaIssue>()
   for (const clip of clips) {
@@ -288,7 +288,7 @@ export async function prepareTimelineProject(
     if (!item) continue
     try {
       const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.path)!))
-      sourceEnds.set(clip, result.end)
+      sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
         const issue = mediaIssue(originals.get(clip.asset.path)!, detail)
         mediaChanges.set(JSON.stringify([clip.asset.path, kind, detail]), { ...issue, kind, sourcePath: item.path_abs })
@@ -350,19 +350,21 @@ export async function prepareTimelineProject(
       return nearest <= sequenceEnd ? nearest : timeUsAtGridIndex(floorTime(sample), AUDIO_GRID)
     }
     const visualLayers = new Map<TimelineClip, Layer>()
+    const splitLayers: Layer[] = []
     for (const clip of sequence.clips) {
       const item = itemOf(clip)
       const notes = [...clip.notes]
       let approximation = false
       let converted = notes.length > 0
       const adjustment = (value: ExactTime) => (value.num / value.den).toFixed(6).replace(/\.?0+$/, '')
-      const audioStart = sampleBoundary(clip.timelineStart)
-      const audioEnd = sampleBoundary(clip.timelineEnd)
+      const audioWindow = clip.splitAudio ?? clip
+      const audioStart = sampleBoundary(audioWindow.timelineStart)
+      const audioEnd = sampleBoundary(audioWindow.timelineEnd)
       if (clip.audioRole) {
         if (audioEnd <= audioStart) {
           throw new Error(clip.location + ': This audio clip is too short to occupy a 48 kHz sample. Extend it in the source editor and export again.')
         }
-        for (const [label, time, snapped] of [['start', clip.timelineStart, audioStart], ['end', clip.timelineEnd, audioEnd]] as const) {
+        for (const [label, time, snapped] of [['start', audioWindow.timelineStart, audioStart], ['end', audioWindow.timelineEnd, audioEnd]] as const) {
           const delta = subtractTime(exactTime(snapped), time)
           if (delta.num !== 0) {
             notes.push('Audio ' + label + ' quantized to the 48 kHz sample grid: ' + adjustment(delta) + ' µs')
@@ -370,19 +372,25 @@ export async function prepareTimelineProject(
           }
         }
       }
-      if (clip.markers.length && clip.asset.stillImage) {
+      if (clip.markers.length && (clip.asset.stillImage || (!clip.hasVideo && clip.splitAudio))) {
         converted = true
-        notes.push('Still-image markers keep their timeline positions as independent markers')
+        notes.push(clip.asset.stillImage ? 'Still-image markers keep their timeline positions as independent markers'
+          : 'Markers on split audio keep their original timeline positions as independent markers')
       }
       if (clip.asset.stillImage) {
         converted = true
         notes.push('Still image uses ' + (clip.conform ?? 'fit') + ' spatial conform from its original dimensions to the sequence canvas')
       }
-      const sourceOut = sourceEnds.get(clip)!
-      if (sourceOut !== clip.sourceOut) {
+      const { videoEnd, audioEnd: audioSourceEnd } = sourceEnds.get(clip)!
+      const videoEndRounded = clip.hasVideo && videoEnd !== clip.sourceOut
+      const audioEndRounded = clip.audioRole !== null && audioSourceEnd !== audioWindow.sourceOut
+      if (videoEndRounded || audioEndRounded) {
         roundedEnds++
         converted = true
-        notes.push('Source out-point rounded to the probed file endpoint: ' + adjustment(subtractTime(sourceOut, clip.sourceOut)) + ' µs')
+        if (videoEndRounded) notes.push('Video source out-point rounded to the probed file endpoint: ' +
+          adjustment(subtractTime(videoEnd, clip.sourceOut)) + ' µs')
+        if (audioEndRounded) notes.push('Audio source out-point rounded to the probed file endpoint: ' +
+          adjustment(subtractTime(audioSourceEnd, audioWindow.sourceOut)) + ' µs')
       }
       if (clip.hasVideo && !clip.asset.stillImage && item.metadata.video) {
         const sourceVideo = item.metadata.video
@@ -440,15 +448,15 @@ export async function prepareTimelineProject(
         notes })
       const track = tracks.get(laneIds.get(clip.lane)!)!
       const video = clip.hasVideo && !clip.asset.stillImage
-        ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
+        ? newLayer(idGen, clip, clip.sourceIn, videoEnd, boundary(clip.firstFrame), boundary(clip.endFrame),
           visualAdjustments(fitVideoParams(item, target, clip), clip, target))
         : null
       const image = clip.asset.stillImage
-        ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
+        ? newLayer(idGen, clip, clip.sourceIn, videoEnd, boundary(clip.firstFrame), boundary(clip.endFrame),
           visualAdjustments(fitVisualParams(imageOverlayParams(item.id, target) as Extract<Layer['params'], { kind: 'ImageOverlay' }>, item, target, clip), clip, target))
         : null
       const audio = clip.audioRole
-        ? newLayer(idGen, clip, sourceOut, audioStart, audioEnd,
+        ? newLayer(idGen, clip, audioWindow.sourceIn, audioSourceEnd, audioStart, audioEnd,
           { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
         : null
       if (video || image) {
@@ -457,16 +465,34 @@ export async function prepareTimelineProject(
         visualLayers.set(clip, layer)
         videoClips++
       }
-      if (audio) { track.layers.push(audio); audioClips++ }
+      if (audio) {
+        if (clip.splitAudio) splitLayers.push(audio)
+        else track.layers.push(audio)
+        audioClips++
+      }
       if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
       for (const mark of clip.markers) {
         const { whole, fraction } = splitExact(mark.source)
         target.markers.push({
           id: idGen(), t_us: boundary(mark.frame), end_t_us: mark.endFrame === null ? null : boundary(mark.endFrame),
           label: mark.label, note: mark.note ?? '', color: DEFAULT_MARKER_COLOR,
-          anchor: image ? null : { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
+          anchor: image || (!video && clip.splitAudio) ? null
+            : { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
         })
       }
+    }
+    const audioTracks: Composition['tracks'] = []
+    for (const layer of splitLayers.sort((a, b) => a.t_start_us - b.t_start_us)) {
+      let track = audioTracks.find(candidate => candidate.layers.at(-1)!.t_end_us <= layer.t_start_us)
+      if (!track) {
+        if (audioTracks.length >= FCPXML_LIMITS.splitAudioTracks) {
+          throw new Error('Too many split audio clips overlap at once. Mix the overlapping audio in the source editor or import the timeline in smaller sections.')
+        }
+        applyAddTrack(project, idGen, null, audioTracks.length, target.id)
+        track = target.tracks[audioTracks.length]!
+        audioTracks.push(track)
+      }
+      track.layers.push(layer)
     }
     for (const dissolve of sequence.dissolves ?? []) {
       target.transitions.push({
@@ -585,11 +611,11 @@ function visualAdjustments<T extends Extract<Layer['params'], { kind: 'VideoClip
   return params
 }
 
-function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }> | AudioParams): Layer {
+function newLayer(idGen: IdGen, clip: TimelineClip, sourceIn: ExactTime, sourceOut: ExactTime, start: number, end: number, params: Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }> | AudioParams): Layer {
   // A still image has no moving source clock. Its authored span is on the
   // composition timeline, not a range within a zero-duration image asset.
   if (params.kind !== 'ImageOverlay') {
-    writeSourceWindow(params, clip.sourceIn, sourceOut)
+    writeSourceWindow(params, sourceIn, sourceOut)
     if (clip.playbackRate) params.time_map = affineTimeMap(clip.playbackRate)
     if (params.kind === 'Audio' && clip.preservePitch !== undefined) params.preserve_pitch = clip.preservePitch
   }
@@ -607,7 +633,7 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
       ' pixels, but this file is ' + video!.width + ' × ' + video!.height +
       '. WeftCut can use the file’s actual size. This may change the framing.' })
   }
-  const withEnd = (end: ExactTime) => ({ end, changes })
+  const withEnds = (videoEnd: ExactTime, audioEnd = videoEnd) => ({ videoEnd, audioEnd, changes })
   const transfer = video?.color_transfer
   const primaries = video?.color_primaries
   if (clip.hasVideo && ((transfer != null && transfer !== 'bt709' && transfer !== 'iec61966-2-1') ||
@@ -636,7 +662,7 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
     if (!video?.width || !video.height || !Number.isSafeInteger(video.width) || !Number.isSafeInteger(video.height) ||
         video.width < 1 || video.height < 1) fail('The image dimensions must be known and positive')
     if (clip.asset.imageSize) reportSize('still-size', clip.asset.imageSize)
-    return withEnd(clip.sourceOut)
+    return withEnds(clip.sourceOut)
   }
   if (clip.hasVideo) {
     if (item.kind !== 'Video' || !video || !video.width || !video.height ||
@@ -683,34 +709,34 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
       (clip.asset.audioRate === undefined ? 'does not specify a sample rate' : clip.asset.audioRate + ' Hz') +
       '. WeftCut will use the audio in the file and keep the edit’s timing.' })
   }
-  const requestedEnd = clip.sourceOut
-  const fits = (extent: number) => compareTime(clip.sourceIn, exactTime(extent)) < 0 &&
-    roundTime(requestedEnd) <= extent
-  const covers = (extent: unknown): extent is number =>
+  const knownExtent = (extent: unknown): extent is number =>
     typeof extent === 'number' && Number.isSafeInteger(extent) && extent > 0
-  if (!covers(duration) || !fits(duration)) {
-    fail('The trim exceeds the probed duration of the original file. Relink the matching original or shorten the trim')
-  }
-  const streamDurations = [
-    ...(clip.hasVideo ? [{ name: 'video', duration: probe?.video?.duration_us ?? video?.duration_us }] : []),
-    ...(clip.audioRole ? [{ name: 'audio', duration: probe?.audio?.duration_us ?? audio?.duration_us }] : []),
-  ]
-  let availableEnd = duration!
-  for (const stream of streamDurations) {
-    if (!covers(stream.duration)) continue
-    if (!fits(stream.duration)) {
-      fail('The ' + stream.name + ' stream ends before this trim. Choose a file with enough ' + stream.name + ' or shorten the trim.')
+  let staleDuration = false
+  function checkWindow(window: TimelineSourceWindow, stream: 'video' | 'audio', extent: number | null | undefined) {
+    const { sourceIn, sourceOut } = window
+    const fits = (end: number) => compareTime(sourceIn, exactTime(end)) < 0 && roundTime(sourceOut) <= end
+    if (!knownExtent(duration) || !fits(duration)) {
+      return fail('The ' + stream + ' trim exceeds the probed duration of the original file. Relink the matching original or shorten the trim.')
     }
-    availableEnd = Math.min(availableEnd, stream.duration)
-  }
-  if (compareTime(requestedEnd, clip.asset.duration) > 0) {
-    if (!streamDurations.every(stream => covers(stream.duration))) {
-      fail('The trim extends past the length listed in the FCPXML. WeftCut cannot verify that every requested stream covers it. Relink a file with verifiable stream durations or correct the trim in the source editor.')
+    if (knownExtent(extent) && !fits(extent)) {
+      return fail('The ' + stream + ' stream ends before this trim. Choose a file with enough ' + stream + ' or shorten the trim.')
     }
-    const seconds = (time: ExactTime) => (time.num / time.den / 1_000_000).toFixed(6).replace(/\.?0+$/, '')
-    changes.push({ kind: 'source-duration', detail: 'The timeline lists a source length of ' + seconds(clip.asset.duration) +
+    if (compareTime(sourceOut, clip.asset.duration) > 0) {
+      if (!knownExtent(extent)) {
+        return fail('The trim extends past the length listed in the FCPXML. WeftCut cannot verify that every requested stream covers it. Relink a file with verifiable stream durations or correct the trim in the source editor.')
+      }
+      staleDuration = true
+    }
+    const availableEnd = exactTime(knownExtent(extent) ? Math.min(duration, extent) : duration)
+    // The probe rounds to microseconds, including at an exclusive fractional frame boundary.
+    return compareTime(sourceOut, availableEnd) > 0 ? availableEnd : sourceOut
+  }
+  const videoEnd = clip.hasVideo ? checkWindow(clip, 'video', probe?.video?.duration_us ?? video?.duration_us) : clip.sourceOut
+  const audioEnd = clip.audioRole ? checkWindow(clip.splitAudio ?? clip, 'audio', probe?.audio?.duration_us ?? audio?.duration_us) : clip.sourceOut
+  if (staleDuration) {
+    const seconds = (clip.asset.duration.num / clip.asset.duration.den / 1_000_000).toFixed(6).replace(/\.?0+$/, '')
+    changes.push({ kind: 'source-duration', detail: 'The timeline lists a source length of ' + seconds +
       ' seconds, but a cut uses later material. The file contains that material. WeftCut can keep the original cut times.' })
   }
-  // The probe rounds to microseconds, including at an exclusive fractional frame boundary.
-  return withEnd(compareTime(requestedEnd, exactTime(availableEnd)) > 0 ? exactTime(availableEnd) : requestedEnd)
+  return withEnds(videoEnd, audioEnd)
 }

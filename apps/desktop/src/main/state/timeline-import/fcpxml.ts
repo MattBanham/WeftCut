@@ -39,6 +39,7 @@ export const FCPXML_LIMITS = {
   compounds: 256,
   compoundDepth: 8,
   expandedPlacements: 50_000,
+  splitAudioTracks: 128,
   directoryEntries: 50_000,
   attributes: 64,
   attributeLength: 16_384,
@@ -757,6 +758,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   let pendingDissolve: { el: Element; from: TimelineClip; start: ExactTime; end: ExactTime } | undefined
   let primaryEnd = ZERO_TIME
   let lastEnd = ZERO_TIME
+  let splitAudioEnd = ZERO_TIME
   const connected: { element: Element; clip: TimelineClip }[] = []
 
   function readClip(el: Element, parent?: { offset: ExactTime; start: ExactTime }) {
@@ -764,7 +766,8 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     const gap = el.tag === 'gap'
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
-      : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat', 'srcEnable', 'role'],
+      : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat', 'srcEnable', 'role',
+        ...(el.tag === 'asset-clip' ? ['audioStart', 'audioDuration'] : [])],
     parent ? ['marker', 'chapter-marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap']
       : gap ? ['asset-clip', 'video', 'audio']
         : ['marker', 'chapter-marker', 'asset-clip', 'video', 'audio', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap'])
@@ -945,6 +948,38 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     if (role !== audioRole) notes.push('Audio subrole “' + role + '” is grouped under “' + audioRole + '”')
     if (asset.start.num !== 0) notes.push('Source timecode origin is normalized to file-relative source trims')
     const maps = el.children.filter(child => child.tag === 'timeMap')
+    let splitAudio: TimelineClip['splitAudio']
+    if (a.audioStart !== undefined || a.audioDuration !== undefined) {
+      const audioStart = time(el, 'audioStart', start)
+      const audioDuration = time(el, 'audioDuration', duration)
+      const delta = subtractTime(audioStart, start)
+      if (!hasAudio) {
+        notes.push('Separate audio trim is left out because the clip does not use audio.')
+      } else if (delta.num !== 0 || compareTime(audioDuration, duration) !== 0) {
+        if (maps.length) fail(el, 'This clip combines a split audio edit with a speed change. Render it with its audio in the source editor and export again.')
+        const audioIn = subtractTime(audioStart, asset.start)
+        if (audioIn.num < 0 || audioDuration.num <= 0) {
+          fail(el, 'The separate audio trim starts before the source file or has no duration. Correct the audio trim and export again.')
+        }
+        const timelineStart = addTime(offset, delta)
+        const timelineEnd = addTime(timelineStart, audioDuration)
+        if (timelineEnd.num <= 0) {
+          fail(el, 'The entire audio trim is before the timeline begins. Move the edit forward in the source editor and export again.')
+        }
+        const beforeTimeline = timelineStart.num < 0
+        splitAudio = {
+          timelineStart: beforeTimeline ? ZERO_TIME : timelineStart,
+          timelineEnd,
+          sourceIn: beforeTimeline ? subtractTime(audioIn, timelineStart) : audioIn,
+          sourceOut: addTime(audioIn, audioDuration),
+        }
+        if (compareTime(timelineEnd, splitAudioEnd) > 0) splitAudioEnd = timelineEnd
+        notes.push(hasVideo
+          ? 'Separate picture and sound trims are kept as linked editable clips.'
+          : 'The separate audio trim and its timeline position are kept.')
+        if (beforeTimeline) notes.push('Audio before the timeline begins is left out. The remaining audio stays in sync.')
+      }
+    }
     let sourceIn = subtractTime(start, asset.start)
     let sourceOut = addTime(sourceIn, duration)
     let playbackRate: ExactTime | undefined
@@ -1010,7 +1045,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       return { label, note: mark.attrs.note, frame, endFrame: rangeEnd, source: subtractTime(at, asset.start) }
     })
     const clip: TimelineClip = { label: a.name || assetNode.attrs.name, enabled: a.enabled !== '0', asset, lane,
-      timelineStart: offset, timelineEnd: end, firstFrame, endFrame, sourceIn, sourceOut, hasVideo, playbackRate, preservePitch,
+      timelineStart: offset, timelineEnd: end, firstFrame, endFrame, sourceIn, sourceOut, hasVideo, splitAudio, playbackRate, preservePitch,
       audioRole: !hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole,
       conform, volumeDb, opacity, staticTransform, markers, notes, location: location(el) }
     if (parent) connected.push({ element: el, clip })
@@ -1147,8 +1182,12 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     laneEnds.set(clip.lane, clip.timelineEnd)
     clips.push(clip)
   }
-  const sequenceDuration = time(seq, 'duration', lastEnd)
+  let sequenceDuration = time(seq, 'duration', lastEnd)
   if (compareTime(sequenceDuration, lastEnd) < 0) fail(seq, 'Declared duration ends before the last storyline item')
+  if (compareTime(splitAudioEnd, sequenceDuration) > 0) {
+    sequenceDuration = splitAudioEnd
+    notice(seq, 'The timeline is extended to keep split audio that continues after the last picture.')
+  }
   const frameCount = divideTime(sequenceDuration, format.frameDuration)
   const durationFrames = ceilTime(frameCount)
   if (frameCount.den !== 1) notice(seq, 'The timeline end was extended to the next video frame to contain the final audio sample')

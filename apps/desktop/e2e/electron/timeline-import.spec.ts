@@ -763,6 +763,50 @@ test('keeps repeated compound clips editable with separate trims and one Undo', 
   } finally { await app.close() }
 })
 
+test('keeps overlapping split audio editable and linked without moving the picture cuts', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-split-audio-')
+  const source = join(folder, 'Dialogue.fcpxml')
+  const media = join(folder, 'Take.mov')
+  const target = join(folder, 'Imported dialogue')
+  encodeSource(media)
+  writeFileSync(source, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1" src="${pathToFileURL(media).href}"/>
+  </resources><project name="Dialogue"><sequence format="f"><spine>
+    <asset-clip ref="a" name="Opening" start="0s" duration="3003/30000s" audioDuration="5005/30000s"/>
+    <asset-clip ref="a" name="Reply" offset="3003/30000s" start="6006/30000s" duration="3003/30000s"
+      audioStart="5005/30000s" audioDuration="4004/30000s"/>
+  </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: basename(target),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, source)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText(/Separate picture and sound trims/)).toHaveCount(2)
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    const project = JSON.parse(readFileSync(join(target, 'project.json'), 'utf8'))
+    const composition = importedComposition(project)
+    const all = composition.tracks.flatMap((track: any) => track.layers)
+    const video = all.filter((layer: any) => layer.params.kind === 'VideoClip')
+    const audio = all.filter((layer: any) => layer.params.kind === 'Audio')
+    expect(video.map((layer: any) => [layer.t_start_us, layer.t_end_us])).toEqual([[0, 100100], [100100, 200200]])
+    expect(audio.map((layer: any) => [layer.params.src_in_us, layer.params.src_out_us])).toEqual([[0, 166833], [166833, 300300]])
+    expect(audio[0].t_end_us).toBeGreaterThan(audio[1].t_start_us)
+    expect(composition.tracks.filter((track: any) => track.layers.some((layer: any) => layer.params.kind === 'Audio'))).toHaveLength(2)
+    expect(composition.links.map((link: any) => link.members)).toEqual(
+      video.map((layer: any, index: number) => [layer.id, audio[index].id].sort()))
+    await invokeCmd(page, 'project_undo')
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+  } finally { await app.close() }
+})
+
 test('imports the selected multicam picture and recorder audio as editable Group clips', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-multicam-import-')

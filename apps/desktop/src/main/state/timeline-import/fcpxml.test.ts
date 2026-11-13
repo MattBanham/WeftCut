@@ -835,6 +835,72 @@ describe('timeline import transaction', () => {
     expect(() => validate(project)).not.toThrow()
   })
 
+  it('preserves independent linked source trims and puts overlapping split audio on different tracks', async () => {
+    await writeFile(media, 'Fictional camera source')
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('start="108002002/30000s" duration="3003/30000s"', 'start="108002002/30000s" duration="3003/30000s" audioDuration="5/30s"')
+      .replace('start="108006006/30000s"', 'start="108006006/30000s" audioStart="108004004/30000s"')
+    await writeFile(document, xml)
+    const { project, report } = await setup().prepareReview()
+    const composition = rootComposition(project)
+    const layers = composition.tracks.flatMap(track => track.layers)
+    const video = layers.filter(layer => layer.params.kind === 'VideoClip')
+    const signal = layers.find(layer => layer.label === 'Signal' && layer.params.kind === 'Audio')!
+    const dock = layers.find(layer => layer.label === 'Dock' && layer.params.kind === 'Audio')!
+    expect(video.map(layer => [layer.t_start_us, layer.t_end_us])).toEqual([[0, 100100], [133467, 200200]])
+    expect(sourceOut(signal)).toEqual({ num: 233400, den: 1 })
+    expect(sourceIn(dock.params)).toEqual({ num: 400400, den: 3 })
+    expect(dock.t_start_us).toBe(timeUsAtGridIndex(3203, AUDIO_GRID))
+    expect(signal.t_end_us).toBeGreaterThan(dock.t_start_us)
+    expect(composition.tracks.find(track => track.layers.includes(signal))?.id)
+      .not.toBe(composition.tracks.find(track => track.layers.includes(dock))?.id)
+    for (const layer of video) {
+      const linkedAudio = layer.label === 'Signal' ? signal : dock
+      expect(composition.links.map(link => link.members)).toContainEqual([layer.id, linkedAudio.id].sort())
+    }
+    expect(report.compatibilityItems.flatMap(item => item.notes).join(' ')).toContain('Separate picture and sound trims')
+    expect(() => validate(project)).not.toThrow()
+  })
+
+  it('discloses pre-roll before zero and preserves an audio tail after the last picture', async () => {
+    await writeFile(media, 'Fictional camera source')
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('start="108002002/30000s" duration="3003/30000s"', 'start="108002002/30000s" duration="3003/30000s" audioStart="3600s"')
+      .replace('duration="2002/30000s" audioRole=', 'duration="2002/30000s" audioDuration="4004/30000s" audioRole=')
+    await writeFile(document, xml)
+    const { project, report } = await setup().prepareReview()
+    const composition = rootComposition(project)
+    const layers = composition.tracks.flatMap(track => track.layers)
+    const signal = layers.find(layer => layer.label === 'Signal' && layer.params.kind === 'Audio')!
+    const dock = layers.find(layer => layer.label === 'Dock' && layer.params.kind === 'Audio')!
+    expect(signal.t_start_us).toBe(0)
+    expect(sourceIn(signal.params)).toEqual({ num: 200200, den: 3 })
+    expect(sourceOut(signal)).toEqual({ num: 100100, den: 1 })
+    expect(dock.t_end_us).toBeGreaterThan(200200)
+    expect(composition.duration_us).toBe(266933)
+    const notes = report.compatibilityItems.flatMap(item => item.notes).join(' ')
+    expect(notes).toMatch(/Audio before the timeline begins is left out/)
+    expect(notes).toMatch(/extended to keep split audio/)
+  })
+
+  it('checks each split trim against its own stream length', async () => {
+    await writeFile(media, 'Fictional camera source')
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('duration="2002/30000s" audioRole=', 'duration="2002/30000s" audioStart="108004004/30000s" audioDuration="2002/30000s" audioRole=')
+      .replace('name="Signal" start=', 'name="Signal" srcEnable="video" start=')
+    await writeFile(document, xml)
+    const run = setup()
+    const probe = JSON.parse(await run.probeMedia())
+    probe.metadata.video.duration_us = 267_000
+    probe.metadata.audio.duration_us = 220_000
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    await expect(run.prepare()).resolves.toBeDefined()
+    probe.metadata.audio.duration_us = 190_000
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    await expect(run.prepare()).rejects.toThrow(/audio stream ends before this trim/)
+    expect(run.actor.snapshot()).toBe(run.before)
+  })
+
   it('keeps cuts past a stale XML duration only when every requested stream covers the trim', async () => {
     await writeFile(media, 'Fictional source')
     await writeFile(document, fixture(pathToFileURL(media).href).replace('duration="10s"', 'duration="1/30s"'))

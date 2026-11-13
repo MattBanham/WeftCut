@@ -10,7 +10,7 @@ import { seededGen } from '../ids'
 import { blankProject, rootComposition } from '../model'
 import { mediaItemTemplate } from '../mutations/media'
 import { PROJECT_FILE } from '../persistence'
-import { AUDIO_GRID, isCanonicalOnGrid } from '../snap'
+import { AUDIO_GRID, isCanonicalOnGrid, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import { listFcpxmlSequences, parseFcpxml } from './fcpxml'
 import { prepareTimelineProject } from './project'
@@ -196,7 +196,7 @@ describe('FCPXML subset', () => {
     expect(() => parseFcpxml(xml)).toThrow(/<param>[^]*<title>[^]*<transition>/)
   })
 
-  it('blocks source retiming, unsupported third-party effects and HDR with specific elements', () => {
+  it('blocks source retiming and unsupported third-party effects with specific elements', () => {
     const xml = fixture()
     expect(() => parseFcpxml(xml.replace('<marker value="Signal seen"',
       '<timeMap><timept time="0s" value="0s"/></timeMap><marker value="Signal seen"')))
@@ -204,9 +204,6 @@ describe('FCPXML subset', () => {
     expect(() => parseFcpxml(xml.replace('<marker value="Signal seen"',
       '<filter-video ref="custom" name="Third-party plugin"/><marker value="Signal seen"')))
       .toThrow(/Unsupported inside <asset-clip>/)
-    expect(() => parseFcpxml(xml.replace('width="320" height="240"',
-      'width="320" height="240" colorSpace="9-16-9"')))
-      .toThrow(/Only progressive Rec. 709 formats/)
   })
 
   it.each(['1.6', '1.7', '1.8', '1.9', '1.10', '1.11', '1.12', '1.13'])(
@@ -468,6 +465,30 @@ describe('timeline import transaction', () => {
     expect(() => validate(project)).not.toThrow()
   })
 
+  it('preserves a trimmed constant-speed edit and its audio pitch policy', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('<marker value="Signal seen" start="108003003/30000s" duration="1001/30000s"/>',
+        '<timeMap preservesPitch="0"><timept time="3600s" value="3600s" interp="linear"/>' +
+        '<timept time="3601s" value="3602s" interp="linear"/></timeMap>')
+    await writeFile(media, 'Fictional audiovisual source')
+    await writeFile(document, xml)
+    const { project, report } = await setup().prepareReview()
+    const clips = rootComposition(project).tracks.flatMap(track => track.layers).filter(layer => layer.label === 'Signal')
+    expect(clips.map(layer => layer.params.kind)).toEqual(['VideoClip', 'Audio'])
+    for (const layer of clips) {
+      if (layer.params.kind !== 'VideoClip' && layer.params.kind !== 'Audio') throw new Error('Expected timed clip')
+      expect(layer).toMatchObject({ t_start_us: 0, t_end_us: layer.params.kind === 'Audio' ? timeUsAtGridIndex(4805, AUDIO_GRID) : 100100, params: { time_map: { kind: 'Affine', rate: { num: 2, den: 1 } } } })
+      expect(sourceIn(layer.params)).toEqual({ num: 400400, den: 3 })
+      expect(sourceOut({ ...layer, params: layer.params })).toEqual({ num: 1001000, den: 3 })
+      if (layer.params.kind === 'Audio') expect(layer.params.preserve_pitch).toBe(false)
+    }
+    expect(report.compatibilityItems.flatMap(item => item.notes).join(' ')).toContain('Constant playback speed')
+    expect(() => parseFcpxml(xml.replace('value="3602s"', 'value="3599s"')))
+      .toThrow(/forward constant speed.*Render the speed change/)
+    expect(() => parseFcpxml(xml.replace('preservesPitch="0"', 'frameSampling="optical-flow"')))
+      .toThrow(/frame interpolation.*Render the speed change/)
+  })
+
   it('keeps an on-grid marker range on the timeline', async () => {
     const xml = fixture(pathToFileURL(media).href)
       .replace('start="108003003/30000s" duration="1001/30000s"', 'start="108003003/30000s" duration="2002/30000s"')
@@ -641,6 +662,20 @@ describe('timeline import transaction', () => {
       scale_y: { mode: 'Static', value: 0.5625 },
     } })
     expect(() => validate(project)).not.toThrow()
+  })
+
+  it('requires a tagged SDR file before setting aside an HDR format declaration', async () => {
+    await writeFile(media, 'Fictional SDR media')
+    await writeFile(document, fixture(pathToFileURL(media).href).replace('height="240"', 'height="240" colorSpace="9-18-9"'))
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toThrow(/HDR \(Rec. 2020 HLG\).*color tags/)
+    const probe = JSON.parse(await run.probeMedia())
+    Object.assign(probe.metadata.video, { color_transfer: 'bt709', color_primaries: 'bt709' })
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    const { project, report } = await run.prepareReview()
+    expect(report.outputColorChange).toBe('HDR (Rec. 2020 HLG)')
+    expect(report.mediaChanges).toMatchObject([{ kind: 'color-format', detail: expect.stringContaining('tagged SDR Rec. 709') }])
+    expect(rootComposition(project).tracks[0]!.layers[0]).toMatchObject({ t_start_us: 0, t_end_us: 100100 })
   })
 
   it('refuses HDR detected in the original when the XML has no color declaration', async () => {

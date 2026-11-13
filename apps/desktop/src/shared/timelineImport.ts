@@ -16,7 +16,7 @@ export interface TimelineMediaIssue {
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
-  kind: 'still-size' | 'video-size' | 'video-rate' | 'audio-format'
+  kind: 'still-size' | 'video-size' | 'video-rate' | 'audio-format' | 'color-format'
 }
 
 export interface TimelineMediaBlocked {
@@ -40,6 +40,7 @@ export interface TimelineMediaReplacement {
 
 export interface TimelineImportReport {
   mediaChanges: TimelineMediaChange[]
+  outputColorChange: string | null
   omittedEffects: TimelineCompatibilityItem[]
   name: string
   destination: string | null

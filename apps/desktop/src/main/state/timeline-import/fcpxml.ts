@@ -28,6 +28,7 @@ interface Format {
   paspH: number
   paspV: number
   namedDefaults: boolean
+  sourceColor?: string
 }
 
 export const FCPXML_LIMITS = {
@@ -87,7 +88,10 @@ function readXml(xml: string): Element {
     const el = stack[stack.length - 1]!
     const inMetadata = el.tag === 'string' && stack.at(-2)?.tag === 'array' &&
       stack.at(-3)?.tag === 'md' && stack.at(-4)?.tag === 'metadata' && stack.at(-5)?.tag === 'asset'
-    if (value.trim() && !inMetadata) fail(el, 'Unexpected text')
+    // Title text is interpreted only by the title importer. Keep reading here
+    // so an unsupported title can give a remedy instead of an XML error.
+    const inTitle = ['text', 'text-style'].includes(el.tag) && stack.some(node => node.tag === 'title')
+    if (value.trim() && !inMetadata && !inTitle) fail(el, 'Unexpected text')
   }
   parser.on('text', text)
   parser.on('cdata', text)
@@ -176,13 +180,26 @@ function predefinedFormat(name: string | undefined): Omit<Format, 'namedDefaults
     paspH: 1, paspV: 1 }
 }
 
+function colorName(value: string | undefined): string | undefined {
+  const code = value?.trim().split(/\s+/)[0]
+  if (code === undefined || code === '1-1-1') return undefined
+  switch (code) {
+    case '9-16-9': return 'HDR (Rec. 2020 PQ)'
+    case '9-18-9': return 'HDR (Rec. 2020 HLG)'
+    case '9-1-9': return 'wide-gamut Rec. 2020'
+    case '6-1-6': return 'Rec. 601 NTSC'
+    case '5-1-6': return 'Rec. 601 PAL'
+    default: return value
+  }
+}
+
 function parseFormat(el: Element, sourceFormat = false): Format {
   check(el, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
   const a = el.attrs
-  if ((a.colorSpace !== undefined && !/^1-1-1(?:\s|$)/.test(a.colorSpace)) ||
-      (a.fieldOrder !== undefined && a.fieldOrder !== 'progressive')) {
-    fail(el, 'Only progressive Rec. 709 formats are supported; HDR, alternate transfer functions and interlace require an explicit conversion pipeline')
+  if (a.fieldOrder !== undefined && a.fieldOrder !== 'progressive') {
+    fail(el, 'This format is interlaced. Export a progressive copy at the same frame rate to keep the cuts in place.')
   }
+  const sourceColor = colorName(a.colorSpace)
   const paspH = a.paspH === undefined ? 1 : integer(el, 'paspH')
   const paspV = a.paspV === undefined ? 1 : integer(el, 'paspV')
   if (paspH < 1 || paspV < 1 || paspH > 65_535 || paspV > 65_535) {
@@ -204,7 +221,7 @@ function parseFormat(el: Element, sourceFormat = false): Format {
   }
   const frameDuration = a.frameDuration === undefined ? preset!.frameDuration : time(el, 'frameDuration')
   if (frameDuration.num <= 0) fail(el, 'Video frameDuration must be positive')
-  return { width, height, frameDuration, paspH, paspV, namedDefaults }
+  return { width, height, frameDuration, paspH, paspV, namedDefaults, sourceColor }
 }
 
 function localPath(el: Element): OriginalMediaPath {
@@ -214,7 +231,7 @@ function localPath(el: Element): OriginalMediaPath {
 
 function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Element) => Element): Asset {
   check(el, ['id', 'name', 'uid', 'src', 'start', 'duration', 'hasVideo', 'hasAudio', 'format',
-    'audioSources', 'audioChannels', 'audioRate', 'videoSources'], ['media-rep', 'metadata'])
+    'audioSources', 'audioChannels', 'audioRate', 'videoSources', 'colorSpaceOverride'], ['media-rep', 'metadata'])
   const a = el.attrs
   if (a.hasVideo !== undefined && a.hasVideo !== '0' && a.hasVideo !== '1') fail(el, 'Invalid "hasVideo" flag')
   const hasVideo = a.hasVideo === '1'
@@ -238,6 +255,7 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
   const stillImage = hasVideo && !hasAudio && duration.num === 0
   let videoFormat: Asset['videoFormat']
   let imageSize: Asset['imageSize']
+  let sourceColor: string | undefined
   if (a.format !== undefined) {
     if (!hasVideo) fail(el, 'Audio-only assets must not refer to a video format')
     const formatNode = lookup(a.format, 'format', el)
@@ -245,13 +263,14 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
       check(formatNode, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
       imageSize = { width: integer(formatNode, 'width'), height: integer(formatNode, 'height') }
       if (!imageSize.width || !imageSize.height) fail(formatNode, 'Still-image dimensions must be positive')
-      if ((formatNode.attrs.colorSpace !== undefined && !/^1-1-1(?:\s|$)/.test(formatNode.attrs.colorSpace)) ||
-          (formatNode.attrs.fieldOrder !== undefined && formatNode.attrs.fieldOrder !== 'progressive') ||
+      sourceColor = colorName(formatNode.attrs.colorSpace)
+      if ((formatNode.attrs.fieldOrder !== undefined && formatNode.attrs.fieldOrder !== 'progressive') ||
           Number(formatNode.attrs.paspH ?? 1) !== 1 || Number(formatNode.attrs.paspV ?? 1) !== 1) {
-        fail(formatNode, 'Still images require progressive Rec. 709 and square pixels; convert the image before importing')
+        fail(formatNode, 'This still format needs square pixels and progressive scan. Export a square-pixel copy in the source editor.')
       }
     } else {
       const source = parseFormat(formatNode, true)
+      sourceColor = source.sourceColor
       videoFormat = { width: source.width, height: source.height, frameDuration: source.frameDuration,
         paspH: source.paspH, paspV: source.paspV }
     }
@@ -268,6 +287,10 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
         for (const item of array.children) check(item, [])
       }
     }
+  }
+  if (a.colorSpaceOverride !== undefined) {
+    if (!hasVideo) fail(el, 'Only visual media can have a color-space override')
+    sourceColor = colorName(a.colorSpaceOverride)
   }
   const mediaNotices: string[] = []
   if (metadata.length) mediaNotices.push('Custom asset metadata is not copied to the project')
@@ -288,7 +311,7 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
 
   if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
   return { ref: required(el, 'id'), ...original, start: time(el, 'start', ZERO_TIME), duration,
-    hasVideo, hasAudio, stillImage, imageSize, videoFormat, audioChannels, audioRate, mediaNotices }
+    hasVideo, hasAudio, stillImage, imageSize, sourceColor, videoFormat, audioChannels, audioRate, mediaNotices }
 }
 
 export interface FcpxmlSequenceChoice {
@@ -365,11 +388,18 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
   check(project, ['name', 'uid', 'modDate'], ['sequence'])
   const seq = one(project, 'sequence')
   check(seq, ['format', 'tcStart', 'tcFormat', 'duration', 'audioLayout', 'audioRate'], ['spine'])
+  const effectUids = new Map(resources.children.filter(child => child.tag === 'effect').map(child => [child.attrs.id, child.attrs.uid]))
+  const crossDissolveUid = 'FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265'
+  function dissolveFilter(el: Element): Element | undefined {
+    const filter = el.children[0]
+    return el.children.length === 1 && filter?.tag === 'filter-video' && !filter.children.length &&
+      effectUids.get(filter.attrs.ref) === crossDissolveUid ? filter : undefined
+  }
   const unsupported: TimelineCompatibilityItem[] = []
   const omittedEffects: TimelineCompatibilityItem[] = []
   let canOmitEffects = true
   const supportedStory = new Set(['spine', 'gap', 'asset-clip', 'video', 'audio', 'marker',
-    'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend'])
+    'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap', 'timept'])
   const remedies: Record<string, string> = {
     transition: 'WeftCut cannot recreate this transition. Render the adjoining clips with the transition, or replace it with a cut before exporting.',
     title: 'WeftCut cannot recreate this title. Render it into a clip, or export it as an overlay with transparency and replace the title.',
@@ -382,7 +412,16 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
   function scanStory(parent: Element) {
     const kept: Element[] = []
     for (const child of parent.children) {
-      if (!supportedStory.has(child.tag)) {
+      // Nonlinear, reverse and incomplete maps get the ordinary retime remedy.
+      // The affine subset is validated against the clip window below.
+      const candidateMap = child.tag !== 'timeMap' ||
+        (['asset-clip', 'video', 'audio'].includes(parent.tag) && child.children.length === 2 &&
+          child.children.every(point => point.tag === 'timept' && point.attrs.interp === 'linear'))
+      if (child.tag === 'transition' && parent.tag === 'spine' && dissolveFilter(child)) {
+        kept.push(child)
+        continue
+      }
+      if (!candidateMap || !supportedStory.has(child.tag)) {
         const remedy = Object.hasOwn(remedies, child.tag) ? remedies[child.tag]
           : 'Simplify or render this part in the source editor before exporting.'
         const parameterTree = (node: Element): boolean =>
@@ -449,9 +488,11 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
     fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
   }
   const spine = one(seq, 'spine')
-  check(spine, [], ['gap', 'asset-clip', 'video', 'audio'])
+  check(spine, [], ['gap', 'asset-clip', 'video', 'audio', 'transition'])
   const clips: TimelineClip[] = []
   const assets = new Map<string, Asset>()
+  const dissolves: NonNullable<ImportTimeline['dissolves']> = []
+  let pendingDissolve: { el: Element; from: TimelineClip; start: ExactTime; end: ExactTime } | undefined
   let primaryEnd = ZERO_TIME
   let lastEnd = ZERO_TIME
   const connected: { element: Element; clip: TimelineClip }[] = []
@@ -462,9 +503,9 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
       : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat', 'srcEnable', 'role'],
-    parent ? ['marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend']
+    parent ? ['marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap']
       : gap ? ['asset-clip', 'video', 'audio']
-        : ['marker', 'asset-clip', 'video', 'audio', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend'])
+        : ['marker', 'asset-clip', 'video', 'audio', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap'])
     const lane = Number(a.lane ?? '0')
     if (parent) {
       if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
@@ -490,6 +531,9 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
     if (assetNode && ref !== undefined && !asset) {
       asset = parseAsset(assetNode, lookup)
       assets.set(ref, asset)
+      if (assetNode.attrs.colorSpaceOverride !== undefined && asset.sourceColor === undefined) {
+        notice(assetNode, 'The Rec. 709 color override is not copied. WeftCut checks the colors declared by the actual file.')
+      }
       if (assetNode.attrs.uid !== undefined) notice(assetNode, 'Source asset UID is not retained')
       for (const detail of asset.mediaNotices) notice(assetNode, detail)
     }
@@ -508,7 +552,9 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
     const endFrame = audioOnly ? ceilTime(divideTime(end, format.frameDuration)) : frames(end, format, el, 'end')
     if (!audioOnly && endFrame <= firstFrame) fail(el, 'Duration must span at least one video frame')
     if (!parent) {
-      if (compareTime(offset, primaryEnd) < 0) fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
+      if (compareTime(offset, primaryEnd) < 0 && !pendingDissolve) {
+        fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
+      }
       primaryEnd = end
     }
     if (compareTime(end, lastEnd) > 0) lastEnd = end
@@ -540,6 +586,9 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
           known.width === other.width && known.height === other.height &&
           compareTime(known.frameDuration, other.frameDuration) === 0 &&
           known.paspH * other.paspV === known.paspV * other.paspH
+        if (other.sourceColor !== undefined && other.sourceColor !== format.sourceColor && other.sourceColor !== asset.sourceColor) {
+          fail(el, 'The clip adds a color format that differs from both the source and sequence. Export it as an SDR Rec. 709 clip.')
+        }
         if (!same(format) && (!asset.videoFormat || !same(asset.videoFormat))) {
           fail(el, 'The clip format differs from its source and timeline. Export the clip with a matching format.')
         }
@@ -633,8 +682,39 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
     }
     if (role !== audioRole) notes.push('Audio subrole “' + role + '” is grouped under “' + audioRole + '”')
     if (asset.start.num !== 0) notes.push('Source timecode origin is normalized to file-relative source trims')
-    const sourceIn = subtractTime(start, asset.start)
-    const sourceOut = addTime(sourceIn, duration)
+    const maps = el.children.filter(child => child.tag === 'timeMap')
+    let sourceIn = subtractTime(start, asset.start)
+    let sourceOut = addTime(sourceIn, duration)
+    let playbackRate: ExactTime | undefined
+    let preservePitch: boolean | undefined
+    if (maps.length) {
+      const map = maps[0]!
+      check(map, ['frameSampling', 'preservesPitch'], ['timept'])
+      const remedy = 'Render the speed change into a new clip in the source editor, replace this clip, and export again.'
+      if (maps.length !== 1 || asset.stillImage || el.children.some(child =>
+        ['asset-clip', 'video', 'audio', 'marker'].includes(child.tag))) {
+        fail(map, 'This speed change includes markers, connected clips, or other timing WeftCut cannot reproduce. ' + remedy)
+      }
+      if ((map.attrs.frameSampling ?? 'floor') !== 'floor' || !['0', '1'].includes(map.attrs.preservesPitch ?? '1')) {
+        fail(map, 'WeftCut cannot reproduce this frame interpolation or pitch setting. ' + remedy)
+      }
+      const [first, last] = map.children
+      for (const point of [first!, last!]) check(point, ['time', 'value', 'interp'])
+      const startTime = time(first!, 'time')
+      const endTime = time(last!, 'time')
+      const startValue = time(first!, 'value')
+      const endValue = time(last!, 'value')
+      if (compareTime(endTime, startTime) <= 0 || compareTime(endValue, startValue) <= 0 ||
+        compareTime(start, startTime) < 0 || compareTime(addTime(start, duration), endTime) > 0) {
+        fail(map, 'WeftCut can import forward constant speed when the map covers the whole clip. ' + remedy)
+      }
+      playbackRate = divideTime(subtractTime(endValue, startValue), subtractTime(endTime, startTime))
+      sourceIn = subtractTime(addTime(startValue, multiplyTime(subtractTime(start, startTime), playbackRate)), asset.start)
+      sourceOut = addTime(sourceIn, multiplyTime(duration, playbackRate))
+      preservePitch = map.attrs.preservesPitch !== '0'
+      notes.push('Constant playback speed is kept as an editable setting (' +
+        playbackRate.num + '/' + playbackRate.den + '×).')
+    }
     if (sourceIn.num < 0 || (!asset.stillImage && compareTime(sourceOut, asset.duration) > 0))
       fail(el, 'Trim lies outside the declared source range of the asset')
     if (asset.stillImage && sourceIn.num !== 0)
@@ -666,14 +746,51 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
       return { label: required(mark, 'value'), frame, endFrame: rangeEnd, source: subtractTime(at, asset.start) }
     })
     const clip: TimelineClip = { label: a.name || assetNode.attrs.name, enabled: a.enabled !== '0', asset, lane,
-      timelineStart: offset, timelineEnd: end, firstFrame, endFrame, sourceIn, sourceOut, hasVideo,
+      timelineStart: offset, timelineEnd: end, firstFrame, endFrame, sourceIn, sourceOut, hasVideo, playbackRate, preservePitch,
       audioRole: !hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole,
       conform, volumeDb, opacity, staticTransform, markers, notes, location: location(el) }
     if (parent) connected.push({ element: el, clip })
     else clips.push(clip)
   }
 
-  for (const el of spine.children) readClip(el)
+  for (const el of spine.children) {
+    if (el.tag === 'transition') {
+      const filter = dissolveFilter(el)!
+      check(el, ['name', 'offset', 'duration', 'start'], ['filter-video'])
+      check(filter, ['ref', 'name'])
+      const from = clips.at(-1)
+      if (pendingDissolve || !from || compareTime(from.timelineEnd, primaryEnd) !== 0 ||
+          !from.hasVideo || from.audioRole || !from.enabled) {
+        fail(el, 'A cross dissolve needs two adjacent enabled video-only clips. Render the transition in the source editor if it includes other media.')
+      }
+      const start = subtractTime(time(el, 'offset'), sequenceOrigin)
+      const duration = time(el, 'duration')
+      const end = addTime(start, duration)
+      if (compareTime(start, from.timelineStart) <= 0 || compareTime(end, from.timelineEnd) !== 0) {
+        fail(el, 'The cross dissolve does not match the outgoing clip’s overlap. Render it in the source editor to keep its timing.')
+      }
+      pendingDissolve = { el, from, start, end }
+      continue
+    }
+    const before = clips.length
+    readClip(el)
+    if (!pendingDissolve) continue
+    const { el: transition, from, start, end } = pendingDissolve
+    pendingDissolve = undefined
+    const to = clips[before]
+    if (!to || !to.hasVideo || to.audioRole || !to.enabled ||
+        compareTime(to.timelineStart, start) !== 0 || compareTime(to.timelineEnd, end) <= 0) {
+      fail(transition, 'The cross dissolve does not match two video-only clips with an explicit overlap. Render it in the source editor to keep its timing.')
+    }
+    const previous = dissolves.at(-1)
+    if (previous && frames(start, format, transition, 'offset') < previous.endFrame) {
+      fail(transition, 'Overlapping cross dissolves need to be rendered in the source editor.')
+    }
+    dissolves.push({ from, to, firstFrame: frames(start, format, transition, 'offset'), endFrame: frames(end, format, transition, 'end') })
+    notices.push({ location: location(transition), label: transition.attrs.name || 'Cross Dissolve', lane: 0,
+      status: 'approximated', notes: ['WeftCut uses its editable crossfade over the original overlap. The blend may look slightly different.'] })
+  }
+  if (pendingDissolve) fail(pendingDissolve.el, 'The cross dissolve has no incoming clip. Render it in the source editor.')
   const laneEnds = new Map<number, ExactTime>()
   connected.sort((a, b) => a.clip.lane - b.clip.lane || compareTime(a.clip.timelineStart, b.clip.timelineStart))
   for (const { element, clip } of connected) {
@@ -689,7 +806,7 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
   if (frameCount.den !== 1) notice(seq, 'The timeline end was extended to the next video frame to contain the final audio sample')
   if (clips.length === 0) fail(spine, 'The primary storyline needs at least one asset clip')
   return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
-    fps: { num: fps.num, den: fps.den }, durationFrames, clips, notices, omittedEffects,
+    fps: { num: fps.num, den: fps.den }, durationFrames, clips, dissolves, notices, omittedEffects,
     normalizedTimecode: sequenceOrigin.num !== 0, dropFrameTimecode: tcFormat === 'DF',
-    namedFormatDefaults: format.namedDefaults }
+    namedFormatDefaults: format.namedDefaults, sourceColor: format.sourceColor }
 }

@@ -414,14 +414,22 @@ export class TimelineEditFailure extends Error {
 type EffectsPolicy = 'refuse' | 'inspect' | 'omit'
 
 export function parseFcpxml(xml: string, sequenceIndex?: number, effects: EffectsPolicy = 'refuse', leaveTitleGaps = false): ImportTimeline {
-  try { return parseDocument(readXml(xml), sequenceIndex, effects, leaveTitleGaps) }
-  catch (error) {
-    if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
-    throw error
+  return parseSelectedTimeline(selectTimeline(xml, sequenceIndex), effects, leaveTitleGaps)
+}
+
+export function inspectFcpxml(xml: string, sequenceIndex: number | undefined, omitEffects: boolean, leaveTitleGaps: boolean):
+  { timeline: ImportTimeline } | { issues: TimelineCompatibilityItem[]; sources: { asset: TimelineSource; label?: string }[] } {
+  const selection = selectTimeline(xml, sequenceIndex)
+  try {
+    return { timeline: parseSelectedTimeline(selection, omitEffects ? 'omit' : 'inspect', leaveTitleGaps) }
+  } catch (error) {
+    if (!(error instanceof TimelineEditFailure)) throw error
+    return { issues: error.issues, sources: inspectIndependentSources(selection) }
   }
 }
 
-function parseDocument(root: Element, sequenceIndex: number | undefined, effects: EffectsPolicy, leaveTitleGaps: boolean): ImportTimeline {
+function selectTimeline(xml: string, sequenceIndex: number | undefined) {
+  const root = readXml(xml)
   const choices = collectProjects(root)
   if (sequenceIndex === undefined && choices.length > 1) {
     fail(root, `Found ${choices.length} project sequences. Choose which one to import`)
@@ -440,10 +448,53 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, effects
     if (byId.has(id)) fail(el, `Duplicate resource ID "${id}"`)
     byId.set(id, el)
   }
+  return { seq, project, root, library, choices: choices.length, byId }
+}
+
+function inspectIndependentSources({ seq, byId }: ReturnType<typeof selectTimeline>) {
+  const sources: { asset: TimelineSource; label?: string }[] = []
+  const assets = new Map<string, Asset>()
+  const directMedia = new Set(['asset-clip', 'video', 'audio'])
+  const lookup = (ref: string, tag: string, from: Element) => lookupResource(byId, ref, tag, from)
+  function inspect(el: Element) {
+    const ref = el.attrs.ref
+    if (!directMedia.has(el.tag) || ref === undefined || byId.get(ref)?.tag !== 'asset') return
+    let asset = assets.get(ref)
+    if (!asset) {
+      asset = parseAsset(lookup(ref, 'asset', el), lookup)
+      assets.set(ref, asset)
+      if (assets.size > FCPXML_LIMITS.mediaFiles) fail(el, 'This sequence references too many media assets. Export the sequence in smaller parts')
+    }
+    sources.push({ asset, label: el.attrs.name })
+  }
+  // An unsupported container can select, mute or retime its children. Inventory
+  // only direct files on the selected spine and simple connections to them.
+  for (const clip of one(seq, 'spine').children) {
+    inspect(clip)
+    if (directMedia.has(clip.tag) || clip.tag === 'gap') {
+      for (const connected of clip.children) inspect(connected)
+    }
+  }
+  return sources
+}
+
+function lookupResource(byId: Map<string, Element>, ref: string, tag: string, from: Element): Element {
+  const item = byId.get(ref)
+  if (item?.tag !== tag) fail(from, `Resource "${ref}" must refer to a <${tag}>`)
+  return item
+}
+
+function parseSelectedTimeline(selection: ReturnType<typeof selectTimeline>, effects: EffectsPolicy, leaveTitleGaps: boolean): ImportTimeline {
+  const { seq, project, byId } = selection
   const context: SequenceContext = {
     byId, effects, leaveTitleGaps, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
   }
-  const timeline = parseSequence(seq, project, context, { root, library, choices: choices.length })
+  let timeline: ImportTimeline
+  try { timeline = parseSequence(seq, project, context, selection) }
+  catch (error) {
+    if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
+    throw error
+  }
   const measured = new Map<ImportTimeline, { placements: number; depth: number }>()
   function measure(current: ImportTimeline): { placements: number; depth: number } {
     const cached = measured.get(current)
@@ -662,6 +713,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     return effect?.tag === 'effect' && effect.attrs.uid === crossDissolveUid ? filter : undefined
   }
   const unsupported: TimelineCompatibilityItem[] = []
+  const primaryIssues = new Map<Element, TimelineCompatibilityItem>()
   const omittedEffects: TimelineCompatibilityItem[] = []
   const omittedTitles: TimelineCompatibilityItem[] = []
   const supportedStory = new Set(['spine', 'gap', 'asset-clip', 'video', 'audio', 'marker', 'chapter-marker',
@@ -669,6 +721,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const remedies: Record<string, string> = {
     transition: 'WeftCut cannot recreate this transition. Render the adjoining clips with the transition, or replace it with a cut before exporting.',
     title: 'WeftCut cannot recreate this title. Render it into a clip, or export it as an overlay with transparency and replace the title.',
+    'sync-clip': 'Open the synchronized clip in the source editor. Put the synchronized picture and sound directly on the timeline, or render them together before exporting.',
     'mc-clip': 'Choose the camera angles you want to keep, then flatten the multicam edit to ordinary clips before exporting.',
     'ref-clip': 'Open this compound clip in the source editor and put its contents directly on the timeline, or render it as one clip.',
     timeMap: 'WeftCut cannot recreate this speed change. Render the retimed clip, then replace it in the source edit before exporting.',
@@ -732,8 +785,10 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
             notes: ['This effect will be left out. The clip and its cut times will be kept.'] })
           continue
         }
-        unsupported.push({ ...info, status: 'unsupported',
-          notes: ['FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. ' + remedy] })
+        const issue: TimelineCompatibilityItem = { ...info, status: 'unsupported',
+          notes: ['FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. ' + remedy] }
+        unsupported.push(issue)
+        if (depth === 0) primaryIssues.set(child, issue)
         if (effects === 'inspect' && safeToOmit) continue
       } else scanStory(child, depth + 1)
       kept.push(child)
@@ -743,6 +798,22 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const spine = one(seq, 'spine')
   scanStory(spine, 0)
   if (unsupported.some(issue => !issue.recovery) || (effects === 'refuse' && unsupported.length)) {
+    const node = byId.get(seq.attrs.format)
+    if (primaryIssues.size && node?.tag === 'format') {
+      const format = parseFormat(node)
+      const origin = time(seq, 'tcStart', ZERO_TIME)
+      for (const [el, issue] of primaryIssues) {
+        if (el.attrs.offset === undefined || el.attrs.duration === undefined) continue
+        try {
+          const start = subtractTime(time(el, 'offset'), origin)
+          const end = addTime(start, time(el, 'duration'))
+          const first = frames(start, format, el, 'offset'), last = frames(end, format, el, 'end')
+          if (last > first) issue.timelineFrames = { start: first, end: last }
+        } catch (error) {
+          if (!(error instanceof FcpxmlError || error instanceof TimeMappingError)) throw error
+        }
+      }
+    }
     throw new TimelineEditFailure(unsupported, false)
   }
   const notices: TimelineCompatibilityItem[] = [...omittedEffects, ...omittedTitles]
@@ -776,11 +847,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   // rates and channel layouts, which the existing conform pipeline converts.
   if (seq.attrs.audioRate !== undefined) audioSampleRate(seq, 'audioRate')
 
-  const lookup = (ref: string, tag: string, from: Element): Element => {
-    const item = byId.get(ref)
-    if (item?.tag !== tag) fail(from, `Resource "${ref}" must refer to a <${tag}>`)
-    return item
-  }
+  const lookup = (ref: string, tag: string, from: Element) => lookupResource(byId, ref, tag, from)
   const formatNode = lookup(required(seq, 'format'), 'format', seq)
   const format = parseFormat(formatNode)
   const outputColor = format.sourceColor ?? (formatNode.attrs.colorSpace === undefined &&

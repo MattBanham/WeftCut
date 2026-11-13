@@ -24,7 +24,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
   const [blocked, setBlocked] = useState<TimelineMediaBlocked | TimelineEditBlocked | null>(null);
   const [request, setRequest] = useState<ReviewRequest | null>(null);
-  const [sequenceImport, setSequenceImport] = useState<{ source: string; documentId: string; choices: TimelineSequenceChoice[]; newProject: boolean } | null>(null);
+  const [sequenceImport, setSequenceImport] = useState<{ source: string; documentId: string; choices: TimelineSequenceChoice[]; newProject: boolean; folder?: string | undefined } | null>(null);
 
   const begin = () => {
     if (!busy && !error && !blocked && !sequenceImport && !timelinePreview && !projectForm) setSourcePicker(true);
@@ -60,10 +60,10 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
 
   async function chooseSequence(index: number) {
     if (!sequenceImport || busy) return;
-    const { source, documentId, newProject } = sequenceImport;
+    const { source, documentId, newProject, folder } = sequenceImport;
     setSequenceImport(null);
     setBusy(true);
-    try { await review({ source, documentId, index, newProject, replacements: [] }); }
+    try { await review({ source, documentId, index, newProject, folder, replacements: [] }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -110,11 +110,12 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     setBusy(true);
     setTimelinePreview(null);
     setProjectForm(null);
+    setBlocked(null);
     try {
       const { choices, documentId } = await projectListTimelineSequences(request.source);
       if (documentId === request.documentId) await review(request);
-      else if (choices.length > 1) setSequenceImport({ source: request.source, choices, documentId, newProject: request.newProject });
-      else await review({ source: request.source, documentId, index: 0, newProject: request.newProject, replacements: [] });
+      else if (choices.length > 1) setSequenceImport({ source: request.source, choices, documentId, newProject: request.newProject, folder: request.folder });
+      else await review({ source: request.source, documentId, index: 0, newProject: request.newProject, folder: request.folder, replacements: [] });
     } catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -130,8 +131,13 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   }
 
   const editIssues = blocked?.kind === "media-blocked" ? blocked.editIssues : blocked?.issues ?? [];
-  const canLeaveTitleGaps = editIssues.some(issue => issue.recovery === "leave-title-gap") &&
-    editIssues.every(issue => issue.recovery !== undefined);
+  const needsSourceEdit = editIssues.some(issue => issue.recovery === undefined);
+  const canLeaveTitleGaps = !needsSourceEdit && editIssues.some(issue => issue.recovery === "leave-title-gap");
+  const refreshBlocked = needsSourceEdit && (
+    <Button onClick={() => void refreshReview()} disabled={busy}>
+      {t("startup.import_refresh_review")}
+    </Button>
+  );
   const titleFallback = canLeaveTitleGaps && (
     <Button onClick={() => void reviewWithFallback("leaveTitleGaps")} disabled={busy}>
       {t("startup.import_review_without_titles")}
@@ -171,6 +177,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           )}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
+            {refreshBlocked}
             {blocked.canOmitEffects && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
               {t("startup.import_review_without_effects")}
             </Button>}
@@ -215,7 +222,8 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           )}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
-            {blocked.editIssues.some(issue => issue.recovery === "omit-effect") && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
+            {refreshBlocked}
+            {!needsSourceEdit && blocked.editIssues.some(issue => issue.recovery === "omit-effect") && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
               {t("startup.import_review_without_effects")}
             </Button>}
             {titleFallback}
@@ -265,7 +273,7 @@ interface ReviewRequest {
   documentId: string;
   index: number;
   newProject: boolean;
-  folder?: string;
+  folder?: string | undefined;
   replacements: TimelineMediaReplacement[];
   omitEffects?: boolean;
   leaveTitleGaps?: boolean;

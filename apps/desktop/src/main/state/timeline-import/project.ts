@@ -17,7 +17,7 @@ import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/m
 import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
-import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml, TimelineEditFailure } from './fcpxml'
+import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure } from './fcpxml'
 import type { ImportTimeline, TimelineClip, TimelineSource, TimelineSourceWindow } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
@@ -140,10 +140,11 @@ export async function prepareTimelineProject(
   if (expectedDocument !== undefined && expectedDocument !== reviewedDocumentId) {
     throw new Error('The FCPXML file changed since you opened it. Choose it again to review the updated timeline.')
   }
-  const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects ? 'omit' : 'inspect', leaveTitleGaps)
+  const inspection = inspectFcpxml(document, sequenceIndex as number | undefined, omitEffects, leaveTitleGaps)
+  const timeline = 'timeline' in inspection ? inspection.timeline : undefined
   assertCurrent()
-  const initial = blankProject(idGen, timeline.name?.trim() || basename(inputFile, extname(inputFile)))
-  rootComposition(initial).fps = timeline.fps
+  const initial = blankProject(idGen, timeline?.name?.trim() || basename(inputFile, extname(inputFile)))
+  if (timeline) rootComposition(initial).fps = timeline.fps
   if (existing) {
     initial.media_pool = existing.media_pool
     const parent = rootComposition(existing)
@@ -187,15 +188,15 @@ export async function prepareTimelineProject(
       visit(group.timeline)
     }
   }
-  visit(timeline)
+  if (timeline) visit(timeline)
   const clips = [...sequences].flatMap(sequence => sequence.clips)
-  const editIssues = [...sequences].flatMap(sequence => sequence.editIssues ?? [])
+  const editIssues = 'issues' in inspection ? inspection.issues : [...sequences].flatMap(sequence => sequence.editIssues ?? [])
+  const mediaUses = 'sources' in inspection ? inspection.sources : clips
   const originals = new Map<string, { asset: TimelineSource; label: string; placements: number }>()
-  for (const clip of clips) {
-    const { asset } = clip
+  for (const { asset, label } of mediaUses) {
     const original = originals.get(asset.ref)
     if (original) original.placements++
-    else originals.set(asset.ref, { asset, label: asset.name || clip.label || asset.ref, placements: 1 })
+    else originals.set(asset.ref, { asset, label: asset.name || label || asset.ref, placements: 1 })
   }
   const mediaIssue = (asset: TimelineSource, detail: string): TimelineMediaIssue => {
     const { label, placements } = originals.get(asset.ref)!
@@ -290,6 +291,11 @@ export async function prepareTimelineProject(
     missing.push({ ...replacementIssue(originals.get(ref)!.asset, 'Ambiguous media relink. More than one original matches this file. Choose the file for this asset.'),
       suggestedPaths: [path] })
     resolved.delete(ref)
+  }
+
+  if (!timeline) {
+    if (missing.length) throw new TimelineMediaFailure(missing, offline.length > 0, editIssues)
+    throw new TimelineEditFailure(editIssues, false)
   }
 
   const relinkedMedia: TimelineImportReport['relinkedMedia'] = []

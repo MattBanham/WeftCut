@@ -25,10 +25,12 @@ function joinPath(parent: string, name: string): string {
 export function NewProjectForm({
   onCancel,
   onCreated,
+  onReviewTimeline,
   timeline,
 }: {
   onCancel: () => void;
   onCreated: () => void;
+  onReviewTimeline?: () => Promise<void>;
   timeline?: TimelineImportPreview;
 }) {
   const { t } = useTranslation();
@@ -279,6 +281,11 @@ export function NewProjectForm({
           <Button size="lg" onClick={onCancel} disabled={busy}>
             {t("new_project.cancel")}
           </Button>
+          {onReviewTimeline && submitError && (
+            <Button size="lg" onClick={() => void onReviewTimeline()} disabled={busy}>
+              {t("startup.import_refresh_review")}
+            </Button>
+          )}
           <Button
             variant="default"
             size="lg"

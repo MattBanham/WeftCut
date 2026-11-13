@@ -397,6 +397,7 @@ const zhCN: Resources = {
     import_conflict_fps: "帧率 — 当前：{{current}}；导入：{{imported}}。",
     import_fps_unsupported: "帧率不一致。可以创建独立项目来保留时间线的帧率。切换前会保存当前项目。",
     import_review_as_new: "作为新项目检查…",
+    import_refresh_review: "重新检查时间线…",
     import_fps_match: "帧率一致，将保留片段时间位置。",
     import_conflict_size: "画布 — 当前：{{current}}；导入：{{imported}}。",
     import_canvas_choice: "导入群组的画布适配",

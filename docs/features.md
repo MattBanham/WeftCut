@@ -10,7 +10,8 @@ record shapes in [data-model.md](data-model.md); the agent surface in
 Choose **Import timeline…** from startup to create a project from FCPXML, or
 **File → Import FCPXML…** (Mod+Shift+I) to add an editable Group after the
 current timeline. Review the sequence, sources and changes before confirming.
-The import is one Undo step. Cancel or failed preflight leaves the existing
+If the XML or media changes after review, choose **Review timeline again…**
+from the dialog. The import is one Undo step. Cancel or failed preflight leaves the existing
 project and source files intact. Keep originals available until WeftCut has
 copied them to the workspace.
 

@@ -18,6 +18,7 @@ interface Asset extends TimelineSource {
   start: ExactTime
   duration: ExactTime
   hasAudio: boolean
+  mediaNotices: string[]
 }
 
 interface Format {
@@ -83,7 +84,10 @@ function readXml(xml: string): Element {
   })
   parser.on('closetag', () => { stack.pop() })
   function text(value: string) {
-    if (value.trim()) fail(stack[stack.length - 1]!, 'Unexpected text')
+    const el = stack[stack.length - 1]!
+    const inMetadata = el.tag === 'string' && stack.at(-2)?.tag === 'array' &&
+      stack.at(-3)?.tag === 'md' && stack.at(-4)?.tag === 'metadata' && stack.at(-5)?.tag === 'asset'
+    if (value.trim() && !inMetadata) fail(el, 'Unexpected text')
   }
   parser.on('text', text)
   parser.on('cdata', text)
@@ -194,7 +198,10 @@ function parseFormat(el: Element, sourceFormat = false): Format {
   }
   const width = a.width === undefined ? preset!.width : integer(el, 'width')
   const height = a.height === undefined ? preset!.height : integer(el, 'height')
-  if (canvasSizeError(width, height)) fail(el, 'The canvas must be an even-sized WeftCut canvas within the supported resolution range')
+  if (sourceFormat ? width < 1 || height < 1 : canvasSizeError(width, height)) {
+    fail(el, sourceFormat ? 'The source dimensions must be positive'
+      : 'The sequence canvas must use even dimensions within WeftCut’s supported range. Export the timeline at a supported canvas size.')
+  }
   const frameDuration = a.frameDuration === undefined ? preset!.frameDuration : time(el, 'frameDuration')
   if (frameDuration.num <= 0) fail(el, 'Video frameDuration must be positive')
   return { width, height, frameDuration, paspH, paspV, namedDefaults }
@@ -207,7 +214,7 @@ function localPath(el: Element): OriginalMediaPath {
 
 function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Element) => Element): Asset {
   check(el, ['id', 'name', 'uid', 'src', 'start', 'duration', 'hasVideo', 'hasAudio', 'format',
-    'audioSources', 'audioChannels', 'audioRate', 'videoSources'], ['media-rep'])
+    'audioSources', 'audioChannels', 'audioRate', 'videoSources'], ['media-rep', 'metadata'])
   const a = el.attrs
   if (a.hasVideo !== undefined && a.hasVideo !== '0' && a.hasVideo !== '1') fail(el, 'Invalid "hasVideo" flag')
   const hasVideo = a.hasVideo === '1'
@@ -249,19 +256,39 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
         paspH: source.paspH, paspV: source.paspV }
     }
   }
-  let original: OriginalMediaPath
-  if (a.src !== undefined && el.children.length === 0) {
-    original = localPath(el)
-  } else {
-    if (a.src !== undefined) fail(el, 'The asset names multiple media representations')
-    const rep = one(el, 'media-rep')
-    check(rep, ['kind', 'src', 'sig'])
-    if ((rep.attrs.kind ?? 'original-media') !== 'original-media') fail(rep, 'Relink the original media and export again')
-    original = localPath(rep)
+  const representations = el.children.filter(child => child.tag === 'media-rep')
+  const metadata = el.children.filter(child => child.tag === 'metadata')
+  if (metadata.length > 1) fail(el, 'An asset can have only one metadata section')
+  for (const group of metadata) {
+    check(group, [], ['md'])
+    for (const entry of group.children) {
+      check(entry, ['key', 'value', 'type', 'editable', 'displayName', 'source', 'description'], ['array'])
+      for (const array of entry.children) {
+        check(array, [], ['string'])
+        for (const item of array.children) check(item, [])
+      }
+    }
   }
+  const mediaNotices: string[] = []
+  if (metadata.length) mediaNotices.push('Custom asset metadata is not copied to the project')
+  const originalReps: Element[] = []
+  for (const rep of representations) {
+    check(rep, ['kind', 'src', 'sig'])
+    const kind = rep.attrs.kind ?? 'original-media'
+    if (kind === 'original-media') originalReps.push(rep)
+    else if (kind !== 'proxy-media') fail(rep, 'This media representation is unsupported. Export a reference to the original file.')
+  }
+  if (a.src !== undefined && representations.length) fail(el, 'The asset specifies both a legacy URL and media representations. Export it with one original.')
+  if (a.src === undefined && originalReps.length !== 1) {
+    fail(el, 'The asset needs exactly one original media-rep. Relink the original in the source editor and export again.')
+  }
+  if (representations.length > originalReps.length) mediaNotices.push('Proxy media in the FCPXML is not used. WeftCut imports the original file.')
+  if (representations.some(rep => rep.attrs.sig !== undefined)) mediaNotices.push('Source media signature is not retained')
+  const original = localPath(a.src !== undefined ? el : originalReps[0]!)
+
   if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
   return { ref: required(el, 'id'), ...original, start: time(el, 'start', ZERO_TIME), duration,
-    hasVideo, hasAudio, stillImage, imageSize, videoFormat, audioChannels, audioRate }
+    hasVideo, hasAudio, stillImage, imageSize, videoFormat, audioChannels, audioRate, mediaNotices }
 }
 
 export interface FcpxmlSequenceChoice {
@@ -464,8 +491,7 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
       asset = parseAsset(assetNode, lookup)
       assets.set(ref, asset)
       if (assetNode.attrs.uid !== undefined) notice(assetNode, 'Source asset UID is not retained')
-      const mediaRep = assetNode.children.find(child => child.tag === 'media-rep')
-      if (mediaRep?.attrs.sig !== undefined) notice(mediaRep, 'Source media signature is not retained')
+      for (const detail of asset.mediaNotices) notice(assetNode, detail)
     }
     const component = el.tag === 'video' || el.tag === 'audio' ? el.tag : a.srcEnable ?? 'all'
     if (!['all', 'video', 'audio'].includes(component) || (el.tag !== 'asset-clip' && a.srcEnable !== undefined)) {
@@ -486,7 +512,7 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
       primaryEnd = end
     }
     if (compareTime(end, lastEnd) > 0) lastEnd = end
-    const start = time(el, 'start', ZERO_TIME)
+    const start = time(el, 'start', asset?.start ?? ZERO_TIME)
     for (const child of el.children) {
       if (['asset-clip', 'video', 'audio'].includes(child.tag)) readClip(child, { offset, start })
     }

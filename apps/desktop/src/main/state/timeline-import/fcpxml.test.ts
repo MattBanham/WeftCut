@@ -350,7 +350,7 @@ describe('FCPXML subset', () => {
     ['a connected clip', (xml: string) => xml.replace('name="Dock"', 'name="Dock" lane="1"'), /Connected clips/],
     ['a transition', (xml: string) => xml.replace('<gap ', '<transition '), /<transition>.*Unsupported/],
     ['a retime', (xml: string) => xml.replace('<marker ', '<timeMap/><marker '), /<timeMap>.*Unsupported/],
-    ['multiple media representations', (xml: string) => xml.replace('</asset>', '<media-rep kind="proxy-media" src="file:///fictional/proxy.mov"/></asset>'), /exactly one.*media-rep/],
+    ['multiple originals', (xml: string) => xml.replace('</asset>', '<media-rep kind="original-media" src="file:///fictional/other.mov"/></asset>'), /exactly one.*media-rep/],
     ['a remote file', (xml: string) => xml.replace(/src="file:[^"]+"/, 'src="https://example.invalid/take.mov"'), /absolute local file URL/],
     ['a gap overlapping a clip', (xml: string) => xml.replace('offset="3003/30000s"', 'offset="2002/30000s"'), /Overlaps the preceding/],
     ['a subframe cut', (xml: string) => xml.replace('offset="4004/30000s"', 'offset="4005/30000s"'), /between frames/],
@@ -419,6 +419,22 @@ describe('timeline import transaction', () => {
     expect(existsSync(destination)).toBe(false)
     await mkdir(join(bundle, 'Info.fcpxml'))
     await expect(setup().prepareReview()).rejects.toThrow(/regular Info.fcpxml/)
+  })
+
+  it('uses the original when a document also includes a proxy and custom metadata', async () => {
+    const xml = fixture(pathToFileURL(media).href).replace('</asset>',
+      '<media-rep kind="proxy-media" src="file:///fictional/proxy.mov"/>' +
+      '<metadata><md key="fictional.rating" value="5"/><md key="fictional.tags"><array><string>Sample</string></array></md></metadata></asset>')
+    await writeFile(document, xml)
+    await writeFile(media, 'Fictional original')
+    const run = setup()
+    const { project, report } = await run.prepareReview()
+    expect(run.probeMedia).toHaveBeenCalledExactlyOnceWith(await realpath(media))
+    expect(Object.values(project.media_pool)).toHaveLength(1)
+    expect(report.compatibilityItems.flatMap(item => item.notes)).toEqual(expect.arrayContaining([
+      'Proxy media in the FCPXML is not used. WeftCut imports the original file.',
+      'Custom asset metadata is not copied to the project',
+    ]))
   })
 
   it('selects projects alongside event collections and preserves disabled clips with equivalent format IDs', async () => {

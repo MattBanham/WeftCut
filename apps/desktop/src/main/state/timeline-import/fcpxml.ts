@@ -195,8 +195,11 @@ function predefinedFormat(name: string | undefined): Omit<Format, 'namedDefaults
 }
 
 function colorName(value: string | undefined): string | undefined {
-  const code = value?.trim().split(/\s+/)[0]
-  if (code === undefined || code === '1-1-1') return undefined
+  const normalized = value?.trim()
+  const code = normalized?.split(/\s+/)[0]
+  if (code === undefined || code === '1-1-1' || normalized === 'Rec. 709') return undefined
+  if (normalized === 'Rec. 601 (NTSC)') return 'Rec. 601 NTSC'
+  if (normalized === 'Rec. 601 (PAL)') return 'Rec. 601 PAL'
   switch (code) {
     case '9-16-9': return 'HDR (Rec. 2020 PQ)'
     case '9-18-9': return 'HDR (Rec. 2020 HLG)'

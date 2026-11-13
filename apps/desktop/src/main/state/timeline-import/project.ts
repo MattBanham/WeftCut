@@ -7,6 +7,7 @@ import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { affineTimeMap, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
+import { ffprobeColorToWebCodecs } from '../../../renderer/render/decoder/ffprobeColorSpace'
 import { createActor } from '../actor'
 import { type IdGen } from '../ids'
 import { createMediaImporter, type MediaImportDeps } from '../mediaImport'
@@ -672,23 +673,40 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
       '. WeftCut can use the file’s actual size. This may change the framing.' })
   }
   const withEnds = (videoEnd: ExactTime, audioEnd = videoEnd) => ({ videoEnd, audioEnd, changes })
-  const transfer = video?.color_transfer
-  const primaries = video?.color_primaries
-  if (clip.hasVideo && ((transfer != null && transfer !== 'bt709' && transfer !== 'iec61966-2-1') ||
-      (primaries != null && primaries !== 'bt709'))) {
-    fail('WeftCut cannot match this file’s HDR or wide-gamut colors. The file has an unsupported color transfer or gamut (' +
-      (transfer ?? 'unspecified transfer') + ', ' + (primaries ?? 'unspecified primaries') +
-      '). Export an SDR Rec. 709 copy with the same timing, then choose it as the replacement.')
-  }
-  if (clip.hasVideo && clip.asset.sourceColor !== undefined) {
-    // An explicitly tagged SDR copy is evidence that the XML's color
-    // declaration can be set aside. An untagged file cannot prove this.
-    if (primaries !== 'bt709' || (transfer !== 'bt709' && transfer !== 'iec61966-2-1')) {
-      fail('The timeline describes this file as ' + clip.asset.sourceColor +
-        '. Export an SDR Rec. 709 copy with color tags and the same timing, then choose it as the replacement.')
+  if (clip.hasVideo && video) {
+    const { color_matrix: matrix, color_primaries: primaries, color_transfer: transfer } = video
+    const decoded = ffprobeColorToWebCodecs(video)
+    if ((primaries != null && decoded?.primaries === undefined) || (transfer != null && decoded?.transfer === undefined) ||
+        matrix === 'bt2020nc' || matrix === 'bt2020c' || matrix === 'ictcp') {
+      fail('WeftCut cannot reproduce this file’s color settings. It has an unsupported color transfer, gamut or matrix (' +
+        [transfer, primaries, matrix].filter(tag => tag != null).join(', ') +
+        '). Export an SDR Rec. 709 copy with the same timing, then choose it as the replacement.')
     }
-    changes.push({ kind: 'color-format', detail: 'The timeline describes this file as ' + clip.asset.sourceColor +
-      ', but the selected file is tagged SDR Rec. 709. WeftCut can use its SDR colors and keep the cut times.' })
+    const declared = clip.asset.sourceColor
+    const declared601 = declared === 'Rec. 601 NTSC' || declared === 'Rec. 601 PAL'
+    const file601 = [decoded?.matrix, decoded?.primaries, decoded?.transfer]
+      .some(tag => tag === 'smpte170m' || tag === 'bt470bg')
+    const tagged709 = decoded?.primaries === 'bt709' &&
+      (decoded?.transfer === 'bt709' || decoded?.transfer === 'iec61966-2-1') &&
+      (matrix == null || decoded.matrix === 'bt709' || decoded.matrix === 'rgb')
+    if (declared !== undefined && !declared601) {
+      if (!tagged709) fail('The timeline describes this file as ' + declared +
+        '. Export an SDR Rec. 709 copy with color tags and the same timing, then choose it as the replacement.')
+      changes.push({ kind: 'color-format', detail: 'The timeline describes this file as ' + declared +
+        ', but the selected file is tagged SDR Rec. 709. WeftCut can use its SDR colors and keep the cut times.' })
+    } else if (declared601 || file601 || (matrix != null && decoded?.matrix === undefined)) {
+      const descriptions: string[] = []
+      if (declared601) descriptions.push('The timeline describes this file as ' + declared + '.')
+      if (file601) descriptions.push('This file uses Rec. 601 color tags.')
+      if (matrix != null && decoded?.matrix === undefined) {
+        descriptions.push('WeftCut uses its playback default for the unfamiliar color matrix (' + matrix + ').')
+      }
+      if (decoded?.matrix === undefined || decoded?.primaries === undefined || decoded?.transfer === undefined) {
+        descriptions.push('Any missing color tags use WeftCut’s usual playback defaults.')
+      }
+      descriptions.push('WeftCut will render in SDR Rec. 709. Colors can differ from the source editor. The cut times stay the same.')
+      changes.push({ kind: 'color-format', detail: descriptions.join(' ') })
+    }
   }
   if (clip.asset.stillImage) {
     // The normal image probe may report width/height in metadata.video even

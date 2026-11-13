@@ -558,7 +558,7 @@ export function NewProjectForm({
     setSubmitError(null);
     try {
       if (timeline) {
-        await projectImportTimeline(timeline.id, "fit", { parentFolder, name: name.trim() });
+        await projectImportTimeline(timeline.id, "fit", { parentFolder, name: name.trim() }, timeline.mediaChanges.length > 0, timeline.omittedEffects.length > 0);
       } else {
         await projectNewWorkspace({
           parentFolder,

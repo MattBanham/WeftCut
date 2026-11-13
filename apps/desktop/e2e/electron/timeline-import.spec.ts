@@ -539,7 +539,7 @@ test('imports a Final Cut bundle with Info.fcpxml and reports its source', async
   } finally { await app.close() }
 })
 
-test('relinks missing FCPXML media only after explicit folder selection and review', async () => {
+test('relinks missing media and omits an unsupported effect only after review and consent', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-relink-flow-')
   const source = join(folder, 'Offline.fcpxml')
@@ -561,7 +561,7 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
   </resources>
   <project name="Offline">
     <sequence format="f" duration="3003/30000s">
-      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"/></spine>
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"><filter-video name="Fictional Glow"/></asset-clip></spine>
     </sequence>
   </project>
 </fcpxml>`)
@@ -578,6 +578,9 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: input.destination })
     }, { source, relocatedFolder, destination })
     await beginImport(page)
+    const unsupported = page.getByRole('dialog', { name: 'Some edits need attention' })
+    await expect(unsupported.getByText('Fictional Glow', { exact: true })).toBeVisible()
+    await unsupported.getByRole('button', { name: 'Review without these effects…' }).click()
     await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
     await page.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
@@ -586,6 +589,8 @@ test('relinks missing FCPXML media only after explicit folder selection and revi
     await expect(review).toContainText('Source media signature is not retained')
     await expect(review.getByText(`${lost} → ${await realpath(actual)}`, { exact: true })).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
+    await review.getByRole('checkbox', { name: 'Keep the clips and leave out these effects' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
     await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(2)

@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { invokeCmd, newProject, launchApp, rootSummary, tmpDir, waitForHook, type ProjectSummary } from './helpers/driver'
 
-test('imports fictional 48 kHz mono audio and zero-duration PNG visemes as image overlays', async () => {
+test('imports fictional 48 kHz mono audio and a differently sized PNG as an editable overlay after review', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-illustrated-story-stills-')
   const source = join(folder, 'Illustrated Story.fcpxml')
@@ -28,7 +28,7 @@ test('imports fictional 48 kHz mono audio and zero-duration PNG visemes as image
 <fcpxml version="1.10">
   <resources>
     <format id="f" frameDuration="1/60s" width="320" height="240"/>
-    <format id="still" name="FFVideoFormatRateUndefined" width="120" height="130"/>
+    <format id="still" name="FFVideoFormatRateUndefined" width="640" height="360"/>
     <asset id="voice" name="Narration.wav" start="0s" duration="2s" hasAudio="1" audioSources="1" audioChannels="1">
       <media-rep kind="original-media" src="${pathToFileURL(audio).href}"/>
     </asset>
@@ -60,6 +60,9 @@ test('imports fictional 48 kHz mono audio and zero-duration PNG visemes as image
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Video clips 1.*Audio clips 1.*Media files 2/)).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    await expect(review.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
+    await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await waitForHook(page, 'getSelectedLayerIds')
     const imported = await rootSummary<ProjectSummary>(page)

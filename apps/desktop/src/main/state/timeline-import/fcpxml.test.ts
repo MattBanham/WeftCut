@@ -321,8 +321,7 @@ describe('FCPXML subset', () => {
       .toThrow(/Unsupported sequence audio layout/)
     expect(() => parseFcpxml(xml.replace('audioRate="48k"', 'audioRate="unknown"')))
       .toThrow(/Invalid audio sample rate/)
-    expect(() => parseFcpxml(xml.replace('<video ref="mouth"', '<asset-clip ref="mouth"')))
-      .toThrow(/Still-image assets must be placed with a <video>/)
+    expect(parseFcpxml(xml.replace('<video ref="mouth"', '<asset-clip ref="mouth"')).clips[1]!.asset.stillImage).toBe(true)
   })
 
   it('does not invent audio for a video-only timeline, even with no sequence audio attributes', () => {
@@ -420,6 +419,46 @@ describe('timeline import transaction', () => {
     expect(existsSync(destination)).toBe(false)
     await mkdir(join(bundle, 'Info.fcpxml'))
     await expect(setup().prepareReview()).rejects.toThrow(/regular Info.fcpxml/)
+  })
+
+  it('selects projects alongside event collections and preserves disabled clips with equivalent format IDs', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('</resources>', '<format id="same" frameDuration="1001/30000s" width="320" height="240"/></resources>')
+      .replace('<project name=', '<event name="Organization"><keyword-collection name="Favorites"/><project name=')
+      .replace('</project>', '</project></event>')
+      .replace('<asset-clip ref="take" name="Signal"', '<asset-clip ref="take" format="same" enabled="0" name="Signal"')
+    expect(listFcpxmlSequences(xml)).toMatchObject([{ name: 'Harbor & Lights', event: 'Organization' }])
+    await writeFile(media, 'Fictional video')
+    await writeFile(document, xml)
+    const { project, report } = await setup().prepareReview()
+    const layers = rootComposition(project).tracks.flatMap(track => track.layers)
+    expect(layers.filter(layer => layer.label === 'Signal').map(layer => layer.enabled)).toEqual([false, false])
+    expect(report.compatibilityItems.flatMap(item => item.notes)).toContain(
+      'Only the selected edit is imported. Library and event organization, standalone clips, collections and source metadata are not copied')
+  })
+
+  it('imports only the requested components of a shared audiovisual asset', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('<asset-clip ref="take" name="Signal"', '<asset-clip ref="take" srcEnable="video" name="Signal"')
+      .replace('<asset-clip ref="take" name="Dock"', '<audio ref="take" name="Dock"')
+      .replace('audioRole="music"', 'role="music.background"')
+    await writeFile(media, 'Fictional audiovisual source')
+    await writeFile(document, xml)
+    const { project, report } = await setup().prepareReview()
+    const clips = rootComposition(project).tracks.flatMap(track => track.layers)
+    expect(clips.map(layer => [layer.label, layer.params.kind])).toEqual([['Signal', 'VideoClip'], ['Dock', 'Audio']])
+    expect(rootComposition(project).links).toEqual([])
+    expect(report.compatibilityItems.flatMap(item => item.notes)).toContain('Audio subrole “music.background” is grouped under “music”')
+    expect(() => validate(project)).not.toThrow()
+  })
+
+  it('keeps an on-grid marker range on the timeline', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('start="108003003/30000s" duration="1001/30000s"', 'start="108003003/30000s" duration="2002/30000s"')
+    await writeFile(media, 'Fictional video')
+    await writeFile(document, xml)
+    const { project } = await setup().prepareReview()
+    expect(rootComposition(project).markers[0]).toMatchObject({ t_us: 33367, end_t_us: 100100, label: 'Signal seen' })
   })
 
   it('publishes imported static transform and opacity as editable visual params', async () => {
@@ -599,7 +638,7 @@ describe('timeline import transaction', () => {
     expect(run.actor.snapshot()).toBe(run.before)
   })
 
-  it('refuses mismatched video FPS or dimensions when the source format is declared', async () => {
+  it('refuses a different video frame rate when the source format is declared', async () => {
     const file = join(parent, 'Camera.mov')
     await writeFile(file, 'Wrong camera video')
     await writeFile(document, mixedVideoFixture(pathToFileURL(file).href))
@@ -616,8 +655,48 @@ describe('timeline import transaction', () => {
         hashMediaSource: async () => 'a'.repeat(64),
       },
       statPath: path => existsSync(path) && statSync(path).isFile() ? { kind: 'file', readable: true } : null,
-    }, () => {})).rejects.toThrow(/differ from its FCPXML asset format/)
+    }, () => {})).rejects.toThrow(/frame rate differs from its FCPXML asset format/)
     expect(existsSync(destination)).toBe(false)
+  })
+
+  it('discloses a different source rate when the cut still starts on a source frame', async () => {
+    const file = join(parent, 'Replacement.mov')
+    await writeFile(file, 'Fictional transcoded camera video')
+    await writeFile(document, mixedVideoFixture(pathToFileURL(file).href).replace('start="1/25s"', 'start="0s"'))
+    const { report, project } = await prepareTimelineProject(document, destination, seededGen(), {
+      compute: {
+        probeMedia: async () => JSON.stringify({
+          ...mediaItemTemplate(id, 'Video', 1_000_000), path_abs: file,
+          metadata: { duration_us: 1_000_000, video: { width: 640, height: 360, fps_num: 24, fps_den: 1 }, audio: null },
+        }),
+        hashMediaSource: async () => 'a'.repeat(64),
+      },
+      statPath: path => existsSync(path) && statSync(path).isFile() ? { kind: 'file', readable: true } : null,
+    }, () => {})
+    expect(report.mediaChanges).toMatchObject([{ kind: 'video-rate', detail: expect.stringContaining('24/1 fps') }])
+    expect(rootComposition(project).tracks[0]!.layers[0]).toMatchObject({ t_start_us: 0, t_end_us: 100000 })
+  })
+
+  it('reports usable video and audio format differences without changing placement or trims', async () => {
+    await writeFile(media, 'Fictional video with transcoded audio')
+    const run = setup()
+    const probe = JSON.parse(await run.probeMedia())
+    probe.metadata.video.width = 640
+    probe.metadata.video.height = 360
+    probe.metadata.audio.channels = 1
+    probe.metadata.audio.sample_rate = 44100
+    run.probeMedia.mockResolvedValue(JSON.stringify(probe))
+    const { project, report } = await run.prepareReview()
+    expect(report.mediaChanges).toMatchObject([
+      { kind: 'video-size', assetRef: 'take', placements: 2, detail: expect.stringContaining('640 × 360') },
+      { kind: 'audio-format', assetRef: 'take', placements: 2, detail: expect.stringContaining('44100 Hz') },
+    ])
+    const clips = rootComposition(project).tracks.flatMap(track => track.layers)
+    const video = clips.filter(layer => layer.params.kind === 'VideoClip')
+    expect(video.map(layer => [layer.t_start_us, layer.t_end_us])).toEqual([[0, 100100], [133467, 200200]])
+    expect(sourceIn(video[0]!.params as Extract<typeof video[0]['params'], { kind: 'VideoClip' }>)).toEqual({ num: 200200, den: 3 })
+    expect(report.resampledAudioClips).toBe(2)
+    expect(() => validate(project)).not.toThrow()
   })
 
   it('preflights missing media before probing or creating any project folder', async () => {
@@ -662,13 +741,13 @@ describe('timeline import transaction', () => {
     await writeFile(document, xml)
     const { report } = await setup().prepareReview()
     const notes = report.compatibilityItems.flatMap(item => item.notes).join('\n')
-    expect(notes).toMatch(/source identifiers/)
+    expect(notes).toMatch(/source metadata are not copied/)
     expect(notes).toContain('Source asset UID is not retained')
     expect(notes).toContain('Source media signature is not retained')
     expect(notes).toMatch(/copy assets = false/)
     expect(notes).toMatch(/Named gap/)
     expect(notes).toMatch(/Disabled transform/)
-    expect(notes).toMatch(/point markers/)
+    expect(notes).toMatch(/becomes a point marker/)
     expect(notes).toMatch(/Audio start quantized to the 48 kHz sample grid: -?\d+\.\d+ µs/)
   })
 
@@ -769,11 +848,16 @@ describe('Illustrated Story still-image import transaction', () => {
       const document = join(folder, 'Illustrated Story.fcpxml')
       const narration = join(folder, 'Narration.wav')
       const image = join(folder, 'Mouth A.png')
-      await writeFile(document, illustratedStoryFixture(pathToFileURL(narration).href, pathToFileURL(image).href))
+      const xml = illustratedStoryFixture(pathToFileURL(narration).href, pathToFileURL(image).href)
+        .replace('lane="-1" offset="0s" start="0s" duration="120/60s"',
+          'lane="-1" offset="1/48000s" start="0s" duration="95998/48000s"')
+        .replace('duration="60/60s"/>', 'duration="60/60s"><marker start="1/60s" value="Expression"/></video>')
+      await writeFile(document, xml)
       await writeFile(narration, 'synthetic mono-audio file')
       await writeFile(image, 'synthetic still-image file')
+      const imagePath = await realpath(image)
       const probeMedia = vi.fn(async (filepath: string) => {
-        const isImage = filepath === image
+        const isImage = filepath === imagePath
         const id = isImage ? '00000000-0000-0000-0000-0000000000a1' : '00000000-0000-0000-0000-0000000000a2'
         return JSON.stringify({
           ...mediaItemTemplate(id, isImage ? 'Image' : 'Audio', isImage ? null : 2_000_000),
@@ -788,7 +872,7 @@ describe('Illustrated Story still-image import transaction', () => {
       const { project, report } = await prepareTimelineProject(
         document, join(folder, 'Imported project'), seededGen(),
         {
-          compute: { probeMedia, hashMediaSource: async (filepath: string) => filepath === image ? 'a'.repeat(64) : 'b'.repeat(64) },
+          compute: { probeMedia, hashMediaSource: async (filepath: string) => filepath === imagePath ? 'a'.repeat(64) : 'b'.repeat(64) },
           statPath: (filepath) => existsSync(filepath) && statSync(filepath).isFile() ? { kind: 'file', readable: true } : null,
         },
         () => {},
@@ -803,7 +887,8 @@ describe('Illustrated Story still-image import transaction', () => {
         scale_x: { mode: 'Static', value: 240 / 130 }, scale_y: { mode: 'Static', value: 240 / 130 },
       } } })
       expect(report.compatibilityItems.some(item => item.notes.some(note => note.includes('Still image uses fit')))).toBe(true)
-      expect(audio[0]).toMatchObject({ t_start_us: 0, t_end_us: 2000000 })
+      expect(audio[0]).toMatchObject({ t_start_us: 21, t_end_us: 1999979 })
+      expect(root.markers).toMatchObject([{ t_us: 516667, label: 'Expression', anchor: null }])
       expect(() => validate(project)).not.toThrow()
     } finally {
       await rm(folder, { recursive: true, force: true })

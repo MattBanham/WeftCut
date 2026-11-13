@@ -42,8 +42,9 @@ import { tasteView } from '../taste/view'
 import { AuditStore } from '../lint/audits'
 import type { WorkspaceStore } from '../workspace'
 import { ExportJobError } from '../exportJobs'
-import { listTimelineSequences, prepareTimelineProject } from './timeline-import/project'
-import type { TimelineImportPreview, TimelineProjectDestination } from '../../shared/timelineImport'
+import { TimelineEditFailure } from './timeline-import/fcpxml'
+import { listTimelineSequences, prepareTimelineProject, TimelineMediaFailure } from './timeline-import/project'
+import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineProjectDestination } from '../../shared/timelineImport'
 import { validateProjectName } from '../../shared/newProject'
 import { WorkspaceFailure } from '../../shared/workspaceErrors'
 
@@ -953,8 +954,20 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           if (quitting || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
         }
         const media = startup ? { ...hybridDeps, compute: deps.timelineReviewCompute ?? deps.compute } : hybridDeps
-        const preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
-          args.relinkDirectory, args.sequenceIndex, startup ? undefined : original)
+        let preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
+        try {
+          preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
+            args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true)
+        } catch (error) {
+          assertCurrent()
+          if (error instanceof TimelineEditFailure) {
+            return { kind: 'edit-blocked', issues: error.issues, canOmitEffects: error.canOmitEffects } satisfies TimelineEditBlocked
+          }
+          if (error instanceof TimelineMediaFailure) {
+            return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder } satisfies TimelineMediaBlocked
+          }
+          throw error
+        }
         assertCurrent()
         if (actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
         timelineReview = { preparation, assertCurrent, original, startup }
@@ -972,8 +985,14 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         deps.exportJobs?.assertWritable()
         const review = timelineReview
         if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
-        const { preparation: { project }, assertCurrent, original, startup } = review
+        const { preparation: { project, report }, assertCurrent, original, startup } = review
         assertCurrent()
+        if (report.mediaChanges.length && args.acceptMediaChanges !== true) {
+          throw new Error('Review and accept the media differences before importing')
+        }
+        if (report.omittedEffects.length && args.acceptOmittedEffects !== true) {
+          throw new Error('Review and accept the omitted effects before importing')
+        }
         let destination: TimelineProjectDestination | undefined
         if (startup) {
           const input = args.destination as Partial<TimelineProjectDestination> | undefined

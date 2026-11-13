@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, opendir, realpath } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
@@ -14,17 +16,24 @@ import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/m
 import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
-import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml, type FcpxmlSequenceChoice } from './fcpxml'
+import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml } from './fcpxml'
 import type { TimelineClip, TimelineSource } from './timeline'
-import type { TimelineImportReport, TimelineCompatibilityItem } from '../../../shared/timelineImport'
+import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
+import { originalMediaPath } from './mediaPath'
+
+export class TimelineMediaFailure extends Error {
+  constructor(readonly issues: TimelineMediaIssue[], readonly canSearchFolder = false) {
+    super(issues.map(issue => issue.detail).join('\n'))
+  }
+}
 
 type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'>
 
 async function readTimelineDocument(path: string, deps: MediaDeps): Promise<string> {
-  const facts = deps.statPath(path)
-  if (facts?.kind !== 'file' || !facts.readable) throw new Error('The selected timeline file is missing or unreadable')
   const before = await lstat(path).catch(() => null)
   if (!before?.isFile() || before.isSymbolicLink()) throw new Error('Choose a regular timeline file, rather than a symlink or device')
+  const facts = deps.statPath(path)
+  if (facts?.kind !== 'file' || !facts.readable) throw new Error('The selected timeline file is missing or unreadable')
   // Nonblocking open prevents a swapped-in FIFO from hanging the editor.
   const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
   try {
@@ -66,9 +75,12 @@ async function resolveTimelineInput(path: unknown): Promise<{ inputFile: string;
   return { inputFile, extension }
 }
 
-export async function listTimelineSequences(path: unknown, deps: MediaDeps): Promise<FcpxmlSequenceChoice[]> {
+const documentId = (xml: string) => createHash('sha256').update(xml).digest('hex')
+
+export async function listTimelineSequences(path: unknown, deps: MediaDeps): Promise<TimelineSequenceList> {
   const { inputFile } = await resolveTimelineInput(path)
-  return listFcpxmlSequences(await readTimelineDocument(inputFile, deps))
+  const xml = await readTimelineDocument(inputFile, deps)
+  return { documentId: documentId(xml), choices: listFcpxmlSequences(xml) }
 }
 
 async function findRelinkCandidates(directory: string, wanted: ReadonlySet<string>): Promise<Map<string, string>> {
@@ -92,7 +104,7 @@ async function findRelinkCandidates(directory: string, wanted: ReadonlySet<strin
 
 export async function prepareTimelineProject(
   path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
-  relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project,
+  relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false,
 ): Promise<{ project: Project; report: TimelineImportReport }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
@@ -100,7 +112,10 @@ export async function prepareTimelineProject(
     throw new Error('Choose a valid FCPXML sequence index')
   }
   const document = await readTimelineDocument(inputFile, deps)
-  const timeline = parseFcpxml(document, sequenceIndex as number | undefined)
+  if (expectedDocument !== undefined && expectedDocument !== documentId(document)) {
+    throw new Error('The FCPXML file changed since you opened it. Choose it again to review the updated timeline.')
+  }
+  const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects)
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(inputFile, extname(inputFile)))
   rootComposition(initial).fps = timeline.fps
@@ -129,79 +144,137 @@ export async function prepareTimelineProject(
     }
   }
   const originals = new Map(timeline.clips.map(({ asset }) => [asset.path, asset]))
+  const references = new Map(timeline.clips.map(({ asset }) => [asset.ref, asset.path]))
+  const counts = new Map<string, number>()
+  for (const { asset } of timeline.clips) counts.set(asset.path, (counts.get(asset.path) ?? 0) + 1)
+  const mediaIssue = (asset: TimelineSource, detail: string): TimelineMediaIssue => ({
+    assetRef: asset.ref, filename: asset.filename, sourcePath: asset.path, placements: counts.get(asset.path)!, detail,
+  })
   if (originals.size > FCPXML_LIMITS.mediaFiles) {
     throw new Error('This sequence references too many original files. Export the sequence in smaller parts')
   }
+  const selected = new Map<string, string>()
+  if (replacements !== undefined) {
+    if (!Array.isArray(replacements) || replacements.length > originals.size) {
+      throw new Error('Choose at most one replacement per source file')
+    }
+    for (const choice of replacements) {
+      if (!choice || typeof choice.assetRef !== 'string' || typeof choice.path !== 'string' || !isAbsolute(choice.path)) {
+        throw new Error('Choose a local replacement file for each source')
+      }
+      const original = references.get(choice.assetRef)
+      if (original === undefined || selected.has(original)) {
+        throw new Error('The replacement does not identify a unique source in this sequence')
+      }
+      // Check the spelling before any filesystem access, just as for URLs in XML.
+      selected.set(original, originalMediaPath(pathToFileURL(choice.path).href).path)
+    }
+  }
+
+  async function checkFile(path: string): Promise<string> {
+    const info = await lstat(path)
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error('Choose a regular file')
+    const actual = await realpath(path)
+    originalMediaPath(pathToFileURL(actual).href)
+    return importer.checkPath(actual)
+  }
+
   const resolved = new Map<string, string>()
   const offline: TimelineSource[] = []
+  const substitutions = new Map<string, string>()
+  const missing: TimelineMediaIssue[] = []
   for (const asset of originals.values()) {
-    if (asset.local) {
+    const replacement = selected.get(asset.path)
+    if (replacement !== undefined) {
       try {
-        const source = await lstat(asset.path)
-        if (!source.isFile() || source.isSymbolicLink()) throw new Error('Not a regular file')
-        resolved.set(asset.path, importer.checkPath(asset.path))
-        continue
+        const path = await checkFile(replacement)
+        resolved.set(asset.path, path)
+        substitutions.set(asset.path, path)
+      } catch {
+        missing.push(mediaIssue(asset, 'The chosen replacement is missing or unreadable. Choose another local file.'))
       }
-      catch { /* Report it with the other missing originals. */ }
+    } else if (asset.local) {
+      try { resolved.set(asset.path, await checkFile(asset.path)) }
+      catch { offline.push(asset) }
+    } else {
+      offline.push(asset)
     }
-    offline.push(asset)
   }
   const candidates = relinkRoot && offline.length
     ? await findRelinkCandidates(relinkRoot, new Set(offline.map(asset => asset.filename)))
     : new Map<string, string>()
-  const missing: string[] = []
-  const substitutions = new Map<string, string>()
   for (const asset of offline) {
     const candidate = candidates.get(asset.filename)
     if (candidate) {
       try {
-        const path = importer.checkPath(candidate)
+        const path = await checkFile(candidate)
         resolved.set(asset.path, path)
         substitutions.set(asset.path, path)
         continue
       } catch { /* Leave this asset unresolved. */ }
     }
-    missing.push(asset.ref + ' (' + asset.path + (asset.local ? '' : ', path is from another platform') + ')')
+    missing.push(mediaIssue(asset, 'Missing or unreadable original media: ' + asset.path +
+      (asset.local ? '' : ' (path is from another platform)') + '. Choose the original file or look for it in a folder.'))
   }
-  if (substitutions.size) {
-    const claimed = new Map<string, string>()
-    for (const [original, actual] of resolved) {
-      const key = deps.fileKey?.(actual) ?? deps.realPath?.(actual) ?? actual
-      const previous = claimed.get(key)
-      if (previous !== undefined && (substitutions.has(original) || substitutions.has(previous))) {
-        throw new Error('Ambiguous media relink: ' + previous + ' and ' + original + ' resolve to ' + actual + '. Choose distinct originals and review again')
+  const claimed = new Map<string, string>()
+  const conflicts = new Map<string, TimelineMediaIssue>()
+  for (const [original, actual] of resolved) {
+    const key = deps.fileKey?.(actual) ?? deps.realPath?.(actual) ?? actual
+    const previous = claimed.get(key)
+    if (previous !== undefined && (substitutions.has(original) || substitutions.has(previous))) {
+      for (const path of [previous, original]) {
+        conflicts.set(path, mediaIssue(originals.get(path)!, 'Ambiguous media relink: two sources point to ' +
+          actual + '. Choose distinct originals.'))
       }
-      claimed.set(key, original)
     }
+    claimed.set(key, previous ?? original)
   }
-  if (missing.length) {
-    throw new Error(`Missing or unreadable original media: ${missing.join(', ')}. Choose a folder containing the original filenames, or relink in the source editor`)
-  }
-  for (const clip of timeline.clips) {
-    const replacement = substitutions.get(clip.asset.path)
-    if (replacement) clip.asset.path = replacement
-  }
-  const paths = new Map(timeline.clips.map((clip) => [clip.asset.path, clip.asset.ref]))
-  const relinkedMedia = [...substitutions].map(([from, to]) => ({ from, to }))
+  if (conflicts.size) throw new TimelineMediaFailure([...missing, ...conflicts.values()], offline.length > 0)
 
+  const relinkedMedia = [...substitutions].filter(([from, to]) => from !== to).map(([from, to]) => ({ from, to }))
   const mediaIds = new Map<string, string>()
-  for (const [mediaPath, ref] of paths) {
+  const failed: TimelineMediaIssue[] = []
+  for (const [original, mediaPath] of resolved) {
     assertCurrent()
+    const asset = originals.get(original)!
     try {
       const result = await importer.ensureImported(mediaPath)
       if (result.disposition === 'relinked' && existing?.media_pool[result.mediaId]) {
         throw new Error('An existing pool item needs repair. Relink it through the media pool before reviewing this timeline')
       }
-      mediaIds.set(mediaPath, result.mediaId)
-    }
-    catch (error) {
-      throw new Error(`Could not import asset ${ref} (${mediaPath}): ${error instanceof Error ? error.message : String(error)}`)
+      mediaIds.set(original, result.mediaId)
+    } catch (error) {
+      assertCurrent()
+      failed.push(mediaIssue(asset, 'Could not read ' + mediaPath + '. Choose another file or export a compatible copy. ' +
+        (error instanceof Error ? error.message : String(error))))
     }
   }
   assertCurrent()
   const snapshot = actor.snapshot()
   const root = rootComposition(snapshot)
   const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.path)!]!
+  const sourceEnds = new Map<TimelineClip, ExactTime>()
+  const mediaChanges = new Map<string, TimelineMediaChange>()
+  const incompatibilities = new Map<string, TimelineMediaIssue>()
+  for (const clip of timeline.clips) {
+    const item = itemOf(clip)
+    if (!item) continue
+    try {
+      const result = validateSource(clip, item)
+      sourceEnds.set(clip, result.end)
+      for (const { kind, detail } of result.changes) {
+        const issue = mediaIssue(originals.get(clip.asset.path)!, detail)
+        mediaChanges.set(JSON.stringify([clip.asset.path, kind, detail]), { ...issue, kind, sourcePath: item.path_abs })
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      const key = JSON.stringify([clip.asset.path, detail])
+      incompatibilities.set(key, mediaIssue(originals.get(clip.asset.path)!, detail))
+    }
+  }
+  if (missing.length || failed.length || incompatibilities.size) {
+    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0)
+  }
   const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0
@@ -225,11 +298,10 @@ export async function prepareTimelineProject(
   }
   const tracks = new Map(target.tracks.map((track) => [track.id, track]))
   const boundary = (frame: number) => timeUsAtFrame(frame, target.fps.num, target.fps.den)
-  const frameDuration = exactTime(1_000_000 * target.fps.den, target.fps.num)
-  const samplesPerFrame = multiplyTime(frameDuration, exactTime(AUDIO_GRID.num, 1_000_000))
+  const samplesPerUs = exactTime(AUDIO_GRID.num, 1_000_000)
   const sequenceEnd = boundary(timeline.durationFrames)
-  const sampleBoundary = (frame: number) => {
-    const sample = multiplyTime(exactTime(frame), samplesPerFrame)
+  const sampleBoundary = (time: ExactTime) => {
+    const sample = multiplyTime(time, samplesPerUs)
     const nearest = timeUsAtGridIndex(roundTime(sample), AUDIO_GRID)
     // A terminal sample boundary past the last frame would extend the project
     // by a whole frame when WeftCut fits its duration to the last clip.
@@ -250,30 +322,35 @@ export async function prepareTimelineProject(
     let approximation = false
     let converted = notes.length > 0
     const adjustment = (value: ExactTime) => (value.num / value.den).toFixed(6).replace(/\.?0+$/, '')
+    const audioStart = sampleBoundary(clip.timelineStart)
+    const audioEnd = sampleBoundary(clip.timelineEnd)
     if (clip.audioRole) {
-      for (const [label, frame] of [['start', clip.firstFrame], ['end', clip.endFrame]] as const) {
-        const delta = subtractTime(exactTime(sampleBoundary(frame)), multiplyTime(exactTime(frame), frameDuration))
+      if (audioEnd <= audioStart) {
+        throw new Error(clip.location + ': This audio clip is too short to occupy a 48 kHz sample. Extend it in the source editor and export again.')
+      }
+      for (const [label, time, snapped] of [['start', clip.timelineStart, audioStart], ['end', clip.timelineEnd, audioEnd]] as const) {
+        const delta = subtractTime(exactTime(snapped), time)
         if (delta.num !== 0) {
           notes.push('Audio ' + label + ' quantized to the 48 kHz sample grid: ' + adjustment(delta) + ' µs')
           converted = true
         }
       }
     }
-    if (clip.markers.length) {
+    if (clip.markers.length && clip.asset.stillImage) {
       converted = true
-      notes.push(clip.markers.length + ' single-frame marker(s) become editable point markers; marker duration is not retained')
+      notes.push('Still-image markers keep their timeline positions as independent markers')
     }
     if (clip.asset.stillImage) {
       converted = true
       notes.push('Still image uses ' + (clip.conform ?? 'fit') + ' spatial conform from its original dimensions to the sequence canvas')
     }
-    const sourceOut = validateSource(clip, item)
+    const sourceOut = sourceEnds.get(clip)!
     if (sourceOut !== clip.sourceOut) {
       roundedEnds++
       converted = true
       notes.push('Source out-point rounded to the probed file endpoint: ' + adjustment(subtractTime(sourceOut, clip.sourceOut)) + ' µs')
     }
-    if (clip.asset.hasVideo && !clip.asset.stillImage && item.metadata.video) {
+    if (clip.hasVideo && !clip.asset.stillImage && item.metadata.video) {
       const sourceVideo = item.metadata.video
       const rateConformed = sourceVideo.fps_num! * target.fps.den !== sourceVideo.fps_den! * target.fps.num
       const aspect = clip.asset.videoFormat
@@ -328,7 +405,7 @@ export async function prepareTimelineProject(
       status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
       notes })
     const track = tracks.get(laneIds.get(clip.lane)!)!
-    const video = clip.asset.hasVideo && !clip.asset.stillImage
+    const video = clip.hasVideo && !clip.asset.stillImage
       ? newLayer(idGen, clip, sourceOut, boundary(clip.firstFrame), boundary(clip.endFrame),
         visualAdjustments(fitVideoParams(item, target, clip), clip, target))
       : null
@@ -337,7 +414,7 @@ export async function prepareTimelineProject(
         visualAdjustments(fitVisualParams(imageOverlayParams(item.id, { width, height }) as Extract<Layer['params'], { kind: 'ImageOverlay' }>, item, target, clip), clip, target))
       : null
     const audio = clip.audioRole
-      ? newLayer(idGen, clip, sourceOut, sampleBoundary(clip.firstFrame), sampleBoundary(clip.endFrame),
+      ? newLayer(idGen, clip, sourceOut, audioStart, audioEnd,
         { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
       : null
     if (video || image) { track.layers.push((video ?? image)!); videoClips++ }
@@ -346,8 +423,9 @@ export async function prepareTimelineProject(
     for (const mark of clip.markers) {
       const { whole, fraction } = splitExact(mark.source)
       target.markers.push({
-        id: idGen(), t_us: boundary(mark.frame), end_t_us: null, label: mark.label, note: '',
-        color: DEFAULT_MARKER_COLOR, anchor: { layer: (video ?? image ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
+        id: idGen(), t_us: boundary(mark.frame), end_t_us: mark.endFrame === null ? null : boundary(mark.endFrame),
+        label: mark.label, note: '', color: DEFAULT_MARKER_COLOR,
+        anchor: image ? null : { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
       })
     }
   }
@@ -361,6 +439,7 @@ export async function prepareTimelineProject(
   validate(project)
   return { project, report: {
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
+    mediaChanges: [...mediaChanges.values()], omittedEffects: timeline.omittedEffects ?? [],
     videoClips, audioClips, markers: target.markers.length, media: Object.keys(project.media_pool).length,
     lanes, connectedClips: timeline.clips.filter((clip) => clip.lane !== 0).length, roundedEnds,
     resampledAudioClips, downmixedAudioClips,
@@ -433,18 +512,27 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start:
   // composition timeline, not a range within a zero-duration image asset.
   if (params.kind !== 'ImageOverlay') writeSourceWindow(params, clip.sourceIn, sourceOut)
   return { id: idGen(), label: clip.label ?? null, t_start_us: start, t_end_us: end,
-    enabled: true, locked: false, metadata: {}, params, effects: [] }
+    enabled: clip.enabled ?? true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(clip: TimelineClip, item: MediaItem): ExactTime {
+function validateSource(clip: TimelineClip, item: MediaItem) {
   const { video, audio, duration_us: duration } = item.metadata
-  const fail = (message: string): never => { throw new Error(`${clip.location}, source ${clip.asset.ref}: ${message}`) }
+  const fail = (message: string): never => { throw new Error(message) }
+  const changes: Pick<TimelineMediaChange, 'kind' | 'detail'>[] = []
+  const reportSize = (kind: 'still-size' | 'video-size', declared: { width: number; height: number }) => {
+    if (video!.width === declared.width && video!.height === declared.height) return
+    changes.push({ kind, detail: 'The timeline lists ' + declared.width + ' × ' + declared.height +
+      ' pixels, but this file is ' + video!.width + ' × ' + video!.height +
+      '. WeftCut can use the file’s actual size. This may change the framing.' })
+  }
+  const withEnd = (end: ExactTime) => ({ end, changes })
   const transfer = video?.color_transfer
   const primaries = video?.color_primaries
-  if ((transfer != null && transfer !== 'bt709' && transfer !== 'iec61966-2-1') ||
-      (primaries != null && primaries !== 'bt709')) {
-    fail('The original declares an unsupported color transfer or gamut (' + (transfer ?? 'unspecified transfer') +
-      ', ' + (primaries ?? 'unspecified primaries') + '). Convert it to SDR Rec. 709 before importing')
+  if (clip.hasVideo && ((transfer != null && transfer !== 'bt709' && transfer !== 'iec61966-2-1') ||
+      (primaries != null && primaries !== 'bt709'))) {
+    fail('WeftCut cannot match this file’s HDR or wide-gamut colors. The file has an unsupported color transfer or gamut (' +
+      (transfer ?? 'unspecified transfer') + ', ' + (primaries ?? 'unspecified primaries') +
+      '). Export an SDR Rec. 709 copy with the same timing, then choose it as the replacement.')
   }
   if (clip.asset.stillImage) {
     // The normal image probe may report width/height in metadata.video even
@@ -455,12 +543,10 @@ function validateSource(clip: TimelineClip, item: MediaItem): ExactTime {
     }
     if (!video?.width || !video.height || !Number.isSafeInteger(video.width) || !Number.isSafeInteger(video.height) ||
         video.width < 1 || video.height < 1) fail('The image dimensions must be known and positive')
-    if (clip.asset.imageSize && (video!.width !== clip.asset.imageSize.width || video!.height !== clip.asset.imageSize.height)) {
-      fail('The original image dimensions differ from the FCPXML asset format. Relink the matching image')
-    }
-    return clip.sourceOut
+    if (clip.asset.imageSize) reportSize('still-size', clip.asset.imageSize)
+    return withEnd(clip.sourceOut)
   }
-  if (clip.asset.hasVideo) {
+  if (clip.hasVideo) {
     if (item.kind !== 'Video' || !video || !video.width || !video.height ||
         !video.fps_num || !video.fps_den ||
         !Number.isSafeInteger(video.width) || !Number.isSafeInteger(video.height) ||
@@ -468,33 +554,48 @@ function validateSource(clip: TimelineClip, item: MediaItem): ExactTime {
       fail('The original must be decodable video with known positive dimensions and frame rate')
     }
     const v = video!
-    const sourceWidth = v.width!, sourceHeight = v.height!
     const sourceFpsNum = v.fps_num!, sourceFpsDen = v.fps_den!
     const declared = clip.asset.videoFormat
     const probeFrame = exactTime(1_000_000 * sourceFpsDen, sourceFpsNum)
     if (declared) {
-      if (sourceWidth !== declared.width || sourceHeight !== declared.height ||
-          compareTime(probeFrame, declared.frameDuration) !== 0) {
-        fail('The original dimensions or frame rate differ from its FCPXML asset format. Relink the matching media')
+      if (compareTime(probeFrame, declared.frameDuration) !== 0) {
+        if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
+          fail('The file’s frame rate differs from its FCPXML asset format, and this cut starts between its frames. Choose the original or export a replacement at the original rate.')
+        }
+        const declaredRate = divideTime(exactTime(1_000_000), declared.frameDuration)
+        changes.push({ kind: 'video-rate', detail: 'The timeline lists ' + declaredRate.num + '/' + declaredRate.den +
+          ' fps, but this file is ' + sourceFpsNum + '/' + sourceFpsDen +
+          ' fps. WeftCut will keep the cut times. The picture may repeat or skip frames.' })
       }
+      reportSize('video-size', declared)
     } else if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
       fail('The source in-point falls between frames at the probed source frame rate. Choose a source-frame boundary')
     }
-  } else if (item.kind !== 'Audio' || video) {
-    fail('The original must be an audio-only file. Relink the matching original and export again')
+  } else if ((item.kind !== 'Audio' && item.kind !== 'Video') || (!clip.asset.hasVideo && video)) {
+    fail('The file does not contain the type of audio the timeline requests. Choose the matching original.')
   }
-  if ((clip.asset.hasAudio !== undefined && Boolean(audio) !== clip.asset.hasAudio) || (clip.audioRole && audio && (
-    !audio.channels || audio.channels > 8 || !audio.sample_rate ||
+  if (clip.audioRole && (!audio?.channels || audio.channels > 8 || !audio.sample_rate)) {
+    fail('The timeline needs usable audio from this file. Choose a matching original with 1–8 audio channels.')
+  }
+  if (audio && !clip.asset.hasAudio) {
+    changes.push({ kind: 'audio-format', detail: 'This file contains audio the timeline did not request. WeftCut will leave that audio out.' })
+  }
+  if (audio && clip.audioRole && (
     (clip.asset.audioChannels !== undefined && clip.asset.audioChannels !== audio.channels) ||
-    (clip.asset.audioRate !== undefined && clip.asset.audioRate !== audio.sample_rate)))) {
-    fail('Embedded audio differs from the asset declaration. Relink the matching original and export again')
+    (clip.asset.audioRate !== undefined && clip.asset.audioRate !== audio.sample_rate)
+  )) {
+    changes.push({ kind: 'audio-format', detail: 'The file’s audio differs from the timeline description. The file has ' +
+      audio.channels + ' channel(s) at ' + audio.sample_rate + ' Hz. The timeline lists ' +
+      (clip.asset.audioChannels ?? 'an unspecified number of') + ' channel(s) and ' +
+      (clip.asset.audioRate === undefined ? 'does not specify a sample rate' : clip.asset.audioRate + ' Hz') +
+      '. WeftCut will use the audio in the file and keep the edit’s timing.' })
   }
   if (duration != null) {
     const end = exactTime(duration)
-    if (compareTime(clip.sourceOut, end) <= 0) return clip.sourceOut
+    if (compareTime(clip.sourceOut, end) <= 0) return withEnd(clip.sourceOut)
     // ffprobe reports duration to whole microseconds. At fractional rates the
     // final exclusive frame boundary can round down to this same endpoint.
-    if (roundTime(clip.sourceOut) === duration && compareTime(clip.sourceIn, end) < 0) return end
+    if (roundTime(clip.sourceOut) === duration && compareTime(clip.sourceIn, end) < 0) return withEnd(end)
   }
   return fail('The trim exceeds the probed duration of the original file. Relink the matching original or shorten the trim')
 }

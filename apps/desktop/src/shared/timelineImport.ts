@@ -7,7 +7,40 @@ export interface TimelineCompatibilityItem {
   notes: string[]
 }
 
+export interface TimelineMediaIssue {
+  assetRef: string
+  filename: string
+  sourcePath: string
+  placements: number
+  detail: string
+}
+
+export interface TimelineMediaChange extends TimelineMediaIssue {
+  kind: 'still-size' | 'video-size' | 'video-rate' | 'audio-format'
+}
+
+export interface TimelineMediaBlocked {
+  kind: 'media-blocked'
+  issues: TimelineMediaIssue[]
+  canSearchFolder: boolean
+}
+
+export interface TimelineEditBlocked {
+  kind: 'edit-blocked'
+  issues: TimelineCompatibilityItem[]
+  canOmitEffects: boolean
+}
+
+export type TimelinePreflight = TimelineImportPreview | TimelineMediaBlocked | TimelineEditBlocked
+
+export interface TimelineMediaReplacement {
+  assetRef: string
+  path: string
+}
+
 export interface TimelineImportReport {
+  mediaChanges: TimelineMediaChange[]
+  omittedEffects: TimelineCompatibilityItem[]
   name: string
   destination: string | null
   width: number
@@ -52,6 +85,11 @@ export interface TimelineImportPreview extends TimelineImportReport {
 export interface TimelineProjectDestination {
   parentFolder: string
   name: string
+}
+
+export interface TimelineSequenceList {
+  documentId: string
+  choices: TimelineSequenceChoice[]
 }
 
 export interface TimelineSequenceChoice {

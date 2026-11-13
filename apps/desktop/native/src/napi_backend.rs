@@ -448,7 +448,11 @@ impl Backend {
     /// the last project's cancelled job session or writing to its cache.
     #[napi]
     #[cfg(feature = "jobs")]
-    pub async fn inspect_timeline_media(&self, path: String, hash_only: bool) -> napi::Result<String> {
+    pub async fn inspect_timeline_media(
+        &self,
+        path: String,
+        hash_only: bool,
+    ) -> napi::Result<String> {
         let result: anyhow::Result<String> = async {
             let permit = crate::resources::import_preparation().await?;
             let path = std::path::PathBuf::from(path);

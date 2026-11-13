@@ -18,8 +18,12 @@ export interface TimelineSource extends OriginalMediaPath {
 
 export interface TimelineClip {
   label?: string
+  enabled?: boolean
+  hasVideo: boolean
   asset: TimelineSource
   lane: number
+  timelineStart: ExactTime
+  timelineEnd: ExactTime
   firstFrame: number
   endFrame: number
   sourceIn: ExactTime
@@ -29,7 +33,7 @@ export interface TimelineClip {
   volumeDb?: number
   opacity?: number
   staticTransform?: { xPercent: number; yPercent: number; scaleX: number; scaleY: number; rotation: number }
-  markers: { label: string; frame: number; source: ExactTime }[]
+  markers: { label: string; frame: number; endFrame: number | null; source: ExactTime }[]
   location: string
   notes: string[]
 }
@@ -41,6 +45,7 @@ export interface ImportTimeline {
   durationFrames: number
   clips: TimelineClip[]
   notices: TimelineCompatibilityItem[]
+  omittedEffects?: TimelineCompatibilityItem[]
   normalizedTimecode?: boolean
   dropFrameTimecode?: boolean
   namedFormatDefaults?: boolean

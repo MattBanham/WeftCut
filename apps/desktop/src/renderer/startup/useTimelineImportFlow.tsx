@@ -1,5 +1,5 @@
 import { open as openDialog } from "@/bridge/dialog";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AppDialog } from "../components/AppDialog";
 import { AppSelect } from "../components/AppSelect";
@@ -10,7 +10,7 @@ import {
   projectImportTimeline,
   projectPreviewTimeline,
 } from "../ipc";
-import type { TimelineImportPreview, TimelineSequenceChoice } from "../../shared/timelineImport";
+import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineMediaReplacement, TimelineSequenceChoice } from "../../shared/timelineImport";
 import { fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 
@@ -21,95 +21,87 @@ export function useTimelineImportFlow(onNewProject?: (preview: TimelineImportPre
   const [sourcePicker, setSourcePicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
-  const [relinkRequest, setRelinkRequest] = useState<{ source: string; sequenceIndex?: number | undefined } | null>(null);
-  const [sequenceImport, setSequenceImport] = useState<{ source: string; choices: TimelineSequenceChoice[] } | null>(null);
+  const [blocked, setBlocked] = useState<TimelineMediaBlocked | TimelineEditBlocked | null>(null);
+  const [request, setRequest] = useState<ReviewRequest | null>(null);
+  const [sequenceImport, setSequenceImport] = useState<{ source: string; documentId: string; choices: TimelineSequenceChoice[] } | null>(null);
 
   const begin = () => {
-    if (!busy && !error && sequenceImport === null && timelinePreview === null) setSourcePicker(true);
+    if (!busy && !error && !blocked && !sequenceImport && !timelinePreview) setSourcePicker(true);
   };
 
-  const chooseSource = useCallback(async (bundle: boolean) => {
+  function reportError(cause: unknown) {
+    setError(t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) }));
+  }
+
+  async function review(next: ReviewRequest) {
+    setRequest(next);
+    const result = await projectPreviewTimeline(next.source, next.folder, next.index, newProject, next.replacements, next.documentId, next.omitEffects);
+    if ("kind" in result) setBlocked(result);
+    else setTimelinePreview(result);
+  }
+
+  async function chooseSource(bundle: boolean) {
     if (busy) return;
     setSourcePicker(false);
     setBusy(true);
-    setError(null);
-
-    setRelinkRequest(null);
     try {
       const source = await openDialog({
         title: t("startup.import_timeline_title"),
         ...(bundle ? { directory: true, treatPackageAsDirectory: true } : { filters: [{ name: "FCPXML", extensions: ["fcpxml"] }] }),
       });
       if (typeof source !== "string") return;
-      {
-        const choices = await projectListTimelineSequences(source);
-        if (choices.length > 1) {
-          setSequenceImport({ source, choices });
-          return;
-        }
-      }
-      const sequenceIndex = 0;
+      const { choices, documentId } = await projectListTimelineSequences(source);
+      if (choices.length > 1) setSequenceImport({ source, choices, documentId });
+      else await review({ source, documentId, index: 0, replacements: [] });
+    } catch (cause) { reportError(cause); }
+    finally { setBusy(false); }
+  }
 
-      {
-        try { setTimelinePreview(await projectPreviewTimeline(source, undefined, sequenceIndex, newProject)); }
-        catch (cause) {
-          if (cleanIpcDetail(cause).includes("Missing or unreadable original media")) {
-            setRelinkRequest({ source, sequenceIndex });
-          }
-          throw cause;
-        }
-      }
-    } catch (cause) {
-      const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
-      setError(message);
-    } finally {
-      setBusy(false);
-    }
-  }, [busy, t, newProject]);
-
-  const relink = useCallback(async () => {
-    if (!relinkRequest || busy) return;
-    const folder = await openDialog({ title: t("startup.import_choose_relink_folder"), directory: true });
-    if (typeof folder !== "string") return;
-    setBusy(true);
-    setError(null);
-
-    try {
-      const preview = await projectPreviewTimeline(
-        relinkRequest.source, folder, relinkRequest.sequenceIndex, newProject,
-      );
-
-      setTimelinePreview(preview);
-      setRelinkRequest(null);
-    } catch (cause) {
-      const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
-      setError(message);
-    } finally { setBusy(false); }
-  }, [relinkRequest, busy, t, newProject]);
-
-  const chooseSequence = useCallback(async (index: number) => {
+  async function chooseSequence(index: number) {
     if (!sequenceImport || busy) return;
-    const { source } = sequenceImport;
+    const { source, documentId } = sequenceImport;
     setSequenceImport(null);
     setBusy(true);
-    setError(null);
+    try { await review({ source, documentId, index, replacements: [] }); }
+    catch (cause) { reportError(cause); }
+    finally { setBusy(false); }
+  }
 
+  async function relink(assetRef?: string) {
+    if (!request || busy) return;
+    setBusy(true);
     try {
+      const path = await openDialog({
+        title: t(assetRef ? "startup.import_choose_replacement" : "startup.import_choose_relink_folder"),
+        directory: assetRef === undefined,
+      });
+      if (typeof path !== "string") return;
+      const next = assetRef === undefined
+        ? { ...request, folder: path }
+        : { ...request, replacements: [...request.replacements.filter(choice => choice.assetRef !== assetRef), { assetRef, path }] };
+      setBlocked(null);
+      setTimelinePreview(null);
+      await review(next);
+    } catch (cause) { reportError(cause); }
+    finally { setBusy(false); }
+  }
 
-      try {
-        const preview = await projectPreviewTimeline(source, undefined, index, newProject);
-        setTimelinePreview(preview);
-      } catch (cause) {
-        if (cleanIpcDetail(cause).includes("Missing or unreadable original media")) {
-          setRelinkRequest({ source, sequenceIndex: index });
-        }
-        throw cause;
-      }
-    } catch (cause) {
-      const message = t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) });
-      setError(message);
-    } finally { setBusy(false); }
-  }, [sequenceImport, busy, t, newProject]);
+  async function reviewWithoutEffects() {
+    if (!request || busy) return;
+    setBusy(true);
+    setBlocked(null);
+    try { await review({ ...request, omitEffects: true }); }
+    catch (cause) { reportError(cause); }
+    finally { setBusy(false); }
+  }
+
+  function cancel() {
+    if (timelinePreview) void projectDiscardTimelinePreview(timelinePreview.id).catch(() => {});
+    setTimelinePreview(null);
+    setBlocked(null);
+    setRequest(null);
+    setError(null);
+  }
 
   const dialogs = (
     <>
@@ -120,11 +112,43 @@ export function useTimelineImportFlow(onNewProject?: (preview: TimelineImportPre
         </AppDialog>
       )}
       {error && (
-        <AppDialog title={t("startup.import_timeline_title")} onClose={() => setError(null)} panelClassName="new-project-panel">
+        <AppDialog title={t("startup.import_timeline_title")} onClose={cancel} panelClassName="new-project-panel">
           <p className="new-project-error whitespace-pre-wrap break-words" role="alert">{error}</p>
           <footer className="new-project-actions">
-            <Button onClick={() => setError(null)}>{t("new_project.cancel")}</Button>
-            {relinkRequest && <Button onClick={() => void relink()} disabled={busy}>
+            <Button onClick={cancel}>{t("new_project.cancel")}</Button>
+          </footer>
+        </AppDialog>
+      )}
+      {blocked?.kind === "edit-blocked" && (
+        <AppDialog title={t("startup.import_edit_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
+          {blocked.issues.map((issue, index) => (
+            <div key={index} className="new-project-row">
+              <strong>{issue.label}</strong>
+              <p role="alert">{issue.notes.join(" ")}</p>
+            </div>
+          ))}
+          <footer className="new-project-actions">
+            <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
+            {blocked.canOmitEffects && <Button onClick={() => void reviewWithoutEffects()} disabled={busy}>
+              {t("startup.import_review_without_effects")}
+            </Button>}
+          </footer>
+        </AppDialog>
+      )}
+      {blocked?.kind === "media-blocked" && (
+        <AppDialog title={t("startup.import_media_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
+          {blocked.issues.map((issue, index) => (
+            <div key={index} className="new-project-row">
+              <strong title={issue.sourcePath}>{issue.filename}</strong>
+              <p className="new-project-error break-words" role="alert">{issue.detail}</p>
+              <Button onClick={() => void relink(issue.assetRef)} disabled={busy}>
+                {t("startup.import_choose_replacement")}
+              </Button>
+            </div>
+          ))}
+          <footer className="new-project-actions">
+            <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
+            {blocked.canSearchFolder && <Button onClick={() => void relink()} disabled={busy}>
               {t("startup.import_choose_relink_folder")}
             </Button>}
           </footer>
@@ -141,20 +165,28 @@ export function useTimelineImportFlow(onNewProject?: (preview: TimelineImportPre
       {timelinePreview && (
         <TimelineImportReview
           preview={timelinePreview}
-          onCancel={() => {
-            void projectDiscardTimelinePreview(timelinePreview.id).catch(() => {});
-            setTimelinePreview(null);
-          }}
-          onImport={async (canvas) => {
+          busyRelinking={busy}
+          onRelink={relink}
+          onCancel={cancel}
+          onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects) => {
             if (onNewProject) onNewProject(timelinePreview);
-            else await projectImportTimeline(timelinePreview.id, canvas);
+            else await projectImportTimeline(timelinePreview.id, canvas, undefined, acceptMediaChanges, acceptOmittedEffects);
             setTimelinePreview(null);
           }}
         />
       )}
     </>
   );
-  return { begin, relink, canRelink: relinkRequest !== null, busy, dialogs };
+  return { begin, busy, dialogs };
+}
+
+interface ReviewRequest {
+  source: string;
+  documentId: string;
+  index: number;
+  folder?: string;
+  replacements: TimelineMediaReplacement[];
+  omitEffects?: boolean;
 }
 
 function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
@@ -188,15 +220,19 @@ function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
   );
 }
 
-function TimelineImportReview({ preview, onImport, onCancel }: {
+function TimelineImportReview({ preview, onImport, onCancel, onRelink, busyRelinking }: {
   preview: TimelineImportPreview;
-  onImport: (canvas: 'fit' | 'fill' | 'original') => Promise<void>;
+  onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean) => Promise<void>;
+  onRelink: (assetRef: string) => Promise<void>;
+  busyRelinking: boolean;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [canvas, setCanvas] = useState<'fit' | 'fill' | 'original'>('fit');
+  const [acceptMediaChanges, setAcceptMediaChanges] = useState(false);
+  const [acceptOmittedEffects, setAcceptOmittedEffects] = useState(false);
   const current = preview.current;
   const fpsMismatch = current != null &&
     current.fps.num * preview.fps.den !== preview.fps.num * current.fps.den;
@@ -205,7 +241,7 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
 
   async function submit() {
     setBusy(true);
-    try { await onImport(canvas); }
+    try { await onImport(canvas, acceptMediaChanges, acceptOmittedEffects); }
     catch (cause) {
       setError(cleanIpcDetail(cause));
       setBusy(false);
@@ -213,7 +249,7 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
   }
 
   return (
-    <AppDialog title={t("startup.timeline_review")} onClose={busy ? undefined : onCancel} panelClassName="new-project-panel">
+    <AppDialog title={t("startup.timeline_review")} onClose={busy || busyRelinking ? undefined : onCancel} panelClassName="new-project-panel">
       <p>{preview.name}</p>
       {preview.destination && <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>}
       <p>{t("startup.timeline_review_format", {
@@ -269,6 +305,36 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
       {preview.normalizedTimecode && <p role="status">{t("startup.timeline_review_timecode_origin")}</p>}
       {preview.dropFrameTimecode && <p role="status">{t("startup.timeline_review_timecode_df")}</p>}
       {preview.bundleSource && <p role="status">{t("startup.timeline_review_bundle")}</p>}
+      {preview.mediaChanges.length > 0 && (
+        <section aria-label={t("startup.import_media_differences")}>
+          <p><strong>{t("startup.import_media_differences")}</strong></p>
+          {preview.mediaChanges.map((issue, index) => (
+            <div key={index} className="new-project-row">
+              <strong title={issue.sourcePath}>{issue.filename}</strong>
+              <p>{issue.detail} {t("startup.import_media_placements", { count: issue.placements })}</p>
+              <Button disabled={busy || busyRelinking} onClick={() => void onRelink(issue.assetRef)}>
+                {t("startup.import_choose_replacement")}
+              </Button>
+            </div>
+          ))}
+          <label>
+            <input type="checkbox" checked={acceptMediaChanges} disabled={busy || busyRelinking}
+              onChange={(event) => setAcceptMediaChanges(event.target.checked)} />
+            {" "}{t("startup.import_accept_media_differences")}
+          </label>
+        </section>
+      )}
+      {preview.omittedEffects.length > 0 && (
+        <section aria-label={t("startup.import_effects_omitted")}>
+          <p><strong>{t("startup.import_effects_omitted")}</strong></p>
+          {preview.omittedEffects.map((effect, index) => <p key={index}>{effect.label} · {effect.location}</p>)}
+          <label>
+            <input type="checkbox" checked={acceptOmittedEffects} disabled={busy || busyRelinking}
+              onChange={(event) => setAcceptOmittedEffects(event.target.checked)} />
+            {" "}{t("startup.import_accept_omitted_effects")}
+          </label>
+        </section>
+      )}
       {preview.relinkedMedia.length > 0 && (
         <section aria-label={t("startup.import_relinked_media")}>
           <p><strong>{t("startup.import_relinked_media")}</strong></p>
@@ -311,8 +377,8 @@ function TimelineImportReview({ preview, onImport, onCancel }: {
       {preview.downmixedAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_downmix", { count: preview.downmixedAudioClips })}</p>}
       {error && <p className="new-project-error" role="alert">{error}</p>}
       <footer className="new-project-actions">
-        <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
-        <Button size="lg" onClick={submit} disabled={busy || error !== null || fpsMismatch}>
+        <Button size="lg" onClick={onCancel} disabled={busy || busyRelinking}>{t("new_project.cancel")}</Button>
+        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (preview.mediaChanges.length > 0 && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects)}>
           {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
         </Button>
       </footer>

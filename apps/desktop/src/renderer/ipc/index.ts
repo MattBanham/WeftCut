@@ -1,5 +1,5 @@
 import { parseManifestIsland } from '../../shared/motifs/catalog';
-import type { TimelineImportPreview, TimelineProjectDestination, TimelineSequenceChoice } from '../../shared/timelineImport'
+import type { TimelineMediaReplacement, TimelinePreflight, TimelineProjectDestination, TimelineSequenceList } from '../../shared/timelineImport'
 import type { TimingFields } from '../../shared/timeMapping'
 import type { CropRect } from '../../shared/crop';
 // Renderer-side IPC surface: typed `invoke` wrappers plus the wire shapes the
@@ -901,14 +901,15 @@ export async function projectSaveAs(path: string): Promise<void> {
   return invoke<void>("project_save_as", { path });
 }
 
-export function projectListTimelineSequences(path: string): Promise<TimelineSequenceChoice[]> {
-  return invoke<TimelineSequenceChoice[]>("project_list_timeline_sequences", { path });
+export function projectListTimelineSequences(path: string): Promise<TimelineSequenceList> {
+  return invoke<TimelineSequenceList>("project_list_timeline_sequences", { path });
 }
 
 export function projectPreviewTimeline(
   path: string, relinkDirectory?: string, sequenceIndex?: number, newProject = false,
-): Promise<TimelineImportPreview> {
-  return invoke<TimelineImportPreview>("project_preview_timeline", { path, relinkDirectory, sequenceIndex, newProject });
+  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false,
+): Promise<TimelinePreflight> {
+  return invoke<TimelinePreflight>("project_preview_timeline", { path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {
@@ -917,8 +918,9 @@ export function projectDiscardTimelinePreview(id: string): Promise<null> {
 
 export function projectImportTimeline(
   id: string, canvas: 'fit' | 'fill' | 'original' = 'fit', destination?: TimelineProjectDestination,
+  acceptMediaChanges = false, acceptOmittedEffects = false,
 ): Promise<string> {
-  return invoke<string>("project_import_timeline", { id, canvas, destination });
+  return invoke<string>("project_import_timeline", { id, canvas, destination, acceptMediaChanges, acceptOmittedEffects });
 }
 
 export async function projectOpen(path: string): Promise<void> {

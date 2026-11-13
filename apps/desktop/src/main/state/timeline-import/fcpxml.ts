@@ -2,7 +2,7 @@ import { SaxesParser } from 'saxes'
 import { canvasSizeError, FPS_OPTIONS } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { TimeMappingError } from '../../../shared/timeMapping'
-import { addTime, compareTime, divideTime, exactTime, multiplyTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
+import { addTime, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
 import type { TimelineCompatibilityItem } from '../../../shared/timelineImport'
 import type { ImportTimeline, TimelineClip, TimelineSource } from './timeline'
 import { originalMediaPath, type OriginalMediaPath } from './mediaPath'
@@ -285,8 +285,11 @@ function collectProjects(root: Element): { project: Element; event: string | nul
   }
   const projects: { project: Element; event: string | null }[] = []
   function fromEvent(event: Element) {
-    check(event, ['name', 'uid'], ['project'])
-    for (const project of event.children) projects.push({ project, event: event.attrs.name ?? null })
+    check(event, ['name', 'uid'], ['project', 'collection-folder', 'keyword-collection', 'smart-collection',
+      'clip', 'audition', 'mc-clip', 'ref-clip', 'sync-clip', 'asset-clip'])
+    for (const project of event.children.filter(child => child.tag === 'project')) {
+      projects.push({ project, event: event.attrs.name ?? null })
+    }
   }
   for (const entry of root.children) {
     if (entry.tag === 'project') projects.push({ project: entry, event: null })
@@ -307,15 +310,21 @@ export function listFcpxmlSequences(xml: string): FcpxmlSequenceChoice[] {
   }))
 }
 
-export function parseFcpxml(xml: string, sequenceIndex?: number): ImportTimeline {
-  try { return parseDocument(readXml(xml), sequenceIndex) }
+export class TimelineEditFailure extends Error {
+  constructor(readonly issues: TimelineCompatibilityItem[], readonly canOmitEffects: boolean) {
+    super(issues.flatMap(issue => issue.notes).join('\n'))
+  }
+}
+
+export function parseFcpxml(xml: string, sequenceIndex?: number, omitEffects = false): ImportTimeline {
+  try { return parseDocument(readXml(xml), sequenceIndex, omitEffects) }
   catch (error) {
     if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
     throw error
   }
 }
 
-function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
+function parseDocument(root: Element, sequenceIndex: number | undefined, omitEffects: boolean): ImportTimeline {
   const choices = collectProjects(root)
   if (sequenceIndex === undefined && choices.length > 1) {
     fail(root, `Found ${choices.length} project sequences. Choose which one to import`)
@@ -329,24 +338,54 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
   check(project, ['name', 'uid', 'modDate'], ['sequence'])
   const seq = one(project, 'sequence')
   check(seq, ['format', 'tcStart', 'tcFormat', 'duration', 'audioLayout', 'audioRate'], ['spine'])
-  const unsupported: string[] = []
-  const supportedStory = new Set(['spine', 'gap', 'asset-clip', 'video', 'marker',
+  const unsupported: TimelineCompatibilityItem[] = []
+  const omittedEffects: TimelineCompatibilityItem[] = []
+  let canOmitEffects = true
+  const supportedStory = new Set(['spine', 'gap', 'asset-clip', 'video', 'audio', 'marker',
     'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend'])
+  const remedies: Record<string, string> = {
+    transition: 'WeftCut cannot recreate this transition. Render the adjoining clips with the transition, or replace it with a cut before exporting.',
+    title: 'WeftCut cannot recreate this title. Render it into a clip, or export it as an overlay with transparency and replace the title.',
+    'mc-clip': 'Choose the camera angles you want to keep, then flatten the multicam edit to ordinary clips before exporting.',
+    'ref-clip': 'Open this compound clip in the source editor and put its contents directly on the timeline, or render it as one clip.',
+    timeMap: 'WeftCut cannot recreate this speed change. Render the retimed clip, then replace it in the source edit before exporting.',
+    'filter-video': 'WeftCut cannot recreate this effect. Render the clip with the effect applied or remove the effect before exporting.',
+    param: 'WeftCut cannot recreate these effect parameters. Render the effect or replace it with a supported static adjustment.',
+  }
   function scanStory(parent: Element) {
+    const kept: Element[] = []
     for (const child of parent.children) {
-      if (!supportedStory.has(child.tag)) unsupported.push('FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. Simplify or render it in the source editor before exporting')
-      else scanStory(child)
+      if (!supportedStory.has(child.tag)) {
+        const remedy = Object.hasOwn(remedies, child.tag) ? remedies[child.tag]
+          : 'Simplify or render this part in the source editor before exporting.'
+        const parameterTree = (node: Element): boolean =>
+          ['param', 'keyframeAnimation', 'keyframe', 'data'].includes(node.tag) && node.children.every(parameterTree)
+        const safeToOmit = ['asset-clip', 'video', 'audio'].includes(parent.tag) &&
+          ['filter-video', 'filter-audio'].includes(child.tag) && child.children.every(parameterTree)
+        const info = { location: location(child), label: child.attrs.name || child.tag,
+          lane: Number(parent.attrs.lane ?? 0) || 0 }
+        if (omitEffects && safeToOmit) {
+          omittedEffects.push({ ...info, status: 'approximated',
+            notes: ['This effect will be left out. The clip and its cut times will be kept.'] })
+          continue
+        }
+        canOmitEffects &&= safeToOmit
+        unsupported.push({ ...info, status: 'unsupported',
+          notes: ['FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. ' + remedy] })
+      } else scanStory(child)
+      kept.push(child)
     }
+    parent.children = kept
   }
   scanStory(seq)
-  if (unsupported.length) throw new Error(unsupported.join('\n'))
-  const notices: TimelineCompatibilityItem[] = []
+  if (unsupported.length) throw new TimelineEditFailure(unsupported, canOmitEffects)
+  const notices: TimelineCompatibilityItem[] = [...omittedEffects]
   const notice = (el: Element, note: string) => notices.push({ location: location(el),
     label: el.attrs.name || el.tag, lane: 0, status: 'converted', notes: [note] })
   if (choices.length > 1) notice(project, 'Only the selected sequence is imported; other sequences remain in the source document')
   if (root.children.some(el => el.tag === 'library' || el.tag === 'event') ||
       project.attrs.uid || project.attrs.modDate) {
-    notice(project, 'Library/event organization, source identifiers and modification metadata are not stored in the destination project')
+    notice(project, 'Only the selected edit is imported. Library and event organization, standalone clips, collections and source metadata are not copied')
   }
   for (const options of root.children.filter(el => el.tag === 'import-options')) {
     for (const option of options.children) notice(option, 'Source-editor import option is not applied: ' + (option.attrs.key ?? '(unnamed)') + ' = ' + (option.attrs.value ?? ''))
@@ -383,11 +422,11 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
     fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
   }
   const spine = one(seq, 'spine')
-  check(spine, [], ['gap', 'asset-clip'])
+  check(spine, [], ['gap', 'asset-clip', 'video', 'audio'])
   const clips: TimelineClip[] = []
   const assets = new Map<string, Asset>()
-  let primaryEnd = 0
-  let lastEnd = 0
+  let primaryEnd = ZERO_TIME
+  let lastEnd = ZERO_TIME
   const connected: { element: Element; clip: TimelineClip }[] = []
 
   function readClip(el: Element, parent?: { offset: ExactTime; start: ExactTime }) {
@@ -395,10 +434,10 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
     const gap = el.tag === 'gap'
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
-      : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat'],
+      : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat', 'srcEnable', 'role'],
     parent ? ['marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend']
-      : gap ? ['asset-clip', 'video']
-        : ['marker', 'asset-clip', 'video', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend'])
+      : gap ? ['asset-clip', 'video', 'audio']
+        : ['marker', 'asset-clip', 'video', 'audio', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend'])
     const lane = Number(a.lane ?? '0')
     if (parent) {
       if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
@@ -411,46 +450,74 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
       ? addTime(parent.offset, subtractTime(localOffset, parent.start))
       : subtractTime(localOffset, sequenceOrigin)
     if (offset.num < 0) fail(el, 'The clip starts before the timeline origin')
-    const firstFrame = frames(offset, format, el, 'offset')
-    const duration = time(el, 'duration')
-    const endFrame = frames(addTime(offset, duration), format, el, 'end')
-    if (endFrame <= firstFrame) fail(el, 'Duration must span at least one video frame')
-    if (!parent) {
-      if (firstFrame < primaryEnd) fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
-      primaryEnd = endFrame
-    }
-    lastEnd = Math.max(lastEnd, endFrame)
-    const start = time(el, 'start', ZERO_TIME)
-    for (const child of el.children) {
-      if (child.tag === 'asset-clip' || child.tag === 'video') readClip(child, { offset, start })
-    }
-    if (gap) {
-      if (a.name) notice(el, 'Named gap is represented as empty timeline space; its label is not retained')
-      return
-    }
     const notes: string[] = []
     if (parent) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
     if (a.tcFormat === 'DF') notes.push('Clip drop-frame display metadata becomes zero-based non-drop-frame timecode')
-    if ((a.enabled ?? '1') !== '1' || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||
+    if (!['0', '1'].includes(a.enabled ?? '1') || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||
         (a.videoRole ?? 'video') !== 'video') {
-      fail(el, 'Disabled clips, invalid clip timecode and custom video roles are unsupported')
+      fail(el, 'The clip has an invalid enabled flag or timecode, or a custom video role')
     }
-    const ref = required(el, 'ref')
-    const assetNode = lookup(ref, 'asset', el)
-    let asset = assets.get(ref)
-    if (!asset) {
+    const ref = gap ? undefined : required(el, 'ref')
+    const assetNode = ref === undefined ? undefined : lookup(ref, 'asset', el)
+    let asset = ref === undefined ? undefined : assets.get(ref)
+    if (assetNode && ref !== undefined && !asset) {
       asset = parseAsset(assetNode, lookup)
       assets.set(ref, asset)
       if (assetNode.attrs.uid !== undefined) notice(assetNode, 'Source asset UID is not retained')
       const mediaRep = assetNode.children.find(child => child.tag === 'media-rep')
       if (mediaRep?.attrs.sig !== undefined) notice(mediaRep, 'Source media signature is not retained')
     }
-    if (asset.stillImage && el.tag !== 'video')
-      fail(el, 'Still-image assets must be placed with a <video> clip')
-    if ((lane < 0 && asset.hasVideo) || (lane > 0 && !asset.hasVideo))
+    const component = el.tag === 'video' || el.tag === 'audio' ? el.tag : a.srcEnable ?? 'all'
+    if (!['all', 'video', 'audio'].includes(component) || (el.tag !== 'asset-clip' && a.srcEnable !== undefined)) {
+      fail(el, 'Choose all media, audio only, or video only on an asset clip')
+    }
+    const hasVideo = asset?.hasVideo === true && component !== 'audio'
+    const hasAudio = asset?.hasAudio === true && component !== 'video'
+    if (asset && !hasVideo && !hasAudio) fail(el, 'The file does not declare the video or audio this clip requests')
+    const duration = time(el, 'duration', el.tag === 'asset-clip' ? asset?.duration : undefined)
+    if (duration.num <= 0) fail(el, 'The clip needs a positive duration')
+    const end = addTime(offset, duration)
+    const audioOnly = asset !== undefined && !hasVideo
+    const firstFrame = audioOnly ? floorTime(divideTime(offset, format.frameDuration)) : frames(offset, format, el, 'offset')
+    const endFrame = audioOnly ? ceilTime(divideTime(end, format.frameDuration)) : frames(end, format, el, 'end')
+    if (!audioOnly && endFrame <= firstFrame) fail(el, 'Duration must span at least one video frame')
+    if (!parent) {
+      if (compareTime(offset, primaryEnd) < 0) fail(el, 'Overlaps the preceding item. Remove the overlap or transition and export again')
+      primaryEnd = end
+    }
+    if (compareTime(end, lastEnd) > 0) lastEnd = end
+    const start = time(el, 'start', ZERO_TIME)
+    for (const child of el.children) {
+      if (['asset-clip', 'video', 'audio'].includes(child.tag)) readClip(child, { offset, start })
+    }
+    if (!asset || !assetNode) {
+      if (a.name) notice(el, 'Named gap is represented as empty timeline space; its label is not retained')
+      return
+    }
+    if ((lane < 0 && hasVideo) || (lane > 0 && !hasVideo))
       fail(el, 'Place connected video in positive lanes and connected audio-only clips in negative lanes')
     if (a.format !== undefined && a.format !== assetNode.attrs.format && a.format !== seq.attrs.format) {
-      fail(el, 'Clip format differs from both the asset and sequence format')
+      const candidate = lookup(a.format, 'format', el)
+      if (asset.stillImage) {
+        // Still formats can omit the video rate. Equivalent declarations must
+        // also agree on color, field order and pixel shape.
+        const assetFormat = assetNode.attrs.format
+        const original = assetFormat === undefined ? null : lookup(assetFormat, 'format', el)
+        const keys = ['name', 'width', 'height', 'frameDuration', 'colorSpace', 'fieldOrder', 'paspH', 'paspV']
+        check(candidate, ['id', ...keys])
+        if (!original || !keys.every(key => candidate.attrs[key] === original.attrs[key])) {
+          fail(el, 'The still has a different clip format. Export the clip with the same image format as its source.')
+        }
+      } else {
+        const other = parseFormat(candidate, true)
+        const same = (known: Pick<Format, 'width' | 'height' | 'frameDuration' | 'paspH' | 'paspV'>) =>
+          known.width === other.width && known.height === other.height &&
+          compareTime(known.frameDuration, other.frameDuration) === 0 &&
+          known.paspH * other.paspV === known.paspV * other.paspH
+        if (!same(format) && (!asset.videoFormat || !same(asset.videoFormat))) {
+          fail(el, 'The clip format differs from its source and timeline. Export the clip with a matching format.')
+        }
+      }
     }
     const conformance = el.children.filter(child => child.tag === 'adjust-conform')
     if (conformance.length > 1) fail(el, 'Only one spatial conform operation is supported')
@@ -460,7 +527,7 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
       check(operation, ['type'])
       conform = (operation.attrs.type ?? 'fit') as typeof conform
       if (!['fit', 'fill', 'none'].includes(conform)) fail(operation, 'Spatial conform must be fit, fill or none')
-      if (!asset.hasVideo) fail(operation, 'Spatial conform requires a video or image clip')
+      if (!hasVideo) fail(operation, 'Spatial conform requires a video or image clip')
     }
     const volumeOps = el.children.filter(child => child.tag === 'adjust-volume')
     if (volumeOps.length > 1) fail(el, 'Only one static volume operation is supported')
@@ -468,7 +535,7 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
     if (volumeOps.length) {
       const operation = volumeOps[0]!
       check(operation, ['amount'])
-      if (!asset.hasAudio) fail(operation, 'Volume adjustment requires source audio')
+      if (!hasAudio) fail(operation, 'Volume adjustment requires source audio')
       const raw = operation.attrs.amount ?? '0dB'
       if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)dB$/.test(raw)) {
         fail(operation, 'Only static dB volume adjustments are supported; keyframed, relative and infinite gain require an audio conversion')
@@ -483,8 +550,7 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
     if (transformOps.length > 1 || blendOps.length > 1) {
       fail(el, 'Only one static transform and one static blend operation per clip are supported')
     }
-    if ((!asset.hasVideo || asset.stillImage && el.tag !== 'video') &&
-        (transformOps.length || blendOps.length)) {
+    if (!hasVideo && (transformOps.length || blendOps.length)) {
       fail(el, 'Visual adjustments require a video or image clip')
     }
     let staticTransform: TimelineClip['staticTransform']
@@ -531,9 +597,15 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
       }
       opacity = Number(raw)
     }
-    const audioRole = a.audioRole ?? 'dialogue'
-    if (audioRole !== 'dialogue' && audioRole !== 'music' && audioRole !== 'effects')
-      fail(el, 'Use the standard dialogue, music or effects audio role')
+    if (a.role !== undefined && el.tag !== 'audio' && (el.tag !== 'video' || a.role !== 'video')) {
+      fail(el, 'This clip uses a role WeftCut cannot reproduce. Assign a standard role and export again.')
+    }
+    const role = a.audioRole ?? (el.tag === 'audio' ? a.role : undefined) ?? 'dialogue'
+    const audioRole = role.split('.')[0]
+    if (audioRole !== 'dialogue' && audioRole !== 'music' && audioRole !== 'effects') {
+      fail(el, 'Assign the audio to dialogue, music or effects in the source editor and export again')
+    }
+    if (role !== audioRole) notes.push('Audio subrole “' + role + '” is grouped under “' + audioRole + '”')
     if (asset.start.num !== 0) notes.push('Source timecode origin is normalized to file-relative source trims')
     const sourceIn = subtractTime(start, asset.start)
     const sourceOut = addTime(sourceIn, duration)
@@ -541,40 +613,57 @@ function parseDocument(root: Element, sequenceIndex?: number): ImportTimeline {
       fail(el, 'Trim lies outside the declared source range of the asset')
     if (asset.stillImage && sourceIn.num !== 0)
       fail(el, 'Still-image clips must start at 0s in the source')
-    if (asset.videoFormat && !asset.stillImage) {
+    if (hasVideo && asset.videoFormat && !asset.stillImage) {
       frames(sourceIn, { ...asset.videoFormat, namedDefaults: false }, el, 'source in')
     }
     const markers = el.children.filter((child) => child.tag === 'marker').map((mark) => {
       check(mark, ['start', 'duration', 'value'])
-      if (compareTime(time(mark, 'duration', format.frameDuration), format.frameDuration) !== 0)
-        fail(mark, 'Only single-frame clip markers are supported')
+      const markerDuration = time(mark, 'duration', format.frameDuration)
       const at = time(mark, 'start')
       const local = subtractTime(at, start)
       if (local.num < 0 || compareTime(local, duration) >= 0) fail(mark, 'Marker lies outside the clip trim')
-      return { label: required(mark, 'value'), frame: firstFrame + frames(local, format, mark, 'start'),
-        source: subtractTime(at, asset.start) }
+      const timelineAt = addTime(offset, local)
+      const markerFrame = divideTime(timelineAt, format.frameDuration)
+      const frame = roundTime(markerFrame)
+      if (markerFrame.den !== 1) notes.push('Marker “' + required(mark, 'value') + '” moved to the nearest timeline frame')
+      let rangeEnd: number | null = null
+      if (compareTime(markerDuration, format.frameDuration) > 0) {
+        if (compareTime(addTime(local, markerDuration), duration) > 0) {
+          fail(mark, 'The marker range extends past the clip trim. Shorten the marker or extend the clip.')
+        }
+        const rangeFrame = divideTime(addTime(timelineAt, markerDuration), format.frameDuration)
+        rangeEnd = roundTime(rangeFrame)
+        if (rangeFrame.den !== 1) notes.push('Marker range end moved to the nearest timeline frame')
+      } else if (markerDuration.num > 0) {
+        notes.push('Marker “' + required(mark, 'value') + '” becomes a point marker')
+      }
+      return { label: required(mark, 'value'), frame, endFrame: rangeEnd, source: subtractTime(at, asset.start) }
     })
-    const clip: TimelineClip = { label: a.name || assetNode.attrs.name, asset, lane, firstFrame, endFrame, sourceIn, sourceOut,
-      audioRole: !asset.hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole,
+    const clip: TimelineClip = { label: a.name || assetNode.attrs.name, enabled: a.enabled !== '0', asset, lane,
+      timelineStart: offset, timelineEnd: end, firstFrame, endFrame, sourceIn, sourceOut, hasVideo,
+      audioRole: !hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole,
       conform, volumeDb, opacity, staticTransform, markers, notes, location: location(el) }
     if (parent) connected.push({ element: el, clip })
     else clips.push(clip)
   }
 
   for (const el of spine.children) readClip(el)
-  const laneEnds = new Map<number, number>()
-  connected.sort((a, b) => a.clip.lane - b.clip.lane || a.clip.firstFrame - b.clip.firstFrame)
+  const laneEnds = new Map<number, ExactTime>()
+  connected.sort((a, b) => a.clip.lane - b.clip.lane || compareTime(a.clip.timelineStart, b.clip.timelineStart))
   for (const { element, clip } of connected) {
-    if (clip.firstFrame < (laneEnds.get(clip.lane) ?? 0))
+    if (compareTime(clip.timelineStart, laneEnds.get(clip.lane) ?? ZERO_TIME) < 0)
       fail(element, 'Overlaps another clip on the same connected lane. Move one clip to a different lane')
-    laneEnds.set(clip.lane, clip.endFrame)
+    laneEnds.set(clip.lane, clip.timelineEnd)
     clips.push(clip)
   }
-  const durationFrames = seq.attrs.duration === undefined ? lastEnd : frames(time(seq, 'duration'), format, seq, 'duration')
-  if (durationFrames < lastEnd) fail(seq, 'Declared duration ends before the last storyline item')
+  const sequenceDuration = time(seq, 'duration', lastEnd)
+  if (compareTime(sequenceDuration, lastEnd) < 0) fail(seq, 'Declared duration ends before the last storyline item')
+  const frameCount = divideTime(sequenceDuration, format.frameDuration)
+  const durationFrames = ceilTime(frameCount)
+  if (frameCount.den !== 1) notice(seq, 'The timeline end was extended to the next video frame to contain the final audio sample')
   if (clips.length === 0) fail(spine, 'The primary storyline needs at least one asset clip')
   return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
-    fps: { num: fps.num, den: fps.den }, durationFrames, clips, notices,
+    fps: { num: fps.num, den: fps.den }, durationFrames, clips, notices, omittedEffects,
     normalizedTimecode: sequenceOrigin.num !== 0, dropFrameTimecode: tcFormat === 'DF',
     namedFormatDefaults: format.namedDefaults }
 }

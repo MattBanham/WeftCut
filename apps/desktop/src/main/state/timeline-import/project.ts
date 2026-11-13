@@ -133,8 +133,17 @@ export async function prepareTimelineProject(
   const actor = createActor({ initial, idGen, clock: () => new Date().toISOString() })
   // Stage registration through the normal importer against the destination's
   // pool. Disk jobs wait for confirmation; cancellation discards this actor.
+  const probed = new Map<string, MediaItem['metadata']>()
   const importer = createMediaImporter({
     ...deps, actor, workspaceDir: () => destination,
+    compute: {
+      ...deps.compute,
+      async probeMedia(path) {
+        const json = await deps.compute.probeMedia(path)
+        probed.set(path, (JSON.parse(json) as MediaItem).metadata)
+        return json
+      },
+    },
     enqueueDerivatives: async () => {}, enqueueWorkspaceCopy: async () => {},
   })
   let relinkRoot: string | undefined
@@ -274,7 +283,7 @@ export async function prepareTimelineProject(
     const item = itemOf(clip)
     if (!item) continue
     try {
-      const result = validateSource(clip, item)
+      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.path)!))
       sourceEnds.set(clip, result.end)
       for (const { kind, detail } of result.changes) {
         const issue = mediaIssue(originals.get(clip.asset.path)!, detail)
@@ -583,7 +592,7 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceOut: ExactTime, start:
     enabled: clip.enabled ?? true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(clip: TimelineClip, item: MediaItem) {
+function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['metadata'] | undefined) {
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(message) }
   const changes: Pick<TimelineMediaChange, 'kind' | 'detail'>[] = []
@@ -635,19 +644,20 @@ function validateSource(clip: TimelineClip, item: MediaItem) {
     const sourceFpsNum = v.fps_num!, sourceFpsDen = v.fps_den!
     const declared = clip.asset.videoFormat
     const probeFrame = exactTime(1_000_000 * sourceFpsDen, sourceFpsNum)
+    const differentRate = declared !== undefined && compareTime(probeFrame, declared.frameDuration) !== 0
+    if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
+      fail(differentRate
+        ? 'The file’s frame rate differs from its FCPXML asset format, and this cut starts between its frames. Choose the original or export a replacement at the original rate.'
+        : 'The source in-point falls between frames at the probed source frame rate. Choose a source-frame boundary.')
+    }
     if (declared) {
-      if (compareTime(probeFrame, declared.frameDuration) !== 0) {
-        if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
-          fail('The file’s frame rate differs from its FCPXML asset format, and this cut starts between its frames. Choose the original or export a replacement at the original rate.')
-        }
+      if (differentRate) {
         const declaredRate = divideTime(exactTime(1_000_000), declared.frameDuration)
         changes.push({ kind: 'video-rate', detail: 'The timeline lists ' + declaredRate.num + '/' + declaredRate.den +
           ' fps, but this file is ' + sourceFpsNum + '/' + sourceFpsDen +
           ' fps. WeftCut will keep the cut times. The picture may repeat or skip frames.' })
       }
       reportSize('video-size', declared)
-    } else if (divideTime(clip.sourceIn, probeFrame).den !== 1) {
-      fail('The source in-point falls between frames at the probed source frame rate. Choose a source-frame boundary')
     }
   } else if ((item.kind !== 'Audio' && item.kind !== 'Video') || (!clip.asset.hasVideo && video)) {
     fail('The file does not contain the type of audio the timeline requests. Choose the matching original.')
@@ -668,12 +678,34 @@ function validateSource(clip: TimelineClip, item: MediaItem) {
       (clip.asset.audioRate === undefined ? 'does not specify a sample rate' : clip.asset.audioRate + ' Hz') +
       '. WeftCut will use the audio in the file and keep the edit’s timing.' })
   }
-  if (duration != null) {
-    const end = exactTime(duration)
-    if (compareTime(clip.sourceOut, end) <= 0) return withEnd(clip.sourceOut)
-    // ffprobe reports duration to whole microseconds. At fractional rates the
-    // final exclusive frame boundary can round down to this same endpoint.
-    if (roundTime(clip.sourceOut) === duration && compareTime(clip.sourceIn, end) < 0) return withEnd(end)
+  const requestedEnd = clip.sourceOut
+  const fits = (extent: number) => compareTime(clip.sourceIn, exactTime(extent)) < 0 &&
+    roundTime(requestedEnd) <= extent
+  const covers = (extent: unknown): extent is number =>
+    typeof extent === 'number' && Number.isSafeInteger(extent) && extent > 0
+  if (!covers(duration) || !fits(duration)) {
+    fail('The trim exceeds the probed duration of the original file. Relink the matching original or shorten the trim')
   }
-  return fail('The trim exceeds the probed duration of the original file. Relink the matching original or shorten the trim')
+  const streamDurations = [
+    ...(clip.hasVideo ? [{ name: 'video', duration: probe?.video?.duration_us ?? video?.duration_us }] : []),
+    ...(clip.audioRole ? [{ name: 'audio', duration: probe?.audio?.duration_us ?? audio?.duration_us }] : []),
+  ]
+  let availableEnd = duration!
+  for (const stream of streamDurations) {
+    if (!covers(stream.duration)) continue
+    if (!fits(stream.duration)) {
+      fail('The ' + stream.name + ' stream ends before this trim. Choose a file with enough ' + stream.name + ' or shorten the trim.')
+    }
+    availableEnd = Math.min(availableEnd, stream.duration)
+  }
+  if (compareTime(requestedEnd, clip.asset.duration) > 0) {
+    if (!streamDurations.every(stream => covers(stream.duration))) {
+      fail('The trim extends past the length listed in the FCPXML. WeftCut cannot verify that every requested stream covers it. Relink a file with verifiable stream durations or correct the trim in the source editor.')
+    }
+    const seconds = (time: ExactTime) => (time.num / time.den / 1_000_000).toFixed(6).replace(/\.?0+$/, '')
+    changes.push({ kind: 'source-duration', detail: 'The timeline lists a source length of ' + seconds(clip.asset.duration) +
+      ' seconds, but a cut uses later material. The file contains that material. WeftCut can keep the original cut times.' })
+  }
+  // The probe rounds to microseconds, including at an exclusive fractional frame boundary.
+  return withEnd(compareTime(requestedEnd, exactTime(availableEnd)) > 0 ? exactTime(availableEnd) : requestedEnd)
 }

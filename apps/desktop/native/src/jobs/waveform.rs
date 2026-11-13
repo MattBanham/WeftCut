@@ -1108,6 +1108,7 @@ mod tests {
                     channels: 1,
                     codec: "pcm_s16le".into(),
                     start_pts_us: None,
+                    duration_us: None,
                 }),
                 ..Default::default()
             },
@@ -1204,6 +1205,7 @@ mod tests {
                         channels,
                         codec: ext.into(),
                         start_pts_us: None,
+                        duration_us: None,
                     }),
                     ..Default::default()
                 },

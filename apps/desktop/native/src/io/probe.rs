@@ -456,6 +456,7 @@ impl RawProbe {
                         codec: codec_name.unwrap_or_default(),
                         pix_fmt: pix_fmt.unwrap_or_default(),
                         start_pts_us,
+                        duration_us: duration.as_deref().and_then(duration_seconds_to_us),
                         nb_frames: nb_frames.as_deref().and_then(|s| s.parse().ok()),
                         color_matrix: clean_color(color_space),
                         color_range: clean_color(color_range),
@@ -480,6 +481,7 @@ impl RawProbe {
                         channels: channels.unwrap_or(0),
                         codec: codec_name.unwrap_or_default(),
                         start_pts_us,
+                        duration_us: duration.as_deref().and_then(duration_seconds_to_us),
                     });
                 }
                 RawStream::Video {
@@ -667,6 +669,7 @@ mod tests {
                 codec: "h264".into(),
                 pix_fmt: "yuv420p".into(),
                 start_pts_us: None,
+                duration_us: None,
                 nb_frames: None,
                 color_matrix: None,
                 color_range: None,
@@ -750,6 +753,10 @@ mod tests {
         assert_eq!(
             meta.video.as_ref().and_then(|v| v.start_pts_us),
             Some(299_674)
+        );
+        assert_eq!(
+            meta.video.as_ref().and_then(|v| v.duration_us),
+            Some(10_000_000)
         );
     }
 

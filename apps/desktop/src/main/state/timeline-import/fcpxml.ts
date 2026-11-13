@@ -16,7 +16,6 @@ interface Element {
 
 interface Asset extends TimelineSource {
   start: ExactTime
-  duration: ExactTime
   hasAudio: boolean
   mediaNotices: string[]
 }
@@ -801,13 +800,9 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       notes.push('Constant playback speed is kept as an editable setting (' +
         playbackRate.num + '/' + playbackRate.den + '×).')
     }
-    if (sourceIn.num < 0 || (!asset.stillImage && compareTime(sourceOut, asset.duration) > 0))
-      fail(el, 'Trim lies outside the declared source range of the asset')
+    if (sourceIn.num < 0) fail(el, 'Trim begins before the asset’s source timecode. Correct the source in-point and export again.')
     if (asset.stillImage && sourceIn.num !== 0)
       fail(el, 'Still-image clips must start at 0s in the source')
-    if (hasVideo && asset.videoFormat && !asset.stillImage) {
-      frames(sourceIn, { ...asset.videoFormat, namedDefaults: false }, el, 'source in')
-    }
     const markers = el.children.filter(child => child.tag === 'marker' || child.tag === 'chapter-marker').map((mark) => {
       const chapter = mark.tag === 'chapter-marker'
       check(mark, chapter ? ['start', 'duration', 'value', 'note', 'posterOffset'] : ['start', 'duration', 'value', 'note', 'completed'])

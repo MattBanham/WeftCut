@@ -539,6 +539,7 @@ mod tests {
                     channels: 1,
                     codec: "pcm_f32le".into(),
                     start_pts_us: None,
+                    duration_us: None,
                 }),
                 ..Default::default()
             },

@@ -6,6 +6,7 @@ import type { OriginalMediaPath } from './mediaPath'
 
 export interface TimelineSource extends OriginalMediaPath {
   ref: string
+  name?: string
   duration: ExactTime
   hasVideo: boolean
   /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */
@@ -68,8 +69,9 @@ export interface ImportTimeline {
   groups: TimelineGroup[]
   dissolves?: { from: TimelineClip; to: TimelineClip; firstFrame: number; endFrame: number }[]
   notices: TimelineCompatibilityItem[]
-  effectIssues?: TimelineCompatibilityItem[]
+  editIssues?: TimelineCompatibilityItem[]
   omittedEffects?: TimelineCompatibilityItem[]
+  omittedTitles?: TimelineCompatibilityItem[]
   normalizedTimecode?: boolean
   dropFrameTimecode?: boolean
   namedFormatDefaults?: boolean

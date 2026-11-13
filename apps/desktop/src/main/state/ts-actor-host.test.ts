@@ -276,6 +276,33 @@ describe('createTsActorHost — persistence-route integration', () => {
       } finally { f.close() }
     })
 
+    it('requires title-gap approval and keeps later cuts at their original positions', async () => {
+      const f = timelineFixture()
+      try {
+        const original = readFileSync(f.path, 'utf8')
+        const withTitle = original.replace('</spine>', `<title name="Opening Card" ref="motion" offset="1s" duration="1s"><text>Fictional card</text></title>
+          <asset-clip ref="a" offset="2s" start="0s" duration="1s"/></spine>`)
+          .replace('<sequence format="f" duration="1s"', '<sequence format="f" duration="3s"')
+        writeFileSync(f.path, withTitle)
+        const preview = (leaveTitleGaps: boolean) => f.host.handleInvoke('project_preview_timeline',
+          { path: f.path, newProject: true, leaveTitleGaps })
+        expect(await preview(false)).toMatchObject({ kind: 'edit-blocked', canOmitEffects: false,
+          issues: [{ label: 'Opening Card', recovery: 'leave-title-gap', timelineFrames: { start: 30, end: 60 } }] })
+        const ready = await preview(true) as TimelineImportPreview
+        expect(ready.omittedTitles).toMatchObject([{ label: 'Opening Card', status: 'approximated' }])
+        const args = { id: ready.id, destination: { parentFolder: f.folder, name: 'Recovered Edit' } }
+        await expect(f.host.handleInvoke('project_import_timeline', args)).rejects.toThrow(/accept the titles/)
+        expect(f.deps.workspaceDir()).toBeNull()
+        await f.host.handleInvoke('project_import_timeline', { ...args, acceptTitleGaps: true })
+        const imported = Object.values(f.host.actor.snapshot().compositions).find(comp => comp.label === 'Lantern')
+        expect(imported?.duration_us).toBe(3_000_000)
+        expect(imported?.tracks.flatMap(track => track.layers)).toMatchObject([
+          { t_start_us: 0, t_end_us: 1_000_000, params: { kind: 'VideoClip' } },
+          { t_start_us: 2_000_000, t_end_us: 3_000_000, params: { kind: 'VideoClip' } },
+        ])
+      } finally { f.close() }
+    })
+
     it('refuses a review if an edit lands while source bytes are rechecked', async () => {
       const f = timelineFixture()
       try {

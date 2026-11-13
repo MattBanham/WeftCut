@@ -539,13 +539,13 @@ test('imports a Final Cut bundle with Info.fcpxml and reports its source', async
   } finally { await app.close() }
 })
 
-test('reviews missing media, a size mismatch and an effect together before importing', async () => {
+test('reviews missing media, a size mismatch, a title and an effect before importing', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-relink-flow-')
   const source = join(folder, 'Offline.fcpxml')
   const lost = join(folder, 'Old Disk', 'Scene.mov')
   const relocatedFolder = join(folder, 'Found Media')
-  const actual = join(relocatedFolder, 'Scene.mov')
+  const actual = join(relocatedFolder, 'scene.mov')
   const destination = join(folder, 'Relinked Edit')
   const still = join(folder, 'Signal.png')
   mkdirSync(relocatedFolder)
@@ -567,8 +567,9 @@ test('reviews missing media, a size mismatch and an effect together before impor
     </asset>
   </resources>
   <project name="Offline">
-    <sequence format="f" duration="3003/30000s">
-      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"><video ref="image" lane="1" offset="0s" duration="1001/30000s"/><filter-video name="Fictional Glow"/></asset-clip></spine>
+    <sequence format="f" duration="4004/30000s">
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"><video ref="image" lane="1" offset="0s" duration="1001/30000s"/><filter-video name="Fictional Glow"/></asset-clip>
+      <title ref="motion" name="End Card" offset="3003/30000s" duration="1001/30000s"><text><text-style>End of chapter</text-style></text></title></spine>
     </sequence>
   </project>
 </fcpxml>`)
@@ -587,10 +588,16 @@ test('reviews missing media, a size mismatch and an effect together before impor
     await beginImport(page)
     const problems = page.getByRole('dialog', { name: 'Some media needs attention' })
     await expect(problems.getByText('Fictional Glow', { exact: true })).toBeVisible()
+    await expect(problems.getByText('End Card', { exact: true })).toBeVisible()
+    await expect(problems.getByText('From frame 3 to the start of frame 4')).toBeVisible()
+    await problems.getByRole('button', { name: 'Review without these titles…' }).click()
+    await expect(problems.getByText('Fictional Glow', { exact: true })).toBeVisible()
     await expect(problems.getByText(/Missing or unreadable original media/)).toBeVisible()
     await expect(problems.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await problems.getByRole('button', { name: 'Find original media in a folder…' }).click()
+    await expect(problems.getByText(/Missing or unreadable original media/)).toBeVisible()
+    await problems.getByRole('button', { name: 'Use scene.mov', exact: true }).click()
     const unsupported = page.getByRole('dialog', { name: 'Some edits need attention' })
     await expect(unsupported.getByText(/The file contains that material. WeftCut can keep the original cut times/)).toBeVisible()
     await expect(unsupported.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
@@ -598,6 +605,7 @@ test('reviews missing media, a size mismatch and an effect together before impor
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Audio end quantized to the 48 kHz sample grid')
     await expect(review).toContainText('Check media replacements')
+    await expect(review.getByRole('region', { name: 'Titles that will be left out' })).toContainText('End Card')
     await expect(review).toContainText('Source asset UID is not retained')
     await expect(review).toContainText('Source media signature is not retained')
     await expect(review.getByText(`${lost} → ${await realpath(actual)}`, { exact: true })).toBeVisible()
@@ -606,6 +614,8 @@ test('reviews missing media, a size mismatch and an effect together before impor
     await review.getByRole('checkbox', { name: 'Keep the clips and leave out these effects' }).check()
     await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
     await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
+    await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
+    await review.getByRole('checkbox', { name: 'Leave out these titles and keep their timing' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
     await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(3)
@@ -619,8 +629,9 @@ test('reviews missing media, a size mismatch and an effect together before impor
     const layers = imported.tracks.flatMap((track: any) => track.layers)
     const video = layers.find((layer: any) => layer.params.kind === 'VideoClip')
     const audio = layers.find((layer: any) => layer.params.kind === 'Audio')
+    expect(imported.duration_us).toBe(133467)
     const sequenceEnd = 100100
-    const finalSample = Math.floor(sequenceEnd * 48_000 / 1_000_000)
+    const finalSample = Math.round(sequenceEnd * 48_000 / 1_000_000)
     expect(video).toMatchObject({ t_start_us: 0, t_end_us: sequenceEnd, params: { src_out_us: sequenceEnd } })
     expect(audio).toMatchObject({ t_start_us: 0, t_end_us: Math.round(finalSample * 1_000_000 / 48_000),
       params: { src_out_us: sequenceEnd } })

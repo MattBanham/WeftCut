@@ -36,7 +36,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
 
   async function review(next: ReviewRequest) {
     setRequest(next);
-    const result = await projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements, next.documentId, next.omitEffects);
+    const result = await projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements, next.documentId, next.omitEffects, next.leaveTitleGaps);
     if ("kind" in result) setBlocked(result);
     else setTimelinePreview(result);
   }
@@ -68,11 +68,11 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     finally { setBusy(false); }
   }
 
-  async function relink(assetRef?: string) {
+  async function relink(assetRef?: string, suggestedPath?: string) {
     if (!request || busy) return;
     setBusy(true);
     try {
-      const path = await openDialog({
+      const path = suggestedPath ?? await openDialog({
         title: t(assetRef ? "startup.import_choose_replacement" : "startup.import_choose_relink_folder"),
         directory: assetRef === undefined,
       });
@@ -87,11 +87,11 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     finally { setBusy(false); }
   }
 
-  async function reviewWithoutEffects() {
+  async function reviewWithFallback(option: "omitEffects" | "leaveTitleGaps") {
     if (!request || busy) return;
     setBusy(true);
     setBlocked(null);
-    try { await review({ ...request, omitEffects: true }); }
+    try { await review({ ...request, [option]: true }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -115,6 +115,15 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     setError(null);
   }
 
+  const editIssues = blocked?.kind === "media-blocked" ? blocked.editIssues : blocked?.issues ?? [];
+  const canLeaveTitleGaps = editIssues.some(issue => issue.recovery === "leave-title-gap") &&
+    editIssues.every(issue => issue.recovery !== undefined);
+  const titleFallback = canLeaveTitleGaps && (
+    <Button onClick={() => void reviewWithFallback("leaveTitleGaps")} disabled={busy}>
+      {t("startup.import_review_without_titles")}
+    </Button>
+  );
+
   const dialogs = (
     <>
       {sourcePicker && (
@@ -136,6 +145,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           {blocked.issues.map((issue, index) => (
             <div key={index} className="new-project-row">
               <strong>{issue.label}</strong>
+              {issue.timelineFrames && <p>{t("startup.import_edit_range", issue.timelineFrames)}</p>}
               <p role="alert">{issue.notes.join(" ")}</p>
             </div>
           ))}
@@ -147,9 +157,10 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           )}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
-            {blocked.canOmitEffects && <Button onClick={() => void reviewWithoutEffects()} disabled={busy}>
+            {blocked.canOmitEffects && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
               {t("startup.import_review_without_effects")}
             </Button>}
+            {titleFallback}
           </footer>
         </AppDialog>
       )}
@@ -157,16 +168,23 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
         <AppDialog title={t("startup.import_media_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
           {blocked.issues.map((issue, index) => (
             <div key={index} className="new-project-row">
-              <strong title={issue.sourcePath}>{issue.filename}</strong>
+              <strong title={issue.sourcePath}>{issue.label}</strong>
+              {issue.label !== issue.filename && <p>{issue.filename}</p>}
               <p className="new-project-error break-words" role="alert">{issue.detail}</p>
+              {issue.suggestedPaths?.map(path => (
+                <Button key={path} title={path} onClick={() => void relink(issue.assetRef, path)} disabled={busy}>
+                  {t("startup.import_use_candidate", { name: path.split(/[\\/]/).pop() })}
+                </Button>
+              ))}
               <Button onClick={() => void relink(issue.assetRef)} disabled={busy}>
                 {t("startup.import_choose_replacement")}
               </Button>
             </div>
           ))}
-          {blocked.effectIssues.map((issue, index) => (
+          {blocked.editIssues.map((issue, index) => (
             <div key={index} className="new-project-row">
               <strong>{issue.label}</strong>
+              {issue.timelineFrames && <p>{t("startup.import_edit_range", issue.timelineFrames)}</p>}
               <p>{issue.notes.join(" ")}</p>
             </div>
           ))}
@@ -178,9 +196,10 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           )}
           <footer className="new-project-actions">
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
-            {blocked.effectIssues.length > 0 && <Button onClick={() => void reviewWithoutEffects()} disabled={busy}>
+            {blocked.editIssues.some(issue => issue.recovery === "omit-effect") && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
               {t("startup.import_review_without_effects")}
             </Button>}
+            {titleFallback}
             {blocked.canSearchFolder && <Button onClick={() => void relink()} disabled={busy}>
               {t("startup.import_choose_relink_folder")}
             </Button>}
@@ -209,9 +228,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           onRelink={relink}
           onReviewAsNewProject={reviewAsNewProject}
           onCancel={cancel}
-          onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects) => {
+          onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps) => {
             if (timelinePreview.current === null) setProjectForm(timelinePreview);
-            else await projectImportTimeline(timelinePreview.id, canvas, undefined, acceptMediaChanges, acceptOmittedEffects);
+            else await projectImportTimeline(timelinePreview.id, canvas, undefined, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps);
             setTimelinePreview(null);
           }}
         />
@@ -229,6 +248,7 @@ interface ReviewRequest {
   folder?: string;
   replacements: TimelineMediaReplacement[];
   omitEffects?: boolean;
+  leaveTitleGaps?: boolean;
 }
 
 function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
@@ -270,7 +290,8 @@ function MediaDifferenceRows({ changes, onRelink, disabled }: {
   const { t } = useTranslation();
   return changes.map((issue, index) => (
     <div key={index} className="new-project-row">
-      <strong title={issue.sourcePath}>{issue.filename}</strong>
+      <strong title={issue.sourcePath}>{issue.label}</strong>
+      {issue.label !== issue.filename && <p>{issue.filename}</p>}
       <p>{issue.detail} {t("startup.import_media_placements", { count: issue.placements })}</p>
       <Button disabled={disabled} onClick={() => void onRelink(issue.assetRef)}>
         {t("startup.import_choose_replacement")}
@@ -281,7 +302,7 @@ function MediaDifferenceRows({ changes, onRelink, disabled }: {
 
 function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, busyRelinking }: {
   preview: TimelineImportPreview;
-  onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean) => Promise<void>;
+  onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean, acceptTitleGaps: boolean) => Promise<void>;
   onRelink: (assetRef: string) => Promise<void>;
   onReviewAsNewProject: () => Promise<void>;
   busyRelinking: boolean;
@@ -293,6 +314,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
   const [canvas, setCanvas] = useState<'fit' | 'fill' | 'original'>('fit');
   const [acceptMediaChanges, setAcceptMediaChanges] = useState(false);
   const [acceptOmittedEffects, setAcceptOmittedEffects] = useState(false);
+  const [acceptTitleGaps, setAcceptTitleGaps] = useState(false);
   const hasMediaChanges = preview.mediaChanges.length > 0 || preview.outputColorChange !== null;
   const current = preview.current;
   const fpsMismatch = current != null &&
@@ -302,7 +324,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
 
   async function submit() {
     setBusy(true);
-    try { await onImport(canvas, acceptMediaChanges, acceptOmittedEffects); }
+    try { await onImport(canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps); }
     catch (cause) {
       setError(cleanIpcDetail(cause));
       setBusy(false);
@@ -390,13 +412,33 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
           </label>
         </section>
       )}
+      {preview.omittedTitles.length > 0 && (
+        <section aria-label={t("startup.import_titles_omitted")}>
+          <p><strong>{t("startup.import_titles_omitted")}</strong></p>
+          {preview.omittedTitles.map((title, index) => (
+            <div key={index}>
+              <strong>{title.label}</strong>
+              {title.timelineFrames && <p>{t("startup.import_edit_range", title.timelineFrames)}</p>}
+            </div>
+          ))}
+          <label>
+            <input type="checkbox" checked={acceptTitleGaps} disabled={busy || busyRelinking}
+              onChange={(event) => setAcceptTitleGaps(event.target.checked)} />
+            {" "}{t("startup.import_accept_title_gaps")}
+          </label>
+        </section>
+      )}
       {preview.relinkedMedia.length > 0 && (
         <section aria-label={t("startup.import_relinked_media")}>
           <p><strong>{t("startup.import_relinked_media")}</strong></p>
-          {preview.relinkedMedia.map(({ from, to }) => (
-            <p key={from} className="new-project-preview" title={from + " → " + to}>
-              {from} → {to}
-            </p>
+          {preview.relinkedMedia.map(({ assetRef, label, from, to }) => (
+            <div key={assetRef} className="new-project-row">
+              <strong>{label}</strong>
+              <p className="new-project-preview" title={from + " → " + to}>{from} → {to}</p>
+              <Button onClick={() => void onRelink(assetRef)} disabled={busy || busyRelinking}>
+                {t("startup.import_choose_replacement")}
+              </Button>
+            </div>
           ))}
         </section>
       )}
@@ -438,7 +480,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
             {t("startup.import_review_as_new")}
           </Button>
         )}
-        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects)}>
+        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps)}>
           {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
         </Button>
       </footer>

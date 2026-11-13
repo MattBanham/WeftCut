@@ -907,9 +907,9 @@ export function projectListTimelineSequences(path: string): Promise<TimelineSequ
 
 export function projectPreviewTimeline(
   path: string, relinkDirectory?: string, sequenceIndex?: number, newProject = false,
-  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false,
+  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false, leaveTitleGaps = false,
 ): Promise<TimelinePreflight> {
-  return invoke<TimelinePreflight>("project_preview_timeline", { path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects });
+  return invoke<TimelinePreflight>("project_preview_timeline", { path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {
@@ -918,9 +918,9 @@ export function projectDiscardTimelinePreview(id: string): Promise<null> {
 
 export function projectImportTimeline(
   id: string, canvas: 'fit' | 'fill' | 'original' = 'fit', destination?: TimelineProjectDestination,
-  acceptMediaChanges = false, acceptOmittedEffects = false,
+  acceptMediaChanges = false, acceptOmittedEffects = false, acceptTitleGaps = false,
 ): Promise<string> {
-  return invoke<string>("project_import_timeline", { id, canvas, destination, acceptMediaChanges, acceptOmittedEffects });
+  return invoke<string>("project_import_timeline", { id, canvas, destination, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps });
 }
 
 export async function projectOpen(path: string): Promise<void> {

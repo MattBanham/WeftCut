@@ -18,7 +18,12 @@ export interface TimelineSource extends OriginalMediaPath {
   audioRate?: number
 }
 
-export interface TimelineClip {
+export interface TimelineSourceWindow {
+  sourceIn: ExactTime
+  sourceOut: ExactTime
+}
+
+export interface TimelineClip extends TimelineSourceWindow {
   label?: string
   enabled?: boolean
   hasVideo: boolean
@@ -28,8 +33,7 @@ export interface TimelineClip {
   timelineEnd: ExactTime
   firstFrame: number
   endFrame: number
-  sourceIn: ExactTime
-  sourceOut: ExactTime
+  splitAudio?: TimelineSourceWindow & { timelineStart: ExactTime; timelineEnd: ExactTime }
   playbackRate?: ExactTime
   preservePitch?: boolean
   audioRole: AudioRole | null

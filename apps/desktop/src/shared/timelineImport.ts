@@ -24,12 +24,14 @@ export interface TimelineMediaBlocked {
   issues: TimelineMediaIssue[]
   canSearchFolder: boolean
   effectIssues: TimelineCompatibilityItem[]
+  mediaChanges: TimelineMediaChange[]
 }
 
 export interface TimelineEditBlocked {
   kind: 'edit-blocked'
   issues: TimelineCompatibilityItem[]
   canOmitEffects: boolean
+  mediaChanges: TimelineMediaChange[]
 }
 
 export type TimelinePreflight = TimelineImportPreview | TimelineMediaBlocked | TimelineEditBlocked
@@ -49,6 +51,7 @@ export interface TimelineImportReport {
   height: number
   fps: { num: number; den: number }
   durationFrames: number
+  compoundGroups: number
   videoClips: number
   audioClips: number
   markers: number

@@ -397,6 +397,37 @@ describe('timeline import transaction', () => {
     return { prepare, prepareReview, before, actor, probeMedia, hashMediaSource }
   }
 
+  it('keeps marker text and timing while reporting source-editor metadata left behind', async () => {
+    const url = pathToFileURL(media).href
+    const xml = fixture(url)
+      .replace('<project name=', '<library colorProcessing="wide-hdr"><smart-collection name="Unused"/><event><project id="project" name=')
+      .replace('</project>', '</project></event></library>')
+      .replace('<sequence format=', '<sequence renderFormat="fictional-codec" keywords="Harbor" format=')
+      .replace('<spine>', '<note>Fictional project note</note><spine>')
+      .replace('</spine>', '</spine><metadata><md key="fictional" value="archive"/></metadata>')
+      .replace('<media-rep kind="original-media"', '<media-rep suggestedFilename="Camera Copy.mov" kind="original-media"')
+      .replace(url + '"/>', url + '"><bookmark>RmljdGlvbmFs</bookmark></media-rep>')
+      .replace('<marker value=', '<marker note="Look again" completed="0" value=')
+      .replace('</asset-clip>', '<chapter-marker start="108004004/30000s" duration="1001/30000s" value="Next scene" note="Chapter note" posterOffset="0s"/></asset-clip>')
+    await writeFile(document, xml)
+    await writeFile(media, 'Fictional video')
+    const { project, report } = await setup().prepareReview()
+    expect(report.outputColorChange).toBe('a library using wide color processing')
+    expect(rootComposition(project).markers).toMatchObject([
+      { t_us: 33367, label: 'Signal seen', note: 'Look again' },
+      { t_us: 66733, label: 'Next scene', note: 'Chapter note' },
+    ])
+    const notes = report.compatibilityItems.flatMap(item => item.notes).join('\n')
+    expect(notes).toMatch(/Library color processing is left out/)
+    expect(notes).toMatch(/render codec is left out/)
+    expect(notes).toMatch(/Sequence keywords, notes and custom metadata/)
+    expect(notes).toMatch(/Apple file access bookmarks are left out/)
+    expect(notes).toMatch(/Suggested media filenames are left out/)
+    expect(notes).toMatch(/to-do status is left out/)
+    expect(notes).toMatch(/Chapter and poster-frame settings are left out/)
+    expect(() => validate(project)).not.toThrow()
+  })
+
   it('loads a regular FCPXML bundle with Info.fcpxml at its root', async () => {
     const bundle = join(parent, 'Illustrated Story.fcpxmld')
     await mkdir(bundle)

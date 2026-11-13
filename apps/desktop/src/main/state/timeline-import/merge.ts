@@ -23,10 +23,7 @@ export function applyImportedTimelineGroup(
   if (source.sample_rate !== parent.sample_rate || source.channels !== parent.channels) {
     throw new Error('The imported and current projects use different audio editing lattices')
   }
-  if (Object.keys(imported.compositions).length !== 1 || imported.root_id !== source.id) {
-    throw new Error('Only one imported timeline can be added as a Group')
-  }
-  if (draft.compositions[source.id]) {
+  if (Object.keys(imported.compositions).some(id => draft.compositions[id])) {
     throw new Error('Imported IDs conflict with existing project IDs; review the import again')
   }
   if (!['fit', 'fill', 'original'].includes(canvas)) throw new Error('Choose how the imported canvas should fit')
@@ -39,7 +36,11 @@ export function applyImportedTimelineGroup(
     }
     if (!held) draft.media_pool[id] = item
   }
-  draft.compositions[source.id] = { ...source, label: imported.metadata.name, ordinal: draft.next_group_ordinal++ }
+  for (const composition of Object.values(imported.compositions).sort((a, b) => a.ordinal - b.ordinal)) {
+    draft.compositions[composition.id] = { ...composition,
+      label: composition.id === source.id ? imported.metadata.name : composition.label,
+      ordinal: draft.next_group_ordinal++ }
+  }
   const trackId = applyAddTrack(draft, idGen, imported.metadata.name, undefined, parent.id)
   const scale = canvas === 'original' ? 1
     : (canvas === 'fill' ? Math.max : Math.min)(

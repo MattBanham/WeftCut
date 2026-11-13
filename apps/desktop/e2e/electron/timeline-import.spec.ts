@@ -539,7 +539,7 @@ test('imports a Final Cut bundle with Info.fcpxml and reports its source', async
   } finally { await app.close() }
 })
 
-test('relinks missing media and omits an unsupported effect only after review and consent', async () => {
+test('reviews missing media, a size mismatch and an effect together before importing', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-relink-flow-')
   const source = join(folder, 'Offline.fcpxml')
@@ -547,13 +547,20 @@ test('relinks missing media and omits an unsupported effect only after review an
   const relocatedFolder = join(folder, 'Found Media')
   const actual = join(relocatedFolder, 'Scene.mov')
   const destination = join(folder, 'Relinked Edit')
+  const still = join(folder, 'Signal.png')
   mkdirSync(relocatedFolder)
   encodeSource(actual)
+  execFileSync('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=red:size=120x130:rate=1',
+    '-frames:v', '1', '-update', '1', still,
+  ], { windowsHide: true })
   writeFileSync(source, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.10">
   <resources>
     <format id="f" frameDuration="1001/30000s" width="320" height="240"/>
+    <format id="still" name="FFVideoFormatRateUndefined" width="640" height="360"/>
+    <asset id="image" format="still" duration="0s" hasVideo="1" src="${pathToFileURL(still).href}"/>
     <asset id="a" uid="fictional-asset" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1"
       audioSources="1" audioChannels="2" audioRate="48000">
       <media-rep kind="original-media" sig="fictional-signature" src="${pathToFileURL(lost).href}"/>
@@ -561,7 +568,7 @@ test('relinks missing media and omits an unsupported effect only after review an
   </resources>
   <project name="Offline">
     <sequence format="f" duration="3003/30000s">
-      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"><filter-video name="Fictional Glow"/></asset-clip></spine>
+      <spine><asset-clip ref="a" duration="3003/30000s" start="0s"><video ref="image" lane="1" offset="0s" duration="1001/30000s"/><filter-video name="Fictional Glow"/></asset-clip></spine>
     </sequence>
   </project>
 </fcpxml>`)
@@ -581,8 +588,11 @@ test('relinks missing media and omits an unsupported effect only after review an
     const problems = page.getByRole('dialog', { name: 'Some media needs attention' })
     await expect(problems.getByText('Fictional Glow', { exact: true })).toBeVisible()
     await expect(problems.getByText(/Missing or unreadable original media/)).toBeVisible()
+    await expect(problems.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await problems.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const unsupported = page.getByRole('dialog', { name: 'Some edits need attention' })
+    await expect(unsupported.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
     await unsupported.getByRole('button', { name: 'Review without these effects…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review).toContainText('Check media replacements')
@@ -592,13 +602,17 @@ test('relinks missing media and omits an unsupported effect only after review an
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
     await review.getByRole('checkbox', { name: 'Keep the clips and leave out these effects' }).check()
+    await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)
-    await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(2)
+    await expect.poll(async () => (await importedSummary(page)).layer_count).toBe(3)
     await invokeCmd(page, 'project_save')
     const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
-    const record = Object.values(project.media_pool)[0] as { path_abs: string }
-    expect(readFileSync(record.path_abs)).toEqual(readFileSync(actual))
+    const records = Object.values(project.media_pool) as { path_abs: string }[]
+    expect(records.map(record => readFileSync(record.path_abs))).toEqual(expect.arrayContaining([
+      readFileSync(actual), readFileSync(still),
+    ]))
   } finally { await app.close() }
 })
 
@@ -681,6 +695,60 @@ test('imports into the current project as one undoable Group without replacing i
     await invokeCmd(page, 'project_undo')
     await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     expect((await invokeCmd(page, 'project_open_state'))).not.toBeNull()
+  } finally { await app.close() }
+})
+
+test('keeps repeated compound clips editable with separate trims and one Undo', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-compound-import-')
+  const source = join(folder, 'Repeated Scene.fcpxml')
+  const media = join(folder, 'Source.mov')
+  const target = join(folder, 'Imported Compounds')
+  encodeSource(media)
+  writeFileSync(source, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="a" format="f" duration="1001/1000s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000" src="${pathToFileURL(media).href}"/>
+    <media id="m" name="Shared Scene"><sequence format="f" tcStart="3600s" duration="30030/30000s">
+      <spine><asset-clip ref="a" offset="3600s" duration="30030/30000s"/></spine>
+    </sequence></media></resources>
+    <project name="Repeated Scene"><sequence format="f"><spine>
+      <ref-clip ref="m" name="First" start="108006006/30000s" duration="3003/30000s"/>
+      <gap offset="3003/30000s" duration="1001/30000s"/>
+      <ref-clip ref="m" name="Second" offset="4004/30000s" start="3600s" duration="3003/30000s"/>
+    </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: basename(target),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, source)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review.getByText('2 compound clips become editable Groups.')).toBeVisible()
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    const saved = JSON.parse(readFileSync(join(target, 'project.json'), 'utf8'))
+    const compositions = Object.values(saved.compositions) as any[]
+    const outer = compositions.find(comp => comp.label === 'Repeated Scene')
+    const shared = compositions.find(comp => comp.label === 'Shared Scene')
+    expect(compositions).toHaveLength(3)
+    expect(outer.tracks[0].layers).toMatchObject([
+      { label: 'First', t_start_us: 0, t_end_us: 100100, params: { kind: 'CompositionRef', composition: shared.id, src_in_us: 200200 } },
+      { label: 'Second', t_start_us: 133467, params: { kind: 'CompositionRef', composition: shared.id, src_in_us: 0 } },
+    ])
+    expect(shared.tracks[0].layers.map((layer: any) => layer.params.kind)).toEqual(['VideoClip', 'Audio'])
+    await waitForHook(page, 'weftcutSampleComposite')
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(33367))
+    await expect.poll(async () => {
+      const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(160, 120))
+      return pixel?.r ?? 0
+    }).toBeGreaterThan(200)
+    await invokeCmd(page, 'project_undo')
+    const undone = await invokeCmd<ProjectSummaryWire>(page, 'project_summary')
+    expect(Object.keys(undone.compositions)).toHaveLength(1)
   } finally { await app.close() }
 })
 

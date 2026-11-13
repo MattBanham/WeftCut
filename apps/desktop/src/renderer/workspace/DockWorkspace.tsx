@@ -14,6 +14,7 @@ import {
 import {
   DockviewReact,
   themeAbyss,
+  type DockviewApi,
   type DockviewMessages,
   type DockviewReadyEvent,
   type DockviewTheme,
@@ -31,6 +32,7 @@ import {
   ChevronUpIcon,
   GripHorizontalIcon,
   GripVerticalIcon,
+  LockIcon,
   TextAlignStartIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -126,6 +128,8 @@ export interface DockPanelContracts {
   previewRef: RefObject<PreviewSurfaceHandle | null>;
   onSeek: (timeUs: number) => void;
   onTogglePlay: () => void;
+  editingLocked?: boolean;
+  backgroundExportActive?: boolean;
   previewDecodableOf: (mediaId: string) => boolean;
   revealedTrackId: string | null;
   keybindings: KeybindingsMap;
@@ -251,6 +255,8 @@ function PreviewDockPanel() {
       previewRef={contracts.previewRef}
       summary={contracts.summary}
       onTogglePlay={contracts.onTogglePlay}
+      editingLocked={contracts.editingLocked ?? false}
+      backgroundExportActive={contracts.backgroundExportActive ?? false}
       previewDecodableOf={contracts.previewDecodableOf}
       visible={runtime.isVisible}
     />
@@ -286,7 +292,8 @@ function TimelineDockPanel() {
         keybindings={contracts.keybindings}
         fpsNum={comp?.fps_num ?? 30}
         fpsDen={comp?.fps_den ?? 1}
-        bladeMode={bladeMode}
+        bladeMode={bladeMode && !contracts.editingLocked}
+        editingLocked={contracts.editingLocked ?? false}
         media={summary?.media ?? []}
         readinessOf={contracts.readinessOf}
         visible={runtime.isVisible}
@@ -539,6 +546,8 @@ export function WeftCutPanelRenderer({
 }: IDockviewPanelProps<DockPanelParams>) {
   if (!isPanelKind(params.kind)) return null;
   const Component = PANEL_COMPONENTS[params.kind];
+  const { editingLocked } = useContracts();
+  const locked = editingLocked === true && PANEL_REGISTRY[params.kind].duringExport === "locked";
   const chrome = useWorkspaceChrome();
   const isVisible = useDockviewPanelVisibility(api);
   const instance = params.instance;
@@ -555,28 +564,32 @@ export function WeftCutPanelRenderer({
   );
   return (
     <DockPanelRuntimeContext.Provider value={runtime}>
-      <div
-        className="weft-dock-panel"
-        data-panel-kind={params.kind}
-        // The Panel IS the focus region (ADR 0041). `tabIndex={-1}` makes it a
-        // programmatic focus target and never a Tab stop: `useFocusRegions`
-        // focuses it when a press lands on non-focusable panel content, which
-        // both releases whatever field was parked and gives bare-key shortcuts
-        // a region to be scoped against. A separate attribute from
-        // `data-panel-kind` on purpose — that one is also on the tab
-        // renderers, which are chrome, not regions.
-        tabIndex={-1}
-        data-focus-region={params.kind}
-        // A SECOND attribute, never a richer value in the first one:
-        // `data-focus-region` is a `PanelKind` and `ActionDef.scope` is a list
-        // of them, so widening it would put an instance where the shortcut
-        // catalogue reads a kind. `useFocusRegions` is what pairs the two.
-        {...(instance === null ? {} : { [FOCUS_REGION_INSTANCE_ATTR]: instance })}
-        data-panel-visible={isVisible ? "true" : "false"}
-        onPointerEnter={() => chrome.setHoveredPanel(runtime.id)}
-        onPointerLeave={() => chrome.setHoveredPanel(null)}
-      >
-        <Component />
+      <div className="weft-dock-panel-frame">
+        <div
+          className="weft-dock-panel"
+          inert={locked}
+          data-panel-kind={params.kind}
+          // The Panel IS the focus region (ADR 0041). `tabIndex={-1}` makes it a
+          // programmatic focus target and never a Tab stop: `useFocusRegions`
+          // focuses it when a press lands on non-focusable panel content, which
+          // both releases whatever field was parked and gives bare-key shortcuts
+          // a region to be scoped against. A separate attribute from
+          // `data-panel-kind` on purpose — that one is also on the tab
+          // renderers, which are chrome, not regions.
+          tabIndex={-1}
+          data-focus-region={params.kind}
+          // A SECOND attribute, never a richer value in the first one:
+          // `data-focus-region` is a `PanelKind` and `ActionDef.scope` is a list
+          // of them, so widening it would put an instance where the shortcut
+          // catalogue reads a kind. `useFocusRegions` is what pairs the two.
+          {...(instance === null ? {} : { [FOCUS_REGION_INSTANCE_ATTR]: instance })}
+          data-panel-visible={isVisible ? "true" : "false"}
+          onPointerEnter={() => chrome.setHoveredPanel(runtime.id)}
+          onPointerLeave={() => chrome.setHoveredPanel(null)}
+        >
+          <Component />
+        </div>
+        {locked && <div className="weft-dock-panel-lock" aria-hidden="true"><AppIcon icon={LockIcon} size="display" /></div>}
       </div>
     </DockPanelRuntimeContext.Provider>
   );
@@ -1483,23 +1496,28 @@ export function DockWorkspace({
   // has to know a project exists.
   const rootCompositionId = useProjectStore((s) => s.summary?.root_id ?? null);
 
-  const openTimelinesRef = useRef<(() => void) | null>(null);
-  const previewLayoutRef = useRef<(() => void) | null>(null);
-
+  // The Dock's api, recorded once per Dock instance. dockview-react keeps its
+  // instance across StrictMode's effect replay (and an <Activity> hide), so
+  // `onReady` fires once while this component's effects can set up twice:
+  // everything bound to the api lives in the effect below, where each setup
+  // has its own cleanup.
+  const dockApiRef = useRef<DockviewApi | null>(null);
   const onReady = useCallback(({ api }: DockviewReadyEvent) => {
-    let adapter = adapterRef.current;
-    if (!adapter?.belongsTo(api)) {
-      adapter?.dispose();
-      adapter = new DockWorkspaceAdapter(api, sectionRef.current ?? undefined);
-      adapterRef.current = adapter;
-    }
+    dockApiRef.current = api;
+  }, []);
+
+  // Declared ahead of every effect that reads `adapterRef`. The Dock calls
+  // `onReady` from its own mount effect, which React runs before this
+  // component's, so the api is recorded by the time this sets up.
+  useEffect(() => {
+    const api = dockApiRef.current;
+    if (!api) return;
+    const adapter = new DockWorkspaceAdapter(api, sectionRef.current ?? undefined);
+    adapterRef.current = adapter;
     // Which compositions have a Panel is a fact only the Dock holds, and the
     // anchor store is what has to act on it — a tab dragged out, closed or
-    // never restored leaves an anchor with nothing to anchor. Re-subscribed
-    // rather than added to, so a StrictMode replay over one adapter does not
-    // stack two listeners.
-    openTimelinesRef.current?.();
-    const bound = adapter;
+    // never restored leaves an anchor with nothing to anchor.
+    //
     // The Panel that was active last time the Dock said anything. Activating a
     // timeline tab IS entering that composition — without it the tab strip
     // would only change which timeline is on SCREEN, leaving the editing
@@ -1511,10 +1529,10 @@ export function DockWorkspace({
     // each one would re-enter whichever timeline is active whenever anything
     // moved — and a drop into a background timeline, which must NOT take the
     // keyboard, moves something every time.
-    let lastActive = bound.getSnapshot().activePanel;
-    openTimelinesRef.current = bound.subscribe(() => {
-      syncOpenCompositions(bound.openTimelineCompositions());
-      const active = bound.getSnapshot().activePanel;
+    let lastActive = adapter.getSnapshot().activePanel;
+    const unsubscribeOpenTimelines = adapter.subscribe(() => {
+      syncOpenCompositions(adapter.openTimelineCompositions());
+      const active = adapter.getSnapshot().activePanel;
       if (active === lastActive) return;
       lastActive = active;
       // Only when the newly active Panel is a timeline: activating the
@@ -1529,19 +1547,23 @@ export function DockWorkspace({
     // The preview overlays read a CACHED canvas box, because their loops run
     // per frame (`preview/layoutRectCache.ts`). Moving a Panel is the one mover
     // no observer on the canvas can see — a relayout can leave the box the same
-    // size at a new origin — so the Dock says so itself. Re-subscribed rather
-    // than added to, for the same StrictMode reason as above.
-    previewLayoutRef.current?.();
+    // size at a new origin — so the Dock says so itself.
     const previewLayout = api.onDidLayoutChange(() => bumpPreviewLayoutEpoch());
-    previewLayoutRef.current = () => previewLayout.dispose();
-    // Read live rather than from the render above: the Dock is ready before
-    // this component's own effects run, and the baseline layout it is about to
-    // build should be bound straight away wherever the summary already exists.
+    // Read live rather than from the render above: the baseline layout about
+    // to be built should be bound straight away wherever the summary already
+    // exists, before the `rootCompositionId` effect below runs.
     adapter.setTimelineInstance(
       useProjectStore.getState().summary?.root_id ?? null,
     );
     adapter.initializeEditingLayout();
     onControllerReady?.(adapter);
+    return () => {
+      unsubscribeOpenTimelines();
+      previewLayout.dispose();
+      adapter.dispose();
+      adapterRef.current = null;
+      onControllerReady?.(null);
+    };
   }, [onControllerReady]);
 
   // The first summary of a session lands after the Dock has built its layout,
@@ -1570,19 +1592,6 @@ export function DockWorkspace({
           adapterRef.current?.closeTimelinePanel(compositionId),
       }),
     [],
-  );
-
-  useEffect(
-    () => () => {
-      openTimelinesRef.current?.();
-      openTimelinesRef.current = null;
-      previewLayoutRef.current?.();
-      previewLayoutRef.current = null;
-      adapterRef.current?.dispose();
-      adapterRef.current = null;
-      onControllerReady?.(null);
-    },
-    [onControllerReady],
   );
 
   return (

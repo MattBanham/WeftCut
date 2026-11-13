@@ -5,7 +5,9 @@ overlay that lifts over the editor (drag-resizable, does not push it up). It
 records command results, long operations, MCP activity and errors. The agent
 panel's activity stream is separate (see the last section). The
 `derivatives-pill` in the strip is the liveness signal for background derivative
-jobs; `ExportPanel` and `QueuePanel` own export progress.
+jobs; `ExportPanel` and `QueuePanel` own export progress, except a background
+export (Preview during export): its `ExportProgressPill` in the strip shows a
+progress ring and percent, and opens its details and Cancel on click.
 
 ## Backend
 
@@ -143,7 +145,10 @@ Report an Issue (startup screen, Help menu) exports a local ZIP (current session
 latest abnormal one + environment + README) and opens a prefilled GitHub issue
 draft; the user attaches the ZIP. Nothing is uploaded automatically. Only the
 `quit` event (after autosave) marks a session closed — `before-quit` can be
-cancelled. An unfinished session or recorded process failure prompts after the
+cancelled. A Windows shutdown, restart or sign-out raises no `quit`: the editor
+window's `session-end` saves and marks the session closed before the process is
+terminated (`main/sessionEnd.ts`), and only a save that failed there marks it
+for a report. An unfinished session or recorded process failure prompts after the
 next splash ("did not exit normally"). Storage failures never block startup.
 
 ## Frontend

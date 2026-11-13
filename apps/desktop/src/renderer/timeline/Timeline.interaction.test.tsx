@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { Ticker } from "pixi.js";
 import { PlaybackEngine } from "../render/PlaybackEngine";
 import type { Compositor } from "../render/Compositor";
+import { timeUsAtFrame } from "../frames";
 import {
   act,
   cleanup,
@@ -666,6 +667,45 @@ describe("Timeline seek/selection coupling", () => {
     expect(ipcMocks.trimLayer).not.toHaveBeenCalled();
   });
 
+  // Clip A ends where Clip B starts, so the dragged edge starts on a target.
+  // A small wiggle crosses the starting frame both ways; the guide must stay
+  // on that target throughout rather than vanish whenever the pointer is back
+  // over the starting frame, and only leave once the edge is pulled out of range.
+  it.each([
+    { name: "move", label: "Clip B", left: 160, right: 320, downX: 240 },
+    { name: "trim-end", label: "Clip A", left: 0, right: 160, downX: 160 },
+  ])("keeps the guide on the target an edge started on while the pointer crosses its starting frame ($name)", ({
+    label, left, right, downX,
+  }) => {
+    vi.useFakeTimers();
+    setPlayheadTimeUs(4_800_000);
+    const dragged = label === "Clip A" ? layer : linkedLayer;
+    const { getByText, queryByTestId } = renderTimeline({
+      tracks: [linkedTrack],
+      selectedLayerId: dragged.id,
+    });
+    const block = getByText(label).closest(".timeline-layer") as HTMLElement;
+    vi.spyOn(block, "getBoundingClientRect").mockReturnValue({
+      left, right, top: 0, bottom: 48, width: right - left, height: 48,
+      x: left, y: 0, toJSON: () => ({}),
+    });
+    const guideAt = (dx: number) => {
+      fireEvent.pointerMove(window, { clientX: downX + dx, clientY: 30 });
+      return queryByTestId("timeline-snap-guide")?.getAttribute("data-snap-boundary-us") ?? null;
+    };
+
+    fireEvent.pointerDown(block, { button: 0, clientX: downX, clientY: 30 });
+    // +4 px names the next frame and snaps back; +1 px is still the starting frame.
+    expect([4, 1, 4, 1, 0].map(guideAt)).toEqual(Array(5).fill("2000000"));
+    expect(guideAt(40)).toBeNull();
+    guideAt(1);
+    fireEvent.pointerUp(window, { clientX: downX + 1, clientY: 30 });
+
+    expect(queryByTestId("timeline-snap-guide")).toBeNull();
+    expect(ipcMocks.moveLayer).not.toHaveBeenCalled();
+    expect(ipcMocks.trimLayer).not.toHaveBeenCalled();
+  });
+
   it("keeps a short drag on an unselected clip as selection only", () => {
     vi.useFakeTimers();
     useAppSettingsStore.setState((s) => ({
@@ -851,6 +891,123 @@ describe("Timeline seek/selection coupling", () => {
     );
     // A lane with room takes the clip itself; spawning stays the exception.
     expect(ipcMocks.moveLayersToNewTrack).not.toHaveBeenCalled();
+  });
+
+  it("shows the snap guide on a vertical-only cross-track move when clip edges already align", () => {
+    vi.useFakeTimers();
+    // Keep the playhead away from either edge: the target is the adjacent
+    // clip boundary, not the playhead at composition zero.
+    setPlayheadTimeUs(4_000_000);
+    const neighbour: LayerSummary = {
+      ...layer,
+      id: "neighbour",
+      label: "Neighbour",
+      t_start_us: 2_000_000,
+      t_end_us: 3_000_000,
+    };
+    const { container, getByText, queryByTestId } = renderTimeline({
+      tracks: [rowBottom, { ...rowMid, layers: [neighbour] }, rowTop],
+      selectedLayerId: draggedLayer.id,
+    });
+    stubLaneLayout(container);
+    const block = getByText("Dragged").closest(".timeline-layer") as HTMLElement;
+
+    fireEvent.pointerDown(block, { button: 0, clientX: 80, clientY: 212 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: 80 });
+    expect(queryByTestId("timeline-snap-guide")?.getAttribute("data-snap-boundary-us"))
+      .toBe("2000000");
+    fireEvent.pointerUp(window, { clientX: 80, clientY: 80 });
+
+    expect(queryByTestId("timeline-snap-guide")).toBeNull();
+    expect(ipcMocks.moveLayer).toHaveBeenCalledWith(
+      draggedLayer.id, rowMid.id, 0, false,
+    );
+  });
+
+  it.each([
+    { fpsNum: 30, fpsDen: 1, driftUs: -1 },
+    { fpsNum: 30, fpsDen: 1, driftUs: 1 },
+    { fpsNum: 30_000, fpsDen: 1001, driftUs: -1 },
+    { fpsNum: 30_000, fpsDen: 1001, driftUs: 1 },
+  ])("shows the landed boundary for a track-only move with a same-frame tail (%j)", ({
+    fpsNum, fpsDen, driftUs,
+  }) => {
+    vi.useFakeTimers();
+    setPlayheadTimeUs(4_000_000);
+    const boundaryUs = timeUsAtFrame(61, fpsNum, fpsDen);
+    const nearlyAligned = { ...draggedLayer, t_end_us: boundaryUs + driftUs };
+    const neighbour = {
+      ...layer, id: "neighbour", label: "Neighbour",
+      t_start_us: boundaryUs, t_end_us: timeUsAtFrame(91, fpsNum, fpsDen),
+    };
+    const { container, getByText, queryByTestId } = renderTimeline({
+      tracks: [
+        { ...rowBottom, layers: [nearlyAligned] },
+        { ...rowMid, layers: [neighbour] },
+        rowTop,
+      ],
+      selectedLayerId: nearlyAligned.id,
+      fpsNum, fpsDen,
+    });
+    stubLaneLayout(container);
+    const block = getByText("Dragged").closest(".timeline-layer")!;
+    fireEvent.pointerDown(block, { button: 0, clientX: 80, clientY: 212 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: 80 });
+    expect(queryByTestId("timeline-snap-guide")?.getAttribute("data-snap-boundary-us"))
+      .toBe(String(boundaryUs));
+    fireEvent.pointerUp(window, { clientX: 80, clientY: 80 });
+    expect(queryByTestId("timeline-snap-guide")).toBeNull();
+    expect(ipcMocks.moveLayer).toHaveBeenCalledWith(nearlyAligned.id, rowMid.id, 0, false);
+  });
+
+  it("does not invent a guide for a purely vertical move with no matching edge", () => {
+    vi.useFakeTimers();
+    setPlayheadTimeUs(4_000_000);
+    const neighbour: LayerSummary = {
+      ...layer,
+      id: "neighbour",
+      label: "Neighbour",
+      t_start_us: 2_100_000,
+      t_end_us: 3_100_000,
+    };
+    const { container, getByText, queryByTestId } = renderTimeline({
+      tracks: [rowBottom, { ...rowMid, layers: [neighbour] }, rowTop],
+      selectedLayerId: draggedLayer.id,
+    });
+    stubLaneLayout(container);
+    const block = getByText("Dragged").closest(".timeline-layer") as HTMLElement;
+    fireEvent.pointerDown(block, { button: 0, clientX: 80, clientY: 212 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: 80 });
+    expect(queryByTestId("timeline-snap-guide")).toBeNull();
+    fireEvent.pointerUp(window, { clientX: 80, clientY: 80 });
+    expect(ipcMocks.moveLayer).toHaveBeenCalledWith(draggedLayer.id, rowMid.id, 0, false);
+  });
+
+  it("draws a linked move at its zero-clamped landing and clears a target it cannot reach", () => {
+    vi.useFakeTimers();
+    const anchor = { ...draggedLayer, t_start_us: 1_000_000, t_end_us: 2_000_000 };
+    const leading = { ...linkedLayer, label: "Leading", t_start_us: 500_000, t_end_us: 1_000_000 };
+    const { container, getByText, queryByTestId } = renderTimeline({
+      tracks: [
+        { ...rowBottom, layers: [anchor] },
+        { ...rowMid, layers: [leading] },
+        rowTop,
+      ],
+      selectedLayerId: anchor.id,
+      links: [{ id: "linked-move", layer_ids: [anchor.id, leading.id] }],
+    });
+    stubLaneLayout(container);
+    const moving = getByText("Dragged").closest<HTMLElement>(".timeline-layer")!;
+    const first = container.querySelector<HTMLElement>(`.timeline-layer[data-layer-id="${leading.id}"]`)!;
+    fireEvent.pointerDown(moving, { button: 0, clientX: 120, clientY: 212 });
+    fireEvent.pointerMove(window, { clientX: 40, clientY: 212 });
+
+    expect(moving.style.left).toBe("40px");
+    expect(first.style.left).toBe("0px");
+    expect(queryByTestId("timeline-snap-guide")).toBeNull();
+
+    fireEvent.pointerUp(window, { clientX: 40, clientY: 212 });
+    expect(ipcMocks.moveLayer).toHaveBeenCalledWith(anchor.id, rowBottom.id, 0, false);
   });
 
   it("hands an expanded track's sub-lane band to the track that owns it", () => {
@@ -1574,19 +1731,74 @@ describe("Timeline seek/selection coupling", () => {
     expect(container.querySelector('[data-testid="timeline-visual-preview"]')).toBeNull();
   });
 
-  it("shows a blade cut preview at the hovered cut point", () => {
+  it("draws the blade mark in the time-mark overlay at the hovered cut point", () => {
     const { container } = renderTimeline({ bladeMode: true });
     const block = container.querySelector(".timeline-layer")!;
     fireEvent.pointerMove(block, { clientX: 80, buttons: 0 });
 
-    const marker = container.querySelector(
-      '[data-testid="timeline-blade-preview"]',
-    ) as HTMLElement | null;
-    expect(marker).not.toBeNull();
-    expect(marker?.style.left).toBe("80px");
+    const mark = container.querySelector<HTMLElement>('[data-testid="timeline-blade-mark"]');
+    expect(mark?.style.left).toBe("80px");
+    // Same layer as the playhead, so it reaches the ruler and cannot sit a
+    // pixel off it.
+    expect(mark?.closest('[data-testid="timeline-time-mark-overlay"]')).not.toBeNull();
+    expect(mark?.closest('[data-testid="timeline-track-viewport"]')).toBeNull();
+    expect(container.querySelector('[data-testid="timeline-snap-guide"]')).toBeNull();
 
     fireEvent.pointerLeave(block);
-    expect(container.querySelector('[data-testid="timeline-blade-preview"]')).toBeNull();
+    expect(container.querySelector('[data-testid="timeline-blade-mark"]')).toBeNull();
+  });
+
+  it("draws the blade mark solid over exactly the clips the click would cut", () => {
+    // Hovered clip, a linked sibling that spans the cut, a linked sibling that
+    // ends before it, and an unlinked clip that spans it.
+    const sibling = { ...layer, id: "sibling", label: "Sibling" };
+    const missed = { ...layer, id: "missed", label: "Missed", t_start_us: 0, t_end_us: 500_000 };
+    const other = { ...layer, id: "other", label: "Other" };
+    const tracks = [
+      { ...track, id: "t1", layers: [layer] },
+      { ...track, id: "t2", layers: [sibling] },
+      { ...track, id: "t3", layers: [missed, { ...other, t_start_us: 600_000 }] },
+    ];
+    const links = [{ id: "link", layer_ids: [layer.id, sibling.id, missed.id] }];
+    const { container } = renderTimeline({ bladeMode: true, tracks, links });
+    const rows = new Map([[layer.id, 0], [sibling.id, 1], [missed.id, 2], [other.id, 2]]);
+    for (const [id, row] of rows) {
+      const block = container.querySelector<HTMLElement>(`.timeline-layer[data-layer-id="${id}"]`)!;
+      vi.spyOn(block, "getBoundingClientRect").mockReturnValue({
+        left: 0, right: 160, top: 40 + row * 60, bottom: 88 + row * 60,
+        width: 160, height: 48, x: 0, y: 40 + row * 60, toJSON: () => ({}),
+      });
+    }
+    const hovered = container.querySelector(`.timeline-layer[data-layer-id="${layer.id}"]`)!;
+    const cuts = () => Object.fromEntries(
+      [...container.querySelectorAll<HTMLElement>('[data-testid="timeline-blade-cut"]')]
+        .map((el) => [el.dataset.layerId, [el.style.top, el.style.height]]),
+    );
+
+    fireEvent.pointerMove(hovered, { clientX: 80, buttons: 0 });
+    expect(cuts()).toEqual({ [layer.id]: ["40px", "48px"], [sibling.id]: ["100px", "48px"] });
+
+    // The click would cut the hovered clip alone, and the mark says so at once.
+    act(() => setLinkOverride(true));
+    expect(cuts()).toEqual({ [layer.id]: ["40px", "48px"] });
+  });
+
+  it("marks a snapped blade cut on the mark itself", () => {
+    const target = { ...layer, id: "target", label: "Target", t_start_us: 1_500_000, t_end_us: 3_000_000 };
+    const { container } = renderTimeline({
+      bladeMode: true, tracks: [track, { ...track, id: "t2", layers: [target] }],
+    });
+    const block = container.querySelector(`.timeline-layer[data-layer-id="${layer.id}"]`)!;
+    const mark = () => container.querySelector<HTMLElement>('[data-testid="timeline-blade-mark"]');
+
+    fireEvent.pointerMove(block, { clientX: 118, buttons: 0 });
+    expect(mark()?.dataset.atUs).toBe("1500000");
+    expect(mark()?.dataset.snapped).toBe("true");
+    expect(container.querySelector('[data-testid="timeline-snap-guide"]')).toBeNull();
+
+    fireEvent.pointerMove(block, { clientX: 118, buttons: 0, ctrlKey: true, metaKey: true });
+    expect(mark()?.dataset.snapped).toBe("false");
+    expect(mark()?.dataset.atUs).not.toBe("1500000");
   });
 
   it.each(["cancel", "blur", "escape", "unmount"])("does not leave ruler seeking armed after %s", (ending) => {
@@ -1636,7 +1848,7 @@ describe("Timeline seek/selection coupling", () => {
     expect(ruler.className).toContain("top-0");
     expect(rulerCorner.closest('[data-testid="timeline-track-viewport"]')).toBeNull();
     expect(playheadHead.closest('[data-testid="timeline-track-viewport"]')).toBeNull();
-    expect(playheadHead.closest('[data-testid="timeline-playhead-overlay"]')).not.toBeNull();
+    expect(playheadHead.closest('[data-testid="timeline-time-mark-overlay"]')).not.toBeNull();
     expect(playheadHead.classList.contains("top-0")).toBe(true);
     expect(playheadHeadShape.classList.contains("top-0.5")).toBe(true);
   });
@@ -1917,11 +2129,15 @@ describe("Timeline seek/selection coupling", () => {
     expect(layerIdsOf(currentSelection())).toEqual(new Set([layer.id, linkedLayer.id]));
   });
 
-  it("previews and commits the lane offset for the whole selection", async () => {
+  it.each([false, true])("previews, snaps and commits the whole selection (linked: %s)", async (linked) => {
     ipcMocks.moveLayers.mockClear();
-    const top = { ...track, id: "top", layers: [] };
+    setPlayheadTimeUs(4_000_000);
+    const target = { ...layer, id: "target-edge", label: "Target", t_start_us: 1_000_000 };
+    const top = { ...track, id: "top", layers: [target] };
     const middle = { ...track, id: "middle", layers: [linkedLayer] };
-    const { container, getByText } = renderTimeline({ tracks: [track, middle, top], links: [] });
+    const { container, getByText, queryByTestId } = renderTimeline({
+      tracks: [track, middle, top], links: linked ? [link] : [],
+    });
     stubRaiseLayout(container);
     const lanes = [...container.querySelectorAll<HTMLElement>('[data-testid="track-lane"]')];
     const sourceLane = lanes.find((el) => el.dataset.trackId === track.id)!;
@@ -1933,7 +2149,9 @@ describe("Timeline seek/selection coupling", () => {
     fireEvent.pointerMove(window, { clientX: 80, clientY: targetY });
     expect(getByText("Clip A").closest('[data-testid="track-lane"]')?.getAttribute("data-track-id")).toBe("middle");
     expect(getByText("Clip B").closest('[data-testid="track-lane"]')?.getAttribute("data-track-id")).toBe("top");
+    expect(queryByTestId("timeline-snap-guide")?.getAttribute("data-snap-boundary-us")).toBe("2000000");
     fireEvent.pointerUp(window, { clientX: 80, clientY: targetY });
+    expect(queryByTestId("timeline-snap-guide")).toBeNull();
     await waitFor(() => expect(ipcMocks.moveLayers).toHaveBeenCalledWith(
       [{ layerId: layer.id, trackId: "middle" }, { layerId: linkedLayer.id, trackId: "top" }], layer.id, 0,
     ));
@@ -2289,7 +2507,7 @@ describe("Timeline seek/selection coupling", () => {
       expect(ghost.style.left).toBe("240px");
       expect(ghost.style.width).toBe("240px");
       expect(ghost.classList.contains("media-drop-ghost")).toBe(true);
-      expect(useMediaDragStore.getState().absorptionTarget).toMatchObject({
+      expect(useMediaDragStore.getState().dropTarget?.absorptionTarget).toMatchObject({
         left: 254,
         top: 18,
         width: 36,
@@ -2298,7 +2516,8 @@ describe("Timeline seek/selection coupling", () => {
     },
   );
 
-  it("transfers media ghost and lane focus exclusively between A-roll and B-roll", () => {
+  it("transfers the media ghost and guide between lanes despite a stale leave", () => {
+    setPlayheadTimeUs(3_000_000);
     const bRollTrack: TrackSummary = {
       ...track,
       id: "track-2",
@@ -2308,7 +2527,7 @@ describe("Timeline seek/selection coupling", () => {
     };
     const payload = mediaDragPayload(sourceMedia);
     useMediaDragStore.getState().begin(payload);
-    const { container } = renderTimeline({
+    const { container, unmount } = renderTimeline({
       tracks: [track, bRollTrack],
       media: [sourceMedia],
     });
@@ -2367,10 +2586,21 @@ describe("Timeline seek/selection coupling", () => {
     // The incoming lane must claim the one active focus without depending on
     // the outgoing lane first receiving a trustworthy dragleave event.
     dragOver(bRollLane, 96);
+    fireEvent.dragLeave(aRollLane, { dataTransfer });
     const onBRoll = laneStates();
+    const guide = () => container.querySelector('[data-testid="timeline-snap-guide"]');
+    expect(guide()?.getAttribute("data-snap-boundary-us")).toBe("3000000");
 
     dragOver(aRollLane, 32);
     const backOnARoll = laneStates();
+    fireEvent.drop(aRollLane, { dataTransfer: { ...dataTransfer, getData: () => "" } });
+    expect(guide()).toBeNull();
+    expect(useMediaDragStore.getState().dropTarget).toBeNull();
+
+    dragOver(bRollLane, 96);
+    expect(guide()?.getAttribute("data-snap-boundary-us")).toBe("3000000");
+    unmount();
+    expect(useMediaDragStore.getState().dropTarget).toBeNull();
 
     expect([onARoll, onBRoll, backOnARoll]).toEqual([
       [
@@ -2534,7 +2764,7 @@ describe("Timeline seek/selection coupling", () => {
 
     // The strip owns the highlight through the same claim protocol the lanes
     // use, and a lane that does not exist yet cannot collide.
-    expect(useMediaDragStore.getState().dropTargetTrackId).toBe(SPAWN_TRACK_ID);
+    expect(useMediaDragStore.getState().dropTarget?.trackId).toBe(SPAWN_TRACK_ID);
     const ghost = container.querySelector(
       '[data-testid="timeline-drop-strip-ghost"]',
     ) as HTMLElement;

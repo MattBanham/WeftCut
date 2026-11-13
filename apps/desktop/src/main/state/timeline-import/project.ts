@@ -16,13 +16,17 @@ import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/m
 import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
-import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml } from './fcpxml'
+import { FCPXML_LIMITS, listFcpxmlSequences, parseFcpxml, TimelineEditFailure } from './fcpxml'
 import type { TimelineClip, TimelineSource } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 
 export class TimelineMediaFailure extends Error {
-  constructor(readonly issues: TimelineMediaIssue[], readonly canSearchFolder = false) {
+  constructor(
+    readonly issues: TimelineMediaIssue[],
+    readonly canSearchFolder: boolean,
+    readonly effectIssues: TimelineCompatibilityItem[],
+  ) {
     super(issues.map(issue => issue.detail).join('\n'))
   }
 }
@@ -115,7 +119,7 @@ export async function prepareTimelineProject(
   if (expectedDocument !== undefined && expectedDocument !== documentId(document)) {
     throw new Error('The FCPXML file changed since you opened it. Choose it again to review the updated timeline.')
   }
-  const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects)
+  const timeline = parseFcpxml(document, sequenceIndex as number | undefined, omitEffects ? 'omit' : 'inspect')
   assertCurrent()
   const initial = blankProject(idGen, timeline.name?.trim() || basename(inputFile, extname(inputFile)))
   rootComposition(initial).fps = timeline.fps
@@ -229,7 +233,7 @@ export async function prepareTimelineProject(
     }
     claimed.set(key, previous ?? original)
   }
-  if (conflicts.size) throw new TimelineMediaFailure([...missing, ...conflicts.values()], offline.length > 0)
+  if (conflicts.size) throw new TimelineMediaFailure([...missing, ...conflicts.values()], offline.length > 0, timeline.effectIssues ?? [])
 
   const relinkedMedia = [...substitutions].filter(([from, to]) => from !== to).map(([from, to]) => ({ from, to }))
   const mediaIds = new Map<string, string>()
@@ -273,8 +277,9 @@ export async function prepareTimelineProject(
     }
   }
   if (missing.length || failed.length || incompatibilities.size) {
-    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0)
+    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, timeline.effectIssues ?? [])
   }
+  if (timeline.effectIssues?.length) throw new TimelineEditFailure(timeline.effectIssues, true)
   const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0

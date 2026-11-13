@@ -366,15 +366,15 @@ export class TimelineEditFailure extends Error {
   }
 }
 
-export function parseFcpxml(xml: string, sequenceIndex?: number, omitEffects = false): ImportTimeline {
-  try { return parseDocument(readXml(xml), sequenceIndex, omitEffects) }
+export function parseFcpxml(xml: string, sequenceIndex?: number, effects: 'refuse' | 'inspect' | 'omit' = 'refuse'): ImportTimeline {
+  try { return parseDocument(readXml(xml), sequenceIndex, effects) }
   catch (error) {
     if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
     throw error
   }
 }
 
-function parseDocument(root: Element, sequenceIndex: number | undefined, omitEffects: boolean): ImportTimeline {
+function parseDocument(root: Element, sequenceIndex: number | undefined, effects: 'refuse' | 'inspect' | 'omit'): ImportTimeline {
   const choices = collectProjects(root)
   if (sequenceIndex === undefined && choices.length > 1) {
     fail(root, `Found ${choices.length} project sequences. Choose which one to import`)
@@ -430,7 +430,7 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
           ['filter-video', 'filter-audio'].includes(child.tag) && child.children.every(parameterTree)
         const info = { location: location(child), label: child.attrs.name || child.tag,
           lane: Number(parent.attrs.lane ?? 0) || 0 }
-        if (omitEffects && safeToOmit) {
+        if (effects === 'omit' && safeToOmit) {
           omittedEffects.push({ ...info, status: 'approximated',
             notes: ['This effect will be left out. The clip and its cut times will be kept.'] })
           continue
@@ -438,13 +438,16 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
         canOmitEffects &&= safeToOmit
         unsupported.push({ ...info, status: 'unsupported',
           notes: ['FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. ' + remedy] })
+        if (effects === 'inspect' && safeToOmit) continue
       } else scanStory(child)
       kept.push(child)
     }
     parent.children = kept
   }
   scanStory(seq)
-  if (unsupported.length) throw new TimelineEditFailure(unsupported, canOmitEffects)
+  if (unsupported.length && (effects !== 'inspect' || !canOmitEffects)) {
+    throw new TimelineEditFailure(unsupported, canOmitEffects)
+  }
   const notices: TimelineCompatibilityItem[] = [...omittedEffects]
   const notice = (el: Element, note: string) => notices.push({ location: location(el),
     label: el.attrs.name || el.tag, lane: 0, status: 'converted', notes: [note] })
@@ -806,7 +809,7 @@ function parseDocument(root: Element, sequenceIndex: number | undefined, omitEff
   if (frameCount.den !== 1) notice(seq, 'The timeline end was extended to the next video frame to contain the final audio sample')
   if (clips.length === 0) fail(spine, 'The primary storyline needs at least one asset clip')
   return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
-    fps: { num: fps.num, den: fps.den }, durationFrames, clips, dissolves, notices, omittedEffects,
+    fps: { num: fps.num, den: fps.den }, durationFrames, clips, dissolves, notices, omittedEffects, effectIssues: unsupported,
     normalizedTimecode: sequenceOrigin.num !== 0, dropFrameTimecode: tcFormat === 'DF',
     namedFormatDefaults: format.namedDefaults, sourceColor: format.sourceColor }
 }

@@ -963,7 +963,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
             return { kind: 'edit-blocked', issues: error.issues, canOmitEffects: error.canOmitEffects } satisfies TimelineEditBlocked
           }
           if (error instanceof TimelineMediaFailure) {
-            return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder } satisfies TimelineMediaBlocked
+            return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder, effectIssues: error.effectIssues } satisfies TimelineMediaBlocked
           }
           throw error
         }

@@ -4,10 +4,13 @@ import type { AudioRole, Rational } from '../model'
 
 import type { OriginalMediaPath } from './mediaPath'
 
-export interface TimelineSource extends OriginalMediaPath {
+export interface TimelineMediaReference extends OriginalMediaPath {
   ref: string
   name?: string
   proxies?: OriginalMediaPath[]
+}
+
+export interface TimelineSource extends TimelineMediaReference {
   duration: ExactTime
   hasVideo: boolean
   /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */

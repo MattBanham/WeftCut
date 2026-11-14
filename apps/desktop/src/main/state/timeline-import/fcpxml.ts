@@ -4,7 +4,7 @@ import type { ExactTime } from '../../../shared/timeMapping'
 import { TimeMappingError } from '../../../shared/timeMapping'
 import { addTime, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
 import type { TimelineCompatibilityItem, TimelineMediaChange } from '../../../shared/timelineImport'
-import type { ImportTimeline, TimelineClip, TimelineSource } from './timeline'
+import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSource } from './timeline'
 import { originalMediaPath, type OriginalMediaPath } from './mediaPath'
 
 interface Element {
@@ -53,10 +53,14 @@ function location(el: Element): string {
   return `<${el.tag}> at line ${el.line}${name ? ` (${name})` : ''}`
 }
 
-class FcpxmlError extends Error {}
+class FcpxmlError extends Error {
+  constructor(readonly element: Element, readonly details: string[]) {
+    super(details.join('\n'))
+  }
+}
 
 function fail(el: Element, message: string): never {
-  throw new FcpxmlError(`FCPXML ${location(el)}: ${message}`)
+  throw new FcpxmlError(el, [`FCPXML ${location(el)}: ${message}`])
 }
 
 function readXml(xml: string): Element {
@@ -96,9 +100,9 @@ function readXml(xml: string): Element {
     const parent = stack.at(-2)?.tag
     const inMetadata = el.tag === 'string' && parent === 'array' &&
       stack.at(-3)?.tag === 'md' && stack.at(-4)?.tag === 'metadata' &&
-      ['asset', 'sequence', 'title'].includes(stack.at(-5)?.tag ?? '')
+      ['asset', 'asset-clip', 'sequence', 'title'].includes(stack.at(-5)?.tag ?? '')
     const inOmittedText = (el.tag === 'bookmark' && parent === 'media-rep') ||
-      (el.tag === 'note' && (parent === 'sequence' || parent === 'title')) ||
+      (el.tag === 'note' && ['sequence', 'title', 'asset-clip', 'audio', 'video'].includes(parent ?? '')) ||
       (el.tag === 'data' && stack.some(node => node.tag === 'title'))
     // Title text is interpreted only by the title importer. Keep reading here
     // so an unsupported title can give a remedy instead of an XML error.
@@ -121,7 +125,7 @@ function check(el: Element, attrs: readonly string[], children: readonly string[
   for (const child of el.children) {
     if (!children.includes(child.tag)) errors.push('FCPXML ' + location(child) + ': Unsupported inside <' + el.tag + '>. Simplify the edit and export again')
   }
-  if (errors.length) throw new FcpxmlError(errors.join('\n'))
+  if (errors.length) throw new FcpxmlError(el, errors)
 }
 
 function one(el: Element, tag: string): Element {
@@ -304,7 +308,6 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
         paspH: source.paspH, paspV: source.paspV }
     }
   }
-  const representations = el.children.filter(child => child.tag === 'media-rep')
   const hasMetadata = checkMetadata(el)
   if (a.colorSpaceOverride !== undefined) {
     if (!hasVideo) fail(el, 'Only visual media can have a color-space override')
@@ -315,6 +318,15 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
     mediaNotices.push('The source asset does not give the full image size. WeftCut reads the dimensions from the image file.')
   }
   if (hasMetadata) mediaNotices.push('Custom asset metadata is not copied to the project')
+  const reference = parseAssetReference(el, mediaNotices)
+  if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
+  return { ...reference, start: time(el, 'start', ZERO_TIME), duration,
+    hasVideo, hasAudio, stillImage, imageSize, sourceColor, videoFormat, audioChannels, audioRate, mediaNotices }
+}
+
+function parseAssetReference(el: Element, mediaNotices?: string[]): TimelineMediaReference {
+  const a = el.attrs
+  const representations = el.children.filter(child => child.tag === 'media-rep')
   const originalReps: Element[] = []
   const proxies: OriginalMediaPath[] = []
   for (const rep of representations) {
@@ -325,24 +337,21 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
     if (kind === 'original-media') originalReps.push(rep)
     else if (kind === 'proxy-media') {
       try { proxies.push(originalMediaPath(required(rep, 'src'))) }
-      catch { mediaNotices.push('A proxy path is unavailable for local relinking. Choose a local copy if you need it.') }
+      catch { mediaNotices?.push('A proxy path is unavailable for local relinking. Choose a local copy if you need it.') }
     } else fail(rep, 'This media representation is unsupported. Export a reference to the original file.')
   }
   if (a.src !== undefined && representations.length) fail(el, 'The asset specifies both a legacy URL and media representations. Export it with one original.')
   if (a.src === undefined && originalReps.length !== 1) {
     fail(el, 'The asset needs exactly one original media-rep. Relink the original in the source editor and export again.')
   }
-  if (proxies.length) mediaNotices.push('WeftCut prefers the original file. A proxy must be chosen explicitly.')
-  if (representations.some(rep => rep.attrs.sig !== undefined)) mediaNotices.push('Source media signature is not retained')
-  if (representations.some(rep => rep.children.length)) mediaNotices.push(
+  if (proxies.length) mediaNotices?.push('WeftCut prefers the original file. A proxy must be chosen explicitly.')
+  if (representations.some(rep => rep.attrs.sig !== undefined)) mediaNotices?.push('Source media signature is not retained')
+  if (representations.some(rep => rep.children.length)) mediaNotices?.push(
     'Apple file access bookmarks are left out. WeftCut uses the local media path or a replacement you choose.')
-  if (representations.some(rep => rep.attrs.suggestedFilename !== undefined)) mediaNotices.push(
+  if (representations.some(rep => rep.attrs.suggestedFilename !== undefined)) mediaNotices?.push(
     'Suggested media filenames are left out. WeftCut keeps the names of the local files.')
   const original = localPath(a.src !== undefined ? el : originalReps[0]!)
-
-  if (duration.num === 0 && !stillImage) fail(el, 'Asset duration must be positive')
-  return { ref: required(el, 'id'), name: a.name, ...original, proxies, start: time(el, 'start', ZERO_TIME), duration,
-    hasVideo, hasAudio, stillImage, imageSize, sourceColor, videoFormat, audioChannels, audioRate, mediaNotices }
+  return { ref: required(el, 'id'), name: a.name, ...original, proxies }
 }
 
 function checkMetadata(owner: Element): boolean {
@@ -433,13 +442,56 @@ export function parseFcpxml(xml: string, sequenceIndex?: number, effects: Effect
 }
 
 export function inspectFcpxml(xml: string, sequenceIndex: number | undefined, omitEffects: boolean, leaveTitleGaps: boolean):
-  { timeline: ImportTimeline } | { issues: TimelineCompatibilityItem[]; sources: { asset: TimelineSource; label?: string }[] } {
+  { timeline: ImportTimeline } | { issues: TimelineCompatibilityItem[]; sources: { asset: TimelineMediaReference; label?: string }[] } {
   const selection = selectTimeline(xml, sequenceIndex)
+  const storyIssues: TimelineCompatibilityItem[] = []
   try {
-    return { timeline: parseSelectedTimeline(selection, omitEffects ? 'omit' : 'inspect', leaveTitleGaps) }
+    return { timeline: parseSelectedTimeline(selection, omitEffects ? 'omit' : 'inspect', leaveTitleGaps, storyIssues) }
   } catch (error) {
-    if (!(error instanceof TimelineEditFailure)) throw error
-    return { issues: error.issues, sources: inspectIndependentSources(selection) }
+    if (!(error instanceof TimelineEditFailure || error instanceof FcpxmlError)) throw error
+    const diagnostics = error instanceof TimelineEditFailure ? error.issues : [editDiagnostic(error, selection.seq, selection.byId)]
+    const inventory = inspectIndependentSources(selection)
+    const issues = new Map<string, TimelineCompatibilityItem>()
+    for (const issue of [...diagnostics, ...storyIssues, ...inventory.issues]) {
+      issues.set(JSON.stringify([issue.location, issue.lane, issue.timelineFrames, issue.notes]), issue)
+    }
+    return { issues: [...issues.values()], sources: inventory.sources }
+  }
+}
+
+function editDiagnostic(error: FcpxmlError, seq: Element, byId: Map<string, Element>): TimelineCompatibilityItem {
+  const el = error.element
+  const lane = Number(el.attrs.lane ?? 0)
+  const issue: TimelineCompatibilityItem = { label: el.attrs.name || el.attrs.id || el.tag, location: location(el),
+    lane: Number.isSafeInteger(lane) ? lane : 0, status: 'unsupported', notes: error.details }
+  const spine = seq.children.find(child => child.tag === 'spine')
+  if (spine?.children.includes(el)) {
+    const clock = primaryDiagnosticClock(seq, byId)
+    if (clock) issue.timelineFrames = explicitPrimaryRange(el, clock)
+  }
+  return issue
+}
+
+function primaryDiagnosticClock(seq: Element, byId: Map<string, Element>) {
+  const node = byId.get(seq.attrs.format)
+  if (node?.tag !== 'format') return
+  try {
+    return { format: parseFormat(node), origin: time(seq, 'tcStart', ZERO_TIME) }
+  } catch (error) {
+    if (!(error instanceof FcpxmlError || error instanceof TimeMappingError)) throw error
+  }
+}
+
+function explicitPrimaryRange(el: Element, { format, origin }: { format: Format; origin: ExactTime }) {
+  if (el.attrs.offset === undefined || el.attrs.duration === undefined) return
+  try {
+    const start = subtractTime(time(el, 'offset'), origin)
+    const end = addTime(start, time(el, 'duration'))
+    const first = frames(start, format, el, 'offset')
+    const last = frames(end, format, el, 'end')
+    if (last > first && first >= 0) return { start: first, end: last }
+  } catch (error) {
+    if (!(error instanceof FcpxmlError || error instanceof TimeMappingError)) throw error
   }
 }
 
@@ -455,7 +507,6 @@ function selectTimeline(xml: string, sequenceIndex: number | undefined) {
   }
   const resources = one(root, 'resources')
   const { project, library } = choices[index]!
-  check(project, ['id', 'name', 'uid', 'modDate'], ['sequence'])
   const seq = one(project, 'sequence')
   const byId = new Map<string, Element>()
   for (const el of resources.children) {
@@ -467,30 +518,47 @@ function selectTimeline(xml: string, sequenceIndex: number | undefined) {
 }
 
 function inspectIndependentSources({ seq, byId }: ReturnType<typeof selectTimeline>) {
-  const sources: { asset: TimelineSource; label?: string }[] = []
-  const assets = new Map<string, Asset>()
+  const sources: { asset: TimelineMediaReference; label?: string }[] = []
+  const issues: TimelineCompatibilityItem[] = []
+  const assets = new Map<string, TimelineMediaReference | null>()
+  let inventoryLimitReached = false
   const directMedia = new Set(['asset-clip', 'video', 'audio'])
-  const lookup = (ref: string, tag: string, from: Element) => lookupResource(byId, ref, tag, from)
   function inspect(el: Element) {
+    if (!directMedia.has(el.tag)) return
     const ref = el.attrs.ref
-    if (!directMedia.has(el.tag) || ref === undefined || byId.get(ref)?.tag !== 'asset') return
-    let asset = assets.get(ref)
-    if (!asset) {
-      asset = parseAsset(lookup(ref, 'asset', el), lookup)
-      assets.set(ref, asset)
-      if (assets.size > FCPXML_LIMITS.mediaFiles) fail(el, 'This sequence references too many media assets. Export the sequence in smaller parts')
+    const node = byId.get(ref)
+    if (node?.tag !== 'asset') return
+    if (!assets.has(ref)) {
+      if (assets.size >= FCPXML_LIMITS.mediaFiles) {
+        if (!inventoryLimitReached) {
+          issues.push({ label: 'Media inventory', location: location(seq), status: 'unsupported', lane: 0,
+            notes: ['This sequence references too many media assets. Export the sequence in smaller parts.'] })
+          inventoryLimitReached = true
+        }
+        return
+      }
+      try { assets.set(ref, parseAssetReference(node)) }
+      catch (error) {
+        if (!(error instanceof FcpxmlError)) throw error
+        assets.set(ref, null)
+        issues.push(editDiagnostic(error, seq, byId))
+      }
     }
-    sources.push({ asset, label: el.attrs.name })
+    const asset = assets.get(ref)
+    if (asset) sources.push({ asset, label: el.attrs.name })
   }
-  // An unsupported container can select, mute or retime its children. Inventory
-  // only direct files on the selected spine and simple connections to them.
-  for (const clip of one(seq, 'spine').children) {
-    inspect(clip)
-    if (directMedia.has(clip.tag) || clip.tag === 'gap') {
-      for (const connected of clip.children) inspect(connected)
+  // An unsupported container can select, mute or retime its children. Only
+  // the main spine and its direct connections establish file identity here.
+  const spines = seq.children.filter(child => child.tag === 'spine')
+  if (spines.length === 1) {
+    for (const clip of spines[0]!.children) {
+      inspect(clip)
+      if (directMedia.has(clip.tag) || clip.tag === 'gap') {
+        for (const connected of clip.children) inspect(connected)
+      }
     }
   }
-  return sources
+  return { sources, issues }
 }
 
 function lookupResource(byId: Map<string, Element>, ref: string, tag: string, from: Element): Element {
@@ -499,15 +567,19 @@ function lookupResource(byId: Map<string, Element>, ref: string, tag: string, fr
   return item
 }
 
-function parseSelectedTimeline(selection: ReturnType<typeof selectTimeline>, effects: EffectsPolicy, leaveTitleGaps: boolean): ImportTimeline {
+function parseSelectedTimeline(selection: ReturnType<typeof selectTimeline>, effects: EffectsPolicy, leaveTitleGaps: boolean,
+  storyIssues?: TimelineCompatibilityItem[],
+): ImportTimeline {
   const { seq, project, byId } = selection
   const context: SequenceContext = {
-    byId, effects, leaveTitleGaps, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
+    byId, effects, leaveTitleGaps, storyIssues, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
   }
   let timeline: ImportTimeline
-  try { timeline = parseSequence(seq, project, context, selection) }
-  catch (error) {
-    if (error instanceof TimeMappingError) throw new Error(`FCPXML timing is outside the supported range (${error.code})`)
+  try {
+    check(project, ['id', 'name', 'uid', 'modDate'], ['sequence'])
+    timeline = parseSequence(seq, project, context, selection)
+  } catch (error) {
+    if (error instanceof TimeMappingError) fail(seq, `Timing is outside the supported range (${error.code}). Check the clip timing or export a shorter sequence.`)
     throw error
   }
   const measured = new Map<ImportTimeline, { placements: number; depth: number }>()
@@ -536,6 +608,7 @@ interface SequenceContext {
   byId: Map<string, Element>
   effects: EffectsPolicy
   leaveTitleGaps: boolean
+  storyIssues?: TimelineCompatibilityItem[]
   compounds: Map<string, ImportTimeline>
   active: Set<string>
   multicams: Map<Element, Map<string, MulticamAngle>>
@@ -757,6 +830,11 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     for (const child of parent.children) {
       // Nonlinear, reverse and incomplete maps get the ordinary retime remedy.
       // The affine subset is validated against the clip window below.
+      if (clipElements.includes(parent.tag) &&
+          (child.tag === 'note' || (child.tag === 'metadata' && parent.tag === 'asset-clip'))) {
+        kept.push(child)
+        continue
+      }
       const candidateMap = child.tag !== 'timeMap' ||
         (['asset-clip', 'video', 'audio'].includes(parent.tag) && child.children.length === 2 &&
           child.children.every(point => point.tag === 'timept' && point.attrs.interp === 'linear'))
@@ -812,23 +890,12 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   }
   const spine = one(seq, 'spine')
   scanStory(spine, 0)
+  const diagnosticClock = primaryIssues.size > 0 ? primaryDiagnosticClock(seq, byId) : undefined
+  if (diagnosticClock) {
+    for (const [el, issue] of primaryIssues) issue.timelineFrames = explicitPrimaryRange(el, diagnosticClock)
+  }
+  context.storyIssues?.push(...unsupported)
   if (unsupported.some(issue => !issue.recovery) || (effects === 'refuse' && unsupported.length)) {
-    const node = byId.get(seq.attrs.format)
-    if (primaryIssues.size && node?.tag === 'format') {
-      const format = parseFormat(node)
-      const origin = time(seq, 'tcStart', ZERO_TIME)
-      for (const [el, issue] of primaryIssues) {
-        if (el.attrs.offset === undefined || el.attrs.duration === undefined) continue
-        try {
-          const start = subtractTime(time(el, 'offset'), origin)
-          const end = addTime(start, time(el, 'duration'))
-          const first = frames(start, format, el, 'offset'), last = frames(end, format, el, 'end')
-          if (last > first) issue.timelineFrames = { start: first, end: last }
-        } catch (error) {
-          if (!(error instanceof FcpxmlError || error instanceof TimeMappingError)) throw error
-        }
-      }
-    }
     throw new TimelineEditFailure(unsupported, false)
   }
   const notices: TimelineCompatibilityItem[] = [...omittedEffects, ...omittedTitles]
@@ -891,10 +958,10 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     check(el, gap
       ? ['name', 'lane', 'offset', 'start', 'duration']
       : ['name', 'lane', 'offset', 'start', 'duration', 'ref', 'enabled', 'audioRole', 'videoRole', 'format', 'tcFormat', 'srcEnable', 'role',
-        ...(el.tag === 'asset-clip' ? ['audioStart', 'audioDuration'] : [])],
-    parent ? ['marker', 'chapter-marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap']
-      : gap ? ['asset-clip', 'video', 'audio', 'title']
-        : ['marker', 'chapter-marker', 'asset-clip', 'video', 'audio', 'title', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap'])
+        ...(el.tag === 'asset-clip' ? ['audioStart', 'audioDuration', 'modDate'] : ['srcID'])],
+    gap ? parent ? [] : ['asset-clip', 'video', 'audio', 'title']
+      : ['marker', 'chapter-marker', 'adjust-conform', 'adjust-volume', 'adjust-transform', 'adjust-blend', 'timeMap', 'note',
+        ...(el.tag === 'asset-clip' ? ['metadata'] : []), ...(parent ? [] : ['asset-clip', 'video', 'audio', 'title'])])
     const lane = Number(a.lane ?? '0')
     if (parent) {
       if (!/^-?[1-9]\d*$/.test(a.lane ?? '') || !Number.isSafeInteger(lane))
@@ -908,6 +975,16 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       : subtractTime(localOffset, sequenceOrigin)
     if (offset.num < 0) fail(el, 'The clip starts before the timeline origin')
     const notes: string[] = []
+    if (a.srcID !== undefined && a.srcID !== '1') {
+      fail(el, 'This clip selects source stream ' + a.srcID + '. Export the selected stream as its own file and use it in the source edit.')
+    }
+    const clipNotes = el.children.filter(child => child.tag === 'note')
+    if (clipNotes.length > 1) fail(el, 'Only one clip note is supported')
+    if (clipNotes.length) check(clipNotes[0]!, [])
+    const hasClipMetadata = checkMetadata(el)
+    if (a.modDate !== undefined || clipNotes.length || hasClipMetadata) {
+      notes.push('Clip notes and source-editor metadata, when present, are left out.')
+    }
     if (parent && !el.timing) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
     if (a.tcFormat === 'DF') notes.push('Clip drop-frame display metadata becomes zero-based non-drop-frame timecode')
     if (!['0', '1'].includes(a.enabled ?? '1') || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||

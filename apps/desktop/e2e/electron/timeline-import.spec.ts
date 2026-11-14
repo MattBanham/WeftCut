@@ -193,7 +193,7 @@ test('verifies variable-rate in-points and preserves their selected pictures thr
   } finally { await app.close() }
 })
 
-test('keeps missing media actionable while an unsupported transition needs a source edit', async () => {
+test('keeps missing media actionable while a clip needs correction in the source editor', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-structural-')
   const movedFolder = join(folder, 'Relocated')
@@ -202,13 +202,13 @@ test('keeps missing media actionable while an unsupported transition needs a sou
   const missing = join(folder, 'Offline', 'Signal.mov')
   const xml = join(folder, 'Signal.fcpxml')
   encodeSource(media)
-  const transition = '<transition name="Ripple" offset="1001/30000s" duration="1001/30000s"/>'
+  const clip = '<video ref="a" name="Alternate camera stream" srcID="2" offset="1001/30000s" start="1001/30000s" duration="1001/30000s"/>'
   const original = `<fcpxml version="1.10"><resources>
     <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
     <asset id="a" format="f" hasVideo="1" duration="1001/1000s" src="${pathToFileURL(missing).href}"/>
     </resources><project name="Signal"><sequence format="f" duration="3003/30000s"><spine>
     <asset-clip ref="a" offset="0s" start="0s" duration="1001/30000s"/>
-    ${transition}
+    ${clip}
     <asset-clip ref="a" offset="2002/30000s" start="6006/30000s" duration="1001/30000s"/>
     </spine></sequence></project></fcpxml>`
   writeFileSync(xml, original)
@@ -225,13 +225,14 @@ test('keeps missing media actionable while an unsupported transition needs a sou
     await beginImport(page)
     const mediaIssues = page.getByRole('dialog', { name: 'Some media needs attention' })
     await expect(mediaIssues.getByText(/Missing or unreadable original media/)).toBeVisible()
-    await expect(mediaIssues.getByText('Ripple', { exact: true })).toBeVisible()
+    await expect(mediaIssues.getByText('Alternate camera stream', { exact: true })).toBeVisible()
+    await expect(mediaIssues.getByText(/selects source stream 2/)).toBeVisible()
     await expect(mediaIssues.getByText('From frame 1 to the start of frame 2')).toBeVisible()
     await mediaIssues.getByRole('button', { name: 'Find original media in a folder…' }).click()
     const editIssues = page.getByRole('dialog', { name: 'Some edits need attention' })
-    await expect(editIssues.getByText(/Render the adjoining clips with the transition/)).toBeVisible()
+    await expect(editIssues.getByText(/Export the selected stream as its own file/)).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
-    writeFileSync(xml, original.replace(transition, '<gap offset="1001/30000s" duration="1001/30000s"/>'))
+    writeFileSync(xml, original.replace(clip, clip.replace('srcID="2"', 'srcID="1"')))
     await editIssues.getByRole('button', { name: 'Review timeline again…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(`${missing} → ${await realpath(media)}`, { exact: true })).toBeVisible()
@@ -241,8 +242,14 @@ test('keeps missing media actionable while an unsupported transition needs a sou
     const imported = await importedSummary(page)
     expect(imported.tracks.flatMap(track => track.layers)).toMatchObject([
       { t_start_us: 0, t_end_us: 33367, params: { src_in_us: 0 } },
+      { t_start_us: 33367, t_end_us: 66733, params: { src_in_us: 33366 } },
       { t_start_us: 66733, t_end_us: 100100, params: { src_in_us: 200200 } },
     ])
+    await invokeCmd(page, 'project_save')
+    const project = JSON.parse(readFileSync(join(folder, 'Review Edit', 'project.json'), 'utf8'))
+    const exactTrim = importedComposition(project).tracks.flatMap((track: any) => track.layers)
+      .find((layer: any) => layer.label === 'Alternate camera stream')
+    expect(exactTrim.params.source_phase.in).toEqual({ num: 2, den: 3 })
   } finally { await app.close() }
 })
 

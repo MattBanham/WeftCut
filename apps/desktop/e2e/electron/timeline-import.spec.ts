@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
 import { driveExport, invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary, type ProjectSummaryWire } from './helpers/driver'
 
@@ -1123,6 +1123,14 @@ test('exports synchronized camera and recorder edits at the same authored instan
   </spine></sequence></project></fcpxml>`)
   const { app, page } = await launchApp()
   try {
+    // This test measures the edit through export. Host pressure is covered
+    // separately by the export-finalization retry tests.
+    const addon = fileURLToPath(new URL('../../native/index.js', import.meta.url))
+    await app.evaluate((_electron, path) => {
+      const native = process.getBuiltinModule('module').createRequire(path)(path)
+      const readMemory = native.resourcesMemory
+      native.resourcesMemory = async () => ({ ...await readMemory(), availableMib: 1024 })
+    }, addon)
     await newProject(page, { parentFolder: folder, name: basename(destination),
       canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, path) => {
@@ -1147,7 +1155,7 @@ test('exports synchronized camera and recorder edits at the same authored instan
         source_phase: { in: { num: 1, den: 3 }, out: { num: 2, den: 3 } } } })
 
     const result = await driveExport(page, { outputAbsPath: output, settings: { audio: { include: true } } }, { hook: 'exportTimeline' })
-    expect(result.done).toMatchObject({ ok: true })
+    expect(result.done.ok, result.done.error ?? result.lastDetail ?? undefined).toBe(true)
     const pixels = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', output,
       '-vf', 'crop=2:2:160:120', '-frames:v', '6', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { windowsHide: true })
     const firstBrightFrame = [0, 1, 2, 3, 4, 5].find(frame => pixels[frame * 12]! > 200)

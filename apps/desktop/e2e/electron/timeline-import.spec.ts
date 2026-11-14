@@ -1123,16 +1123,19 @@ test('exports synchronized camera and recorder edits at the same authored instan
   </spine></sequence></project></fcpxml>`)
   const { app, page } = await launchApp()
   try {
-    // This test measures the edit through export. Host pressure is covered
-    // separately by the export-finalization retry tests.
+    // A one-thread host must let a retimed export use its existing reservation.
     const addon = fileURLToPath(new URL('../../native/index.js', import.meta.url))
     await app.evaluate((_electron, path) => {
       const native = process.getBuiltinModule('module').createRequire(path)(path)
+      const configure = native.resourcesConfigure
+      const oneThread = (json: string) => configure(JSON.stringify({ ...JSON.parse(json), cpu_threads: 1, task_threads: 1 }))
+      native.resourcesConfigure = oneThread
       const readMemory = native.resourcesMemory
       native.resourcesMemory = async () => ({ ...await readMemory(), availableMib: 1024 })
     }, addon)
     await newProject(page, { parentFolder: folder, name: basename(destination),
       canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await invokeCmd(page, 'app_settings_set', { patch: { resource_policy: { memory_mib: 2304 } } })
     await app.evaluate(({ dialog }, path) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
     }, source)
@@ -1154,7 +1157,8 @@ test('exports synchronized camera and recorder edits at the same authored instan
       params: { composition: group.id, src_in_us: 166833, src_out_us: 333666,
         source_phase: { in: { num: 1, den: 3 }, out: { num: 2, den: 3 } } } })
 
-    const result = await driveExport(page, { outputAbsPath: output, settings: { audio: { include: true } } }, { hook: 'exportTimeline' })
+    const result = await driveExport(page, { outputAbsPath: output,
+      settings: { encoderEngine: 'native', decodeEngine: 'webcodecs', audio: { include: true } } }, { hook: 'exportTimeline' })
     expect(result.done.ok, result.done.error ?? result.lastDetail ?? undefined).toBe(true)
     const pixels = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', output,
       '-vf', 'crop=2:2:160:120', '-frames:v', '6', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { windowsHide: true })

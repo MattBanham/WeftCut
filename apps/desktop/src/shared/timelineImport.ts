@@ -21,10 +21,15 @@ export interface TimelineMediaIssue {
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
-  kind: 'still-size' | 'video-size' | 'video-rate' | 'source-duration' | 'audio-format' | 'color-format' | 'proxy-source' | 'video-timestamp'
+  kind: 'still-size' | 'video-size' | 'video-rate' | 'source-duration' | 'audio-format' | 'color-format' | 'proxy-source' | 'video-timestamp' | 'reused-replacement'
 }
 
-export interface TimelineMediaBlocked {
+export interface TimelineMediaReview {
+  replacements: TimelineMediaReplacement[]
+  unmatchedReplacements: string[]
+}
+
+export interface TimelineMediaBlocked extends TimelineMediaReview {
   kind: 'media-blocked'
   issues: TimelineMediaIssue[]
   canSearchFolder: boolean
@@ -32,7 +37,7 @@ export interface TimelineMediaBlocked {
   mediaChanges: TimelineMediaChange[]
 }
 
-export interface TimelineEditBlocked {
+export interface TimelineEditBlocked extends TimelineMediaReview {
   kind: 'edit-blocked'
   issues: TimelineCompatibilityItem[]
   canOmitEffects: boolean
@@ -44,9 +49,11 @@ export type TimelinePreflight = TimelineImportPreview | TimelineMediaBlocked | T
 export interface TimelineMediaReplacement {
   assetRef: string
   path: string
+  sourceIdentity?: string
+  reused?: boolean
 }
 
-export interface TimelineImportReport {
+export interface TimelineImportReport extends TimelineMediaReview {
   mediaChanges: TimelineMediaChange[]
   outputColorChange: string | null
   omittedEffects: TimelineCompatibilityItem[]

@@ -8,6 +8,8 @@ export interface TimelineMediaReference extends OriginalMediaPath {
   ref: string
   name?: string
   proxies?: OriginalMediaPath[]
+  uid?: string
+  signature?: string
 }
 
 export interface TimelineSource extends TimelineMediaReference {

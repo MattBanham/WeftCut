@@ -970,16 +970,18 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         let preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
         try {
           preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
-            args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true, args.leaveTitleGaps === true)
+            args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true,
+            args.leaveTitleGaps === true, args.revalidateReplacements === true)
         } catch (error) {
           assertCurrent()
-          if (error instanceof TimelineEditFailure) {
-            return { kind: 'edit-blocked', issues: error.issues, canOmitEffects: error.canOmitEffects,
-              mediaChanges: error.mediaChanges } satisfies TimelineEditBlocked
-          }
-          if (error instanceof TimelineMediaFailure) {
-            return { kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder,
-              editIssues: error.editIssues, mediaChanges: error.mediaChanges } satisfies TimelineMediaBlocked
+          if (error instanceof TimelineEditFailure || error instanceof TimelineMediaFailure) {
+            const mediaReview = error.mediaReview ?? { replacements: [], unmatchedReplacements: [] }
+            const common = { ...mediaReview, mediaChanges: error.mediaChanges }
+            if (error instanceof TimelineEditFailure) {
+              return { ...common, kind: 'edit-blocked', issues: error.issues, canOmitEffects: error.canOmitEffects } satisfies TimelineEditBlocked
+            }
+            return { ...common, kind: 'media-blocked', issues: error.issues, canSearchFolder: error.canSearchFolder,
+              editIssues: error.editIssues } satisfies TimelineMediaBlocked
           }
           throw error
         } finally {

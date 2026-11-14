@@ -19,7 +19,7 @@ import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure } from './fcpxml'
 import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSourceWindow } from './timeline'
-import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
+import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineMediaReplacement, TimelineMediaReview, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 import { MAX_VIDEO_IN_POINTS, readVideoInPoints } from './videoTiming'
 
@@ -29,6 +29,7 @@ export class TimelineMediaFailure extends Error {
     readonly canSearchFolder: boolean,
     readonly editIssues: TimelineCompatibilityItem[],
     readonly mediaChanges: TimelineMediaChange[] = [],
+    readonly mediaReview?: TimelineMediaReview,
   ) {
     super(issues.map(issue => issue.detail).join('\n'))
   }
@@ -130,9 +131,59 @@ async function findRelinkCandidates(directory: string, wanted: ReadonlySet<strin
   return { exact, suggestions }
 }
 
+function replacementSelection(replacements: unknown, originals: ReadonlyMap<string, { asset: TimelineMediaReference }>,
+  revalidateReplacements: boolean,
+): TimelineMediaReview {
+  const result: TimelineMediaReview = { replacements: [], unmatchedReplacements: [] }
+  if (replacements === undefined) return result
+  if (!Array.isArray(replacements) || replacements.length > FCPXML_LIMITS.mediaFiles ||
+      (!revalidateReplacements && replacements.length > originals.size)) {
+    throw new Error('Choose at most one replacement per media asset')
+  }
+  const identities = new Map<string, string>()
+  const byIdentity = new Map<string, string | null>()
+  for (const { asset } of originals.values()) {
+    const identity = createHash('sha256').update(JSON.stringify([asset.path, asset.uid, asset.signature])).digest('hex')
+    identities.set(asset.ref, identity)
+    byIdentity.set(identity, byIdentity.has(identity) ? null : asset.ref)
+  }
+  const validated = new Map<string, TimelineMediaReplacement | null>()
+  const seen = new Set<string>()
+  const unmatched = (path: string) => { result.unmatchedReplacements.push(basename(path)) }
+  for (const choice of replacements) {
+    if (!choice || typeof choice.assetRef !== 'string' || typeof choice.path !== 'string' || !isAbsolute(choice.path)) {
+      throw new Error('Choose a local replacement file for each source')
+    }
+    if (seen.has(choice.assetRef)) throw new Error('The replacement does not identify a unique asset in this sequence')
+    seen.add(choice.assetRef)
+    const sourceHint = typeof choice.sourceIdentity === 'string' ? choice.sourceIdentity : undefined
+    const ref = revalidateReplacements ? (sourceHint ? byIdentity.get(sourceHint) : undefined) : choice.assetRef
+    const sourceIdentity = ref ? identities.get(ref) : undefined
+    if (!ref || sourceIdentity === undefined) {
+      if (!revalidateReplacements) throw new Error('The replacement does not identify a unique asset in this sequence')
+      unmatched(choice.path)
+      continue
+    }
+    if (validated.has(ref)) {
+      const previous = validated.get(ref)
+      if (previous) unmatched(previous.path)
+      unmatched(choice.path)
+      validated.set(ref, null)
+      continue
+    }
+    const path = originalMediaPath(pathToFileURL(choice.path).href).path
+    const reused = revalidateReplacements || (choice.reused === true && sourceHint === sourceIdentity)
+    validated.set(ref, { assetRef: ref, path,
+      ...(byIdentity.get(sourceIdentity) === ref ? { sourceIdentity } : {}), ...(reused ? { reused: true } : {}) })
+  }
+  result.replacements = [...validated.values()].filter(choice => choice !== null)
+  return result
+}
+
 export async function prepareTimelineProject(
   path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
   relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false, leaveTitleGaps = false,
+  revalidateReplacements = false,
 ): Promise<{ project: Project; report: TimelineImportReport; assertDocumentUnchanged: () => Promise<void> }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
@@ -214,22 +265,8 @@ export async function prepareTimelineProject(
   if (originals.size > FCPXML_LIMITS.mediaFiles) {
     throw new Error('This sequence references too many media assets. Export the sequence in smaller parts')
   }
-  const selected = new Map<string, string>()
-  if (replacements !== undefined) {
-    if (!Array.isArray(replacements) || replacements.length > originals.size) {
-      throw new Error('Choose at most one replacement per media asset')
-    }
-    for (const choice of replacements) {
-      if (!choice || typeof choice.assetRef !== 'string' || typeof choice.path !== 'string' || !isAbsolute(choice.path)) {
-        throw new Error('Choose a local replacement file for each source')
-      }
-      if (!originals.has(choice.assetRef) || selected.has(choice.assetRef)) {
-        throw new Error('The replacement does not identify a unique asset in this sequence')
-      }
-      // Check the spelling before any filesystem access, just as for URLs in XML.
-      selected.set(choice.assetRef, originalMediaPath(pathToFileURL(choice.path).href).path)
-    }
-  }
+  const mediaReview = replacementSelection(replacements, originals, revalidateReplacements)
+  const selected = new Map(mediaReview.replacements.map(choice => [choice.assetRef, choice.path]))
 
   async function checkFile(path: string): Promise<string> {
     const info = await lstat(path)
@@ -297,9 +334,20 @@ export async function prepareTimelineProject(
     resolved.delete(ref)
   }
 
+  const mediaChanges = new Map<string, TimelineMediaChange>()
+  for (const choice of mediaReview.replacements) {
+    const selectedPath = resolved.get(choice.assetRef)?.path
+    if (!choice.reused || selectedPath === undefined) continue
+    const { asset } = originals.get(choice.assetRef)!
+    const kind = 'reused-replacement'
+    const issue = mediaIssue(asset, 'The updated timeline still references the same original. ' +
+      'WeftCut kept your earlier choice of “' + basename(selectedPath) + '”. Check that this is the file you want to use.')
+    mediaChanges.set(JSON.stringify([asset.ref, kind]), { ...issue, kind, sourcePath: selectedPath })
+  }
   if (!timeline) {
-    if (missing.length) throw new TimelineMediaFailure(missing, offline.length > 0, editIssues)
-    throw new TimelineEditFailure(editIssues, false)
+    const changes = [...mediaChanges.values()]
+    if (missing.length) throw new TimelineMediaFailure(missing, offline.length > 0, editIssues, changes, mediaReview)
+    throw new TimelineEditFailure(editIssues, false, changes, mediaReview)
   }
 
   const stillAssets = new Set(clips.filter(clip => clip.asset.stillImage).map(clip => clip.asset.ref))
@@ -332,7 +380,6 @@ export async function prepareTimelineProject(
   const root = rootComposition(snapshot)
   const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.ref)!]!
   const sourceEnds = new Map<TimelineClip, { videoEnd: ExactTime; audioEnd: ExactTime }>()
-  const mediaChanges = new Map<string, TimelineMediaChange>()
   for (const [ref, { path, choice }] of resolved) {
     const { asset } = originals.get(ref)!
     const chosen = selected.get(ref) ?? path
@@ -413,9 +460,10 @@ export async function prepareTimelineProject(
   }
   if (missing.length || failed.length || incompatibilities.size) {
     throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, editIssues,
-      [...mediaChanges.values()])
+      [...mediaChanges.values()], mediaReview)
   }
-  if (editIssues.length) throw new TimelineEditFailure(editIssues, editIssues.some(issue => issue.recovery === 'omit-effect'), [...mediaChanges.values()])
+  if (editIssues.length) throw new TimelineEditFailure(editIssues, editIssues.some(issue => issue.recovery === 'omit-effect'),
+    [...mediaChanges.values()], mediaReview)
   const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0
@@ -657,6 +705,7 @@ export async function prepareTimelineProject(
     if (currentId !== reviewedDocumentId) throw new Error('The FCPXML file changed or became unreadable after review. Review the timeline again.')
   }
   return { project, assertDocumentUnchanged, report: {
+    ...mediaReview,
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
     outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
     compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.filter(group => group.kind === 'compound').length, 0),

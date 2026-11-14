@@ -24,7 +24,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   const [timelinePreview, setTimelinePreview] = useState<TimelineImportPreview | null>(null);
   const [blocked, setBlocked] = useState<TimelineMediaBlocked | TimelineEditBlocked | null>(null);
   const [request, setRequest] = useState<ReviewRequest | null>(null);
-  const [sequenceImport, setSequenceImport] = useState<{ source: string; documentId: string; choices: TimelineSequenceChoice[]; newProject: boolean; folder?: string | undefined } | null>(null);
+  const [sequenceImport, setSequenceImport] = useState<{ choices: TimelineSequenceChoice[]; request: Omit<ReviewRequest, "index"> } | null>(null);
 
   const begin = () => {
     if (!busy && !error && !blocked && !sequenceImport && !timelinePreview && !projectForm) setSourcePicker(true);
@@ -36,7 +36,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
 
   async function review(next: ReviewRequest) {
     setRequest(next);
-    const result = await projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements, next.documentId, next.omitEffects, next.leaveTitleGaps);
+    const result = await projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements,
+      next.documentId, next.omitEffects, next.leaveTitleGaps, next.revalidateReplacements);
+    setRequest({ ...next, replacements: result.replacements, revalidateReplacements: false });
     if ("kind" in result) setBlocked(result);
     else setTimelinePreview(result);
   }
@@ -52,7 +54,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
       });
       if (typeof source !== "string") return;
       const { choices, documentId } = await projectListTimelineSequences(source);
-      if (choices.length > 1) setSequenceImport({ source, choices, documentId, newProject: fromStartup });
+      if (choices.length > 1) setSequenceImport({ choices, request: { source, documentId, newProject: fromStartup, replacements: [] } });
       else await review({ source, documentId, index: 0, newProject: fromStartup, replacements: [] });
     } catch (cause) { reportError(cause); }
     finally { setBusy(false); }
@@ -60,10 +62,10 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
 
   async function chooseSequence(index: number) {
     if (!sequenceImport || busy) return;
-    const { source, documentId, newProject, folder } = sequenceImport;
+    const next = sequenceImport.request;
     setSequenceImport(null);
     setBusy(true);
-    try { await review({ source, documentId, index, newProject, folder, replacements: [] }); }
+    try { await review({ ...next, index }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -113,9 +115,14 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     setBlocked(null);
     try {
       const { choices, documentId } = await projectListTimelineSequences(request.source);
-      if (documentId === request.documentId) await review(request);
-      else if (choices.length > 1) setSequenceImport({ source: request.source, choices, documentId, newProject: request.newProject, folder: request.folder });
-      else await review({ source: request.source, documentId, index: 0, newProject: request.newProject, folder: request.folder, replacements: [] });
+      if (documentId === request.documentId) {
+        await review(request);
+      } else {
+        const next = { source: request.source, documentId, newProject: request.newProject, folder: request.folder,
+          replacements: request.replacements, revalidateReplacements: true };
+        if (choices.length > 1) setSequenceImport({ choices, request: next });
+        else await review({ ...next, index: 0 });
+      }
     } catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -162,6 +169,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
       )}
       {blocked?.kind === "edit-blocked" && (
         <AppDialog title={t("startup.import_edit_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
+          <UnmatchedReplacements names={blocked.unmatchedReplacements} />
           {blocked.issues.map((issue, index) => (
             <div key={index} className="new-project-row">
               <strong>{issue.label}</strong>
@@ -187,6 +195,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
       )}
       {blocked?.kind === "media-blocked" && (
         <AppDialog title={t("startup.import_media_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
+          <UnmatchedReplacements names={blocked.unmatchedReplacements} />
           {blocked.issues.map((issue, index) => (
             <div key={index} className="new-project-row">
               <strong title={issue.sourcePath}>{issue.label}</strong>
@@ -277,6 +286,7 @@ interface ReviewRequest {
   replacements: TimelineMediaReplacement[];
   omitEffects?: boolean;
   leaveTitleGaps?: boolean;
+  revalidateReplacements?: boolean;
 }
 
 function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
@@ -307,6 +317,17 @@ function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
         </Button>
       </footer>
     </AppDialog>
+  );
+}
+
+function UnmatchedReplacements({ names }: { names: string[] }) {
+  const { t } = useTranslation();
+  if (!names.length) return null;
+  return (
+    <div role="status">
+      <p>{t("startup.import_unmatched_replacements")}</p>
+      <ul>{names.map((name, index) => <li key={index}>{name}</li>)}</ul>
+    </div>
   );
 }
 
@@ -457,6 +478,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
           </label>
         </section>
       )}
+      <UnmatchedReplacements names={preview.unmatchedReplacements} />
       {preview.relinkedMedia.length > 0 && (
         <section aria-label={t("startup.import_relinked_media")}>
           <p><strong>{t("startup.import_relinked_media")}</strong></p>

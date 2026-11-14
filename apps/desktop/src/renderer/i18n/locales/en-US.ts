@@ -451,6 +451,7 @@ const enUS = {
     import_use_candidate: "Use {{name}}",
     import_use_proxy: "Review proxy {{name}}…",
     import_relinked_media: "Check media replacements before importing",
+    import_unmatched_replacements: "The updated timeline no longer identifies a unique source for these earlier replacements. You can choose them again if they belong in the edit.",
     timeline_review_audio_resample: "Audio clips requiring 48 kHz resampling: {{count}}. The original media files are unchanged.",
     timeline_review_fps_conform: "Video clips using source-timestamp frame-rate conform: {{count}}. At the destination FPS, source frames may be repeated or skipped; playback speed and source trims stay unchanged.",
     timeline_review_video_fit: "Video clips with source-size or spatial-conform adjustments: {{count}}. Fit preserves aspect ratio; Fill/None may crop.",

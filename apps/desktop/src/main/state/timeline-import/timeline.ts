@@ -13,7 +13,7 @@ export interface TimelineSource extends OriginalMediaPath {
   /** FCPXML's zero-duration asset is a still image displayed for the clip's timeline span. */
   stillImage?: boolean
   sourceColor?: string
-  imageSize?: { width: number; height: number }
+  imageSize?: { width?: number; height?: number }
   videoFormat?: { width: number; height: number; frameDuration: ExactTime; paspH: number; paspV: number }
   hasAudio?: boolean
   audioChannels?: number

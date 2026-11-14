@@ -28,7 +28,8 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
 <fcpxml version="1.10">
   <resources>
     <format id="f" frameDuration="1/60s" width="320" height="240"/>
-    <format id="still" name="FFVideoFormatRateUndefined" width="640" height="360"/>
+    <format id="still" name="FFVideoFormatRateUndefined" width="640"/>
+    <format id="still-clip" name="Still clip" frameDuration="1/24s"/>
     <asset id="voice" name="Narration.wav" start="0s" duration="2s" hasAudio="1" audioSources="1" audioChannels="1">
       <media-rep kind="original-media" src="${pathToFileURL(audio).href}"/>
     </asset>
@@ -40,7 +41,7 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
     <sequence format="f" duration="120/60s" tcStart="0s" tcFormat="NDF" audioLayout="mono" audioRate="48k">
       <spine><gap offset="0s" start="0s" duration="120/60s">
         <asset-clip ref="voice" lane="-1" offset="0s" start="0s" duration="120/60s" audioRole="dialogue"/>
-        <video ref="mouth" lane="1" name="A" offset="30/60s" start="0s" duration="60/60s"/>
+        <video ref="mouth" format="still-clip" lane="1" name="A" offset="30/60s" start="0s" duration="60/60s"/>
       </gap></spine>
     </sequence>
   </project></event></library>
@@ -60,7 +61,9 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Video clips 1.*Audio clips 1.*Media files 2/)).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
-    await expect(review.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
+    await expect(review.getByText(/640 pixels wide, but this file is 120 × 130/)).toBeVisible()
+    await expect(review.getByText(/WeftCut reads the dimensions from the image file/)).toBeVisible()
+    await expect(review.getByText(/Its duration comes from the timeline/)).toBeVisible()
     await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
     await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()

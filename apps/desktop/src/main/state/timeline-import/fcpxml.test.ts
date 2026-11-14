@@ -391,6 +391,35 @@ describe('FCPXML subset', () => {
     expect(parseFcpxml(xml.replace('<video ref="mouth"', '<asset-clip ref="mouth"')).clips[1]!.asset.stillImage).toBe(true)
   })
 
+  it('uses decoded still sizes when format dimensions are omitted', () => {
+    const xml = illustratedStoryFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
+    for (const declaration of ['', ' width="120"', ' height="130"']) {
+      const parsed = parseFcpxml(xml.replace(' width="120" height="130"', declaration))
+      const still = parsed.clips[1]!
+      expect(still).toMatchObject({ firstFrame: 30, endFrame: 90, conform: 'fit' })
+      expect(still.asset.imageSize).toEqual(declaration.includes('width') ? { width: 120, height: undefined }
+        : declaration.includes('height') ? { width: undefined, height: 130 } : undefined)
+      expect(parsed.notices.flatMap(item => item.notes)).toContain(
+        'The source asset does not give the full image size. WeftCut reads the dimensions from the image file.')
+    }
+    expect(() => parseFcpxml(xml.replace('width="120"', 'width="0"'))).toThrow(/dimensions must be positive/)
+  })
+
+  it('compares the picture settings of alternate still formats', () => {
+    const xml = illustratedStoryFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
+      .replace('</resources>', '<format id="alternate" name="Different label" width="120" fieldOrder="progressive" paspH="2" paspV="2" frameDuration="1/24s" colorSpace="Rec. 709"/></resources>')
+      .replace('<video ref="mouth"', '<video format="alternate" ref="mouth"')
+    expect(parseFcpxml(xml).clips[1]!.notes).toContain(
+      'The still clip’s format frame rate does not affect when the image appears. Its duration comes from the timeline.')
+    expect(() => parseFcpxml(xml.replace('name="Different label" width="120"', 'name="Different label" width="121"')))
+      .toThrow(/different size or color space/)
+    expect(() => parseFcpxml(xml.replace('colorSpace="Rec. 709"', 'colorSpace="9-16-9"')))
+      .toThrow(/different size or color space/)
+    expect(() => parseFcpxml(xml.replace('paspV="2"', 'paspV="1"'))).toThrow(/square pixels/)
+    expect(parseFcpxml(xml.replace(' width="120" height="130"', ' height="130"')).clips[1]!.asset.imageSize)
+      .toEqual({ width: 120, height: 130 })
+  })
+
   it('does not invent audio for a video-only timeline, even with no sequence audio attributes', () => {
     const xml = fixture().replace(
       'hasAudio="1" audioSources="1" audioChannels="2"\n        audioRate="48000"',

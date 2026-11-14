@@ -715,10 +715,14 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
   const { video, audio, duration_us: duration } = item.metadata
   const fail = (message: string): never => { throw new Error(message) }
   const changes: Pick<TimelineMediaChange, 'kind' | 'detail'>[] = []
-  const reportSize = (kind: 'still-size' | 'video-size', declared: { width: number; height: number }) => {
-    if (video!.width === declared.width && video!.height === declared.height) return
-    changes.push({ kind, detail: 'The timeline lists ' + declared.width + ' × ' + declared.height +
-      ' pixels, but this file is ' + video!.width + ' × ' + video!.height +
+  const reportSize = (kind: 'still-size' | 'video-size', declared: { width?: number; height?: number }) => {
+    if ((declared.width === undefined || video!.width === declared.width) &&
+        (declared.height === undefined || video!.height === declared.height)) return
+    const listedSize = declared.width === undefined ? declared.height + ' pixels tall'
+      : declared.height === undefined ? declared.width + ' pixels wide'
+        : declared.width + ' × ' + declared.height + ' pixels'
+    changes.push({ kind, detail: 'The timeline lists ' + listedSize +
+      ', but this file is ' + video!.width + ' × ' + video!.height +
       '. WeftCut can use the file’s actual size. This may change the framing.' })
   }
   const withEnds = (videoEnd: ExactTime, audioEnd = videoEnd) => ({ videoEnd, audioEnd, changes })

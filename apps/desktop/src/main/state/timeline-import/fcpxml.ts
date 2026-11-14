@@ -241,6 +241,23 @@ function parseFormat(el: Element, sourceFormat = false): Format {
   return { width, height, frameDuration, paspH, paspV, namedDefaults, sourceColor }
 }
 
+function parseStillFormat(el: Element): Pick<Asset, 'imageSize' | 'sourceColor'> {
+  check(el, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
+  const a = el.attrs
+  const preset = predefinedFormat(a.name)
+  const width = a.width === undefined ? preset?.width : integer(el, 'width')
+  const height = a.height === undefined ? preset?.height : integer(el, 'height')
+  if (width === 0 || height === 0) fail(el, 'Still-image dimensions must be positive')
+  const paspH = a.paspH === undefined ? 1 : integer(el, 'paspH')
+  const paspV = a.paspV === undefined ? 1 : integer(el, 'paspV')
+  if ((a.fieldOrder !== undefined && a.fieldOrder !== 'progressive') ||
+      paspH !== paspV || paspH < 1 || paspH > 65_535) {
+    fail(el, 'This still format needs square pixels and progressive scan. Export a square-pixel copy in the source editor.')
+  }
+  return { imageSize: width === undefined && height === undefined ? undefined : { width, height },
+    sourceColor: colorName(a.colorSpace) }
+}
+
 function localPath(el: Element): OriginalMediaPath {
   try { return originalMediaPath(required(el, 'src')) }
   catch (error) { return fail(el, error instanceof Error ? error.message : String(error)) }
@@ -277,14 +294,9 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
     if (!hasVideo) fail(el, 'Audio-only assets must not refer to a video format')
     const formatNode = lookup(a.format, 'format', el)
     if (stillImage) {
-      check(formatNode, ['id', 'name', 'frameDuration', 'width', 'height', 'colorSpace', 'fieldOrder', 'paspH', 'paspV'])
-      imageSize = { width: integer(formatNode, 'width'), height: integer(formatNode, 'height') }
-      if (!imageSize.width || !imageSize.height) fail(formatNode, 'Still-image dimensions must be positive')
-      sourceColor = colorName(formatNode.attrs.colorSpace)
-      if ((formatNode.attrs.fieldOrder !== undefined && formatNode.attrs.fieldOrder !== 'progressive') ||
-          Number(formatNode.attrs.paspH ?? 1) !== 1 || Number(formatNode.attrs.paspV ?? 1) !== 1) {
-        fail(formatNode, 'This still format needs square pixels and progressive scan. Export a square-pixel copy in the source editor.')
-      }
+      const stillFormat = parseStillFormat(formatNode)
+      imageSize = stillFormat.imageSize
+      sourceColor = stillFormat.sourceColor
     } else {
       const source = parseFormat(formatNode, true)
       sourceColor = source.sourceColor
@@ -299,6 +311,9 @@ function parseAsset(el: Element, lookup: (ref: string, tag: string, from: Elemen
     sourceColor = colorName(a.colorSpaceOverride)
   }
   const mediaNotices: string[] = []
+  if (stillImage && (imageSize?.width === undefined || imageSize.height === undefined)) {
+    mediaNotices.push('The source asset does not give the full image size. WeftCut reads the dimensions from the image file.')
+  }
   if (hasMetadata) mediaNotices.push('Custom asset metadata is not copied to the project')
   const originalReps: Element[] = []
   const proxies: OriginalMediaPath[] = []
@@ -946,14 +961,20 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     if (a.format !== undefined && a.format !== assetNode.attrs.format && a.format !== seq.attrs.format) {
       const candidate = lookup(a.format, 'format', el)
       if (asset.stillImage) {
-        // Still formats can omit the video rate. Equivalent declarations must
-        // also agree on color, field order and pixel shape.
-        const assetFormat = assetNode.attrs.format
-        const original = assetFormat === undefined ? null : lookup(assetFormat, 'format', el)
-        const keys = ['name', 'width', 'height', 'frameDuration', 'colorSpace', 'fieldOrder', 'paspH', 'paspV']
-        check(candidate, ['id', ...keys])
-        if (!original || !keys.every(key => candidate.attrs[key] === original.attrs[key])) {
-          fail(el, 'The still has a different clip format. Export the clip with the same image format as its source.')
+        const other = parseStillFormat(candidate)
+        const sourceSize = asset.imageSize
+        if ((sourceSize?.width !== undefined && other.imageSize?.width !== undefined && other.imageSize.width !== sourceSize.width) ||
+            (sourceSize?.height !== undefined && other.imageSize?.height !== undefined && other.imageSize.height !== sourceSize.height) ||
+            (candidate.attrs.colorSpace !== undefined && other.sourceColor !== asset.sourceColor)) {
+          fail(el, 'The still clip declares a different size or color space from its source. Export it with a matching image format.')
+        }
+        if (other.imageSize) {
+          asset = { ...asset, imageSize: { width: sourceSize?.width ?? other.imageSize.width,
+            height: sourceSize?.height ?? other.imageSize.height } }
+        }
+        const original = assetNode.attrs.format === undefined ? undefined : lookup(assetNode.attrs.format, 'format', el)
+        if (candidate.attrs.frameDuration !== original?.attrs.frameDuration) {
+          notes.push('The still clip’s format frame rate does not affect when the image appears. Its duration comes from the timeline.')
         }
       } else {
         const other = parseFormat(candidate, true)

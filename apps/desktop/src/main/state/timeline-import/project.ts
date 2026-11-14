@@ -18,7 +18,7 @@ import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure } from './fcpxml'
-import type { ImportTimeline, TimelineClip, TimelineSource, TimelineSourceWindow } from './timeline'
+import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSourceWindow } from './timeline'
 import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 import { MAX_VIDEO_IN_POINTS, readVideoInPoints } from './videoTiming'
@@ -196,18 +196,18 @@ export async function prepareTimelineProject(
   const clips = [...sequences].flatMap(sequence => sequence.clips)
   const editIssues = 'issues' in inspection ? inspection.issues : [...sequences].flatMap(sequence => sequence.editIssues ?? [])
   const mediaUses = 'sources' in inspection ? inspection.sources : clips
-  const originals = new Map<string, { asset: TimelineSource; label: string; placements: number }>()
+  const originals = new Map<string, { asset: TimelineMediaReference; label: string; placements: number }>()
   for (const { asset, label } of mediaUses) {
     const original = originals.get(asset.ref)
     if (original) original.placements++
     else originals.set(asset.ref, { asset, label: asset.name || label || asset.ref, placements: 1 })
   }
-  const mediaIssue = (asset: TimelineSource, detail: string): TimelineMediaIssue => {
+  const mediaIssue = (asset: TimelineMediaReference, detail: string): TimelineMediaIssue => {
     const { label, placements } = originals.get(asset.ref)!
     return { assetRef: asset.ref, label, filename: asset.filename, sourcePath: asset.path, placements, detail }
   }
-  const localProxies = (asset: TimelineSource) => [...new Set(asset.proxies?.filter(proxy => proxy.local).map(proxy => proxy.path) ?? [])].slice(0, 5)
-  const replacementIssue = (asset: TimelineSource, detail: string, exclude?: string): TimelineMediaIssue => {
+  const localProxies = (asset: TimelineMediaReference) => [...new Set(asset.proxies?.filter(proxy => proxy.local).map(proxy => proxy.path) ?? [])].slice(0, 5)
+  const replacementIssue = (asset: TimelineMediaReference, detail: string, exclude?: string): TimelineMediaIssue => {
     const proxyPaths = localProxies(asset).filter(path => path !== exclude && path !== asset.path)
     return { ...mediaIssue(asset, detail), ...(proxyPaths.length ? { proxyPaths } : {}) }
   }
@@ -240,7 +240,7 @@ export async function prepareTimelineProject(
   }
 
   const resolved = new Map<string, { path: string; choice: 'original' | 'selected' | 'folder' }>()
-  const offline: TimelineSource[] = []
+  const offline: TimelineMediaReference[] = []
   const missing: TimelineMediaIssue[] = []
   const checkedPaths = new Map<string, Promise<string>>()
   for (const { asset } of originals.values()) {
@@ -302,6 +302,7 @@ export async function prepareTimelineProject(
     throw new TimelineEditFailure(editIssues, false)
   }
 
+  const stillAssets = new Set(clips.filter(clip => clip.asset.stillImage).map(clip => clip.asset.ref))
   const relinkedMedia: TimelineImportReport['relinkedMedia'] = []
   const mediaIds = new Map<string, string>()
   const failed: TimelineMediaIssue[] = []
@@ -320,7 +321,7 @@ export async function prepareTimelineProject(
       if (choice !== 'original' && asset.path !== mediaPath) relinkedMedia.push({ assetRef: ref, label, from: asset.path, to: mediaPath })
     } catch (error) {
       assertCurrent()
-      const remedy = asset.stillImage ? 'Choose another image or save a PNG copy and select it. '
+      const remedy = stillAssets.has(ref) ? 'Choose another image or save a PNG copy and select it. '
         : 'Choose another file or export a compatible copy. '
       failed.push(replacementIssue(asset, 'Could not read ' + mediaPath + '. ' + remedy +
         (error instanceof Error ? error.message : String(error)), selected.get(ref)))

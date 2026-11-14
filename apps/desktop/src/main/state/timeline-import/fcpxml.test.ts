@@ -391,6 +391,20 @@ describe('FCPXML subset', () => {
     expect(parseFcpxml(xml.replace('<video ref="mouth"', '<asset-clip ref="mouth"')).clips[1]!.asset.stillImage).toBe(true)
   })
 
+  it('accepts explicit first-stream selection and reports omitted clip metadata', () => {
+    const xml = illustratedStoryFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
+      .replace('ref="narration" lane=', 'ref="narration" modDate="2001-01-01" lane=')
+      .replace('audioRole="dialogue"/>', 'audioRole="dialogue"><note>Check this take</note><metadata>' +
+        '<md key="fictional"><array><string>Source note</string></array></md></metadata></asset-clip>')
+      .replace('<video ref="mouth"', '<video ref="mouth" srcID="1"')
+    const parsed = parseFcpxml(xml)
+    expect(parsed.clips[0]!.notes).toContain('Clip notes and source-editor metadata, when present, are left out.')
+    const still = parsed.clips[1]!
+    expect(still).toMatchObject({ firstFrame: 30, endFrame: 90 })
+    expect(() => parseFcpxml(xml.replace('srcID="1"', 'srcID="2"')))
+      .toThrow(/selects source stream 2.*Export the selected stream/)
+  })
+
   it('uses decoded still sizes when format dimensions are omitted', () => {
     const xml = illustratedStoryFixture('file:///fictional/narration.wav', 'file:///fictional/mouth.png')
     for (const declaration of ['', ' width="120"', ' height="130"']) {
@@ -1050,6 +1064,62 @@ describe('timeline import transaction', () => {
     expect(run.probeMedia).not.toHaveBeenCalled()
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)
+  })
+
+  it('reports a clip mapping failure and missing originals even when asset metadata cannot be imported', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('name="Signal" start=', 'name="Signal" offset="0s" start=')
+      .replace('name="Signal" offset=', 'name="Signal" unknownSetting="true" offset=')
+      .replace('audioSources="1"', 'audioSources="2"')
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toMatchObject({
+      issues: [{ assetRef: 'take', placements: 2 }],
+      editIssues: [{ label: 'Signal', status: 'unsupported', timelineFrames: { start: 0, end: 3 },
+        notes: [expect.stringContaining('Unsupported attribute "unknownSetting"')] }],
+    })
+    await writeFile(media, 'Fictional original video')
+    await expect(run.prepareReview()).rejects.toMatchObject({ issues: [{ label: 'Signal' }] })
+    expect(run.probeMedia).not.toHaveBeenCalled()
+    expect(run.actor.snapshot()).toBe(run.before)
+    expect(existsSync(destination)).toBe(false)
+  })
+
+  it('shows the other source when one asset has an unsafe URL and reports the blocked edit', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('</resources>', '<asset id="remote" duration="1s" hasVideo="1" src="file://example.invalid/share/Remote.mov"/></resources>')
+      .replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
+        '<video ref="remote" name="Remote cut" offset="3003/30000s" duration="1001/30000s"/>')
+      .replace('name="Signal" start=', 'name="Signal" unknownSetting="true" start=')
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toMatchObject({
+      issues: [{ assetRef: 'take', placements: 2 }],
+      editIssues: [
+        { label: 'Signal', notes: [expect.stringContaining('Unsupported attribute')] },
+        { label: 'remote', notes: [expect.stringContaining('Network shares, devices and traversal are unsupported')] },
+      ],
+    })
+    expect(run.probeMedia).not.toHaveBeenCalled()
+    expect(run.hashMediaSource).not.toHaveBeenCalled()
+    expect(existsSync(destination)).toBe(false)
+  })
+
+  it('keeps recoverable story diagnostics when a later field blocks the mapping', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
+        '<title name="End Credit" offset="3003/30000s" duration="1001/30000s"/>')
+      .replace('name="Dock"', 'name="Dock" unknownSetting="true"')
+    await writeFile(document, xml)
+    const run = setup()
+    await expect(run.prepareReview()).rejects.toMatchObject({
+      issues: [{ assetRef: 'take', placements: 2 }],
+      editIssues: [
+        { label: 'Dock', notes: [expect.stringContaining('Unsupported attribute')] },
+        { label: 'End Credit', recovery: 'leave-title-gap', timelineFrames: { start: 3, end: 4 } },
+      ],
+    })
+    expect(run.probeMedia).not.toHaveBeenCalled()
   })
 
   it('never inventories assets from inside an unsupported edit', async () => {

@@ -907,9 +907,11 @@ export function projectListTimelineSequences(path: string): Promise<TimelineSequ
 
 export function projectPreviewTimeline(
   path: string, relinkDirectory?: string, sequenceIndex?: number, newProject = false,
-  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false, leaveTitleGaps = false,
+  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false, leaveTitleGaps = false, revalidateReplacements = false,
 ): Promise<TimelinePreflight> {
-  return invoke<TimelinePreflight>("project_preview_timeline", { path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps });
+  return invoke<TimelinePreflight>("project_preview_timeline", {
+    path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps, revalidateReplacements,
+  });
 }
 
 export function projectDiscardTimelinePreview(id: string): Promise<null> {

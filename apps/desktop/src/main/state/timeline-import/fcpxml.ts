@@ -3,7 +3,7 @@ import { canvasSizeError, FPS_OPTIONS } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { TimeMappingError } from '../../../shared/timeMapping'
 import { addTime, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
-import type { TimelineCompatibilityItem, TimelineMediaChange } from '../../../shared/timelineImport'
+import type { TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaReview } from '../../../shared/timelineImport'
 import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSource } from './timeline'
 import { originalMediaPath, type OriginalMediaPath } from './mediaPath'
 
@@ -351,7 +351,8 @@ function parseAssetReference(el: Element, mediaNotices?: string[]): TimelineMedi
   if (representations.some(rep => rep.attrs.suggestedFilename !== undefined)) mediaNotices?.push(
     'Suggested media filenames are left out. WeftCut keeps the names of the local files.')
   const original = localPath(a.src !== undefined ? el : originalReps[0]!)
-  return { ref: required(el, 'id'), name: a.name, ...original, proxies }
+  return { ref: required(el, 'id'), name: a.name, ...original, proxies, uid: a.uid,
+    signature: originalReps[0]?.attrs.sig }
 }
 
 function checkMetadata(owner: Element): boolean {
@@ -430,6 +431,7 @@ export class TimelineEditFailure extends Error {
     readonly issues: TimelineCompatibilityItem[],
     readonly canOmitEffects: boolean,
     readonly mediaChanges: TimelineMediaChange[] = [],
+    readonly mediaReview?: TimelineMediaReview,
   ) {
     super(issues.flatMap(issue => issue.notes).join('\n'))
   }

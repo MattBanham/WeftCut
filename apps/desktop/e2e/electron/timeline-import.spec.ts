@@ -198,7 +198,7 @@ test('keeps missing media actionable while a clip needs correction in the source
   const folder = tmpDir('weftcut-fcpxml-structural-')
   const movedFolder = join(folder, 'Relocated')
   mkdirSync(movedFolder)
-  const media = join(movedFolder, 'Signal.mov')
+  const media = join(movedFolder, 'Recovered Signal.mov')
   const missing = join(folder, 'Offline', 'Signal.mov')
   const xml = join(folder, 'Signal.fcpxml')
   encodeSource(media)
@@ -218,24 +218,33 @@ test('keeps missing media actionable while a clip needs correction in the source
     await newProject(page, { parentFolder: folder, name: 'Review Edit',
       canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, input) => {
-      dialog.showOpenDialog = async (_window, options) => ({
-        canceled: false, filePaths: [options.properties?.includes('openDirectory') ? input.movedFolder : input.xml],
-      })
-    }, { xml, movedFolder })
+      const selections = [input.xml, input.media]
+      dialog.showOpenDialog = async () => {
+        const path = selections.shift()
+        return path ? { canceled: false, filePaths: [path] } : { canceled: true, filePaths: [] }
+      }
+    }, { xml, media })
     await beginImport(page)
     const mediaIssues = page.getByRole('dialog', { name: 'Some media needs attention' })
     await expect(mediaIssues.getByText(/Missing or unreadable original media/)).toBeVisible()
     await expect(mediaIssues.getByText('Alternate camera stream', { exact: true })).toBeVisible()
     await expect(mediaIssues.getByText(/selects source stream 2/)).toBeVisible()
     await expect(mediaIssues.getByText('From frame 1 to the start of frame 2')).toBeVisible()
-    await mediaIssues.getByRole('button', { name: 'Find original media in a folder…' }).click()
+    await mediaIssues.getByRole('button', { name: 'Replace this file…' }).click()
     const editIssues = page.getByRole('dialog', { name: 'Some edits need attention' })
     await expect(editIssues.getByText(/Export the selected stream as its own file/)).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
-    writeFileSync(xml, original.replace(clip, clip.replace('srcID="2"', 'srcID="1"')))
+    const revised = original.replace('id="a"', 'id="renumbered"').replaceAll('ref="a"', 'ref="renumbered"')
+    writeFileSync(xml, revised)
+    await editIssues.getByRole('button', { name: 'Review timeline again…' }).click()
+    const retained = /kept your earlier choice of “Recovered Signal.mov”/
+    await expect(editIssues.getByText(retained)).toBeVisible()
+    writeFileSync(xml, revised.replace('srcID="2"', 'srcID="1"'))
     await editIssues.getByRole('button', { name: 'Review timeline again…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(`${missing} → ${await realpath(media)}`, { exact: true })).toBeVisible()
+    await expect(review.getByText(retained)).toBeVisible()
+    await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
     await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
     await expect(review).toHaveCount(0)

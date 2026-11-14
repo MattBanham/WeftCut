@@ -502,10 +502,13 @@ describe('timeline import transaction', () => {
     }))
     const hashMediaSource = vi.fn(async () => 'a'.repeat(64))
     const assertCurrent = vi.fn()
-    const prepareReview = (relinkDirectory?: string, replacements?: TimelineMediaReplacement[]) => prepareTimelineProject(document, destination, idGen, {
+    const deps = {
       compute: { probeMedia, hashMediaSource },
-      statPath: (file) => existsSync(file) && statSync(file).isFile() ? { kind: 'file', readable: true } : null,
-    }, assertCurrent, relinkDirectory, undefined, undefined, replacements)
+      statPath: (file: string) => existsSync(file) && statSync(file).isFile() ? { kind: 'file' as const, readable: true } : null,
+    }
+    const prepareReview = (relinkDirectory?: string, replacements?: TimelineMediaReplacement[], revalidateReplacements = false) =>
+      prepareTimelineProject(document, destination, idGen, deps, assertCurrent,
+        relinkDirectory, undefined, undefined, replacements, undefined, false, false, revalidateReplacements)
     const prepare = async () => (await prepareReview()).project
     return { prepare, prepareReview, before, actor, probeMedia, hashMediaSource }
   }
@@ -1140,6 +1143,47 @@ describe('timeline import transaction', () => {
     expect(run.probeMedia).not.toHaveBeenCalled()
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)
+  })
+
+  it('reuses a manual replacement after the asset ID changes and asks for renewed approval', async () => {
+    await writeFile(media, 'Fictional replacement video')
+    const file = await realpath(media)
+    const originalPath = join(parent, 'Offline', 'Harbor Lights.mov')
+    const xml = fixture(pathToFileURL(originalPath).href)
+    await writeFile(document, xml)
+    const run = setup()
+    const prior = await run.prepareReview(undefined, [{ assetRef: 'take', path: file }])
+    expect(prior.report.replacements).toMatchObject([{ assetRef: 'take', path: file, sourceIdentity: expect.any(String) }])
+    await writeFile(document, xml.replace('id="take"', 'id="new-take"').replaceAll('ref="take"', 'ref="new-take"'))
+    const fresh = await run.prepareReview(undefined, prior.report.replacements, true)
+    expect(fresh.report.replacements).toMatchObject([{ assetRef: 'new-take', path: file, reused: true }])
+    expect(fresh.report.relinkedMedia).toMatchObject([{ assetRef: 'new-take', to: file }])
+    expect(fresh.report.mediaChanges).toContainEqual(expect.objectContaining({ kind: 'reused-replacement' }))
+    expect(fresh.report.unmatchedReplacements).toEqual([])
+  })
+
+  it.each(['source changed', 'asset duplicated', 'asset deduplicated'])('leaves a prior choice unapplied if the %s after re-export', async (reason) => {
+    await writeFile(media, 'Fictional replacement video')
+    const originalPath = join(parent, 'Offline', 'Harbor Lights.mov')
+    const xml = fixture(pathToFileURL(originalPath).href)
+    const asset = /<asset id="take"[\s\S]*?<\/asset>/.exec(xml)![0]
+    const doubled = xml.replace('</resources>', asset.replace('id="take"', 'id="alternate"') + '</resources>')
+      .replace('ref="take" name="Dock"', 'ref="alternate" name="Dock"')
+    await writeFile(document, reason === 'asset deduplicated' ? doubled : xml)
+    const run = setup()
+    const replacements = [{ assetRef: 'take', path: media }]
+    if (reason === 'asset deduplicated') replacements.push({ assetRef: 'alternate', path: media })
+    const prior = await run.prepareReview(undefined, replacements)
+    const revised = reason === 'source changed'
+      ? xml.replace(pathToFileURL(originalPath).href, pathToFileURL(join(parent, 'Other', 'Harbor Lights.mov')).href)
+      : reason === 'asset duplicated' ? doubled : xml
+    await writeFile(document, revised)
+    run.probeMedia.mockClear()
+    await expect(run.prepareReview(undefined, prior.report.replacements, true)).rejects.toMatchObject({
+      mediaReview: { replacements: [], unmatchedReplacements: expect.arrayContaining(['Harbor Lights.mov']) },
+      issues: expect.arrayContaining([expect.objectContaining({ assetRef: 'take', detail: expect.stringContaining('Missing or unreadable') })]),
+    })
+    expect(run.probeMedia).not.toHaveBeenCalled()
   })
 
   it('relinks an explicitly selected folder by exact filename and reports the original mapping', async () => {

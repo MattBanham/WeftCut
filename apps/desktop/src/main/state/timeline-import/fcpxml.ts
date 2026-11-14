@@ -4,7 +4,7 @@ import type { ExactTime } from '../../../shared/timeMapping'
 import { TimeMappingError } from '../../../shared/timeMapping'
 import { addTime, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
 import type { TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaReview } from '../../../shared/timelineImport'
-import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSource } from './timeline'
+import type { ImportTimeline, TimelineClip, TimelineGroup, TimelineMediaReference, TimelineSource } from './timeline'
 import { originalMediaPath, type OriginalMediaPath } from './mediaPath'
 
 interface Element {
@@ -14,6 +14,7 @@ interface Element {
   line: number
   timing?: Record<string, ExactTime>
   titleGap?: TimelineCompatibilityItem
+  sequenceConnection?: true
 }
 
 interface Asset extends TimelineSource {
@@ -100,9 +101,9 @@ function readXml(xml: string): Element {
     const parent = stack.at(-2)?.tag
     const inMetadata = el.tag === 'string' && parent === 'array' &&
       stack.at(-3)?.tag === 'md' && stack.at(-4)?.tag === 'metadata' &&
-      ['asset', 'asset-clip', 'sequence', 'title'].includes(stack.at(-5)?.tag ?? '')
+      ['asset', 'asset-clip', 'sequence', 'sync-clip', 'title'].includes(stack.at(-5)?.tag ?? '')
     const inOmittedText = (el.tag === 'bookmark' && parent === 'media-rep') ||
-      (el.tag === 'note' && ['sequence', 'title', 'asset-clip', 'audio', 'video'].includes(parent ?? '')) ||
+      (el.tag === 'note' && ['sequence', 'sync-clip', 'title', 'asset-clip', 'audio', 'video'].includes(parent ?? '')) ||
       (el.tag === 'data' && stack.some(node => node.tag === 'title'))
     // Title text is interpreted only by the title importer. Keep reading here
     // so an unsupported title can give a remedy instead of an XML error.
@@ -549,14 +550,25 @@ function inspectIndependentSources({ seq, byId }: ReturnType<typeof selectTimeli
     const asset = assets.get(ref)
     if (asset) sources.push({ asset, label: el.attrs.name })
   }
-  // An unsupported container can select, mute or retime its children. Only
-  // the main spine and its direct connections establish file identity here.
+  // An unsupported container can select, mute or retime its children. Walk
+  // storylines with known structure and their direct connections.
   const spines = seq.children.filter(child => child.tag === 'spine')
   if (spines.length === 1) {
-    for (const clip of spines[0]!.children) {
+    function inspectPrimary(clip: Element) {
       inspect(clip)
       if (directMedia.has(clip.tag) || clip.tag === 'gap') {
         for (const connected of clip.children) inspect(connected)
+      }
+    }
+    for (const clip of spines[0]!.children) {
+      if (clip.tag !== 'sync-clip') {
+        inspectPrimary(clip)
+        continue
+      }
+      try {
+        for (const item of synchronizedSpine(clip).children) inspectPrimary(item)
+      } catch (error) {
+        if (!(error instanceof FcpxmlError)) throw error
       }
     }
   }
@@ -621,6 +633,83 @@ type ClipComponent = 'all' | 'audio' | 'video'
 interface MulticamAngle {
   node: Element
   entries?: { node: Element; start: ExactTime; end: ExactTime }[]
+}
+
+const syncRemedy = 'Open the synchronized clip in the source editor and place its picture and sound directly on the timeline, or render them together before exporting.'
+const syncStoryTags = ['asset-clip', 'video', 'audio', 'gap']
+
+function synchronizedSpine(el: Element): Element {
+  if (el.children.some(child => child.tag === 'sync-source')) {
+    fail(el, 'This clip selects or adjusts audio by role. WeftCut cannot yet reproduce that audio routing. ' + syncRemedy)
+  }
+  check(el, ['name', 'offset', 'start', 'duration', 'enabled', 'lane', 'format', 'tcStart', 'tcFormat', 'modDate'],
+    ['spine', ...syncStoryTags, 'adjust-conform', 'note', 'metadata'])
+  const spines = el.children.filter(child => child.tag === 'spine')
+  const direct = el.children.filter(child => syncStoryTags.includes(child.tag))
+  const primary = direct.filter(child => (child.attrs.lane ?? '0') === '0')
+  if (spines.length > 1 || (spines.length === 1 && primary.length > 0) || (!spines.length && !primary.length)) {
+    fail(el, 'This synchronized clip needs one internal storyline. ' + syncRemedy)
+  }
+  const spine = spines[0] ?? { tag: 'spine', attrs: {}, children: primary, line: el.line }
+  check(spine, ['name'], [...syncStoryTags, 'transition'])
+  const connections = direct.filter(child => (child.attrs.lane ?? '0') !== '0').map(child => {
+    if (child.tag === 'gap') fail(child, 'A connected gap needs its own storyline.')
+    return { ...child, sequenceConnection: true as const }
+  })
+  return { ...spine, attrs: {}, children: [...spine.children, ...connections] }
+}
+
+function synchronizedGroup(el: Element, context: SequenceContext, options: {
+  format: Format; fps: ImportTimeline['fps']; parentFormat: string; depth: number
+  firstFrame: number; endFrame: number; duration: ExactTime
+}): TimelineGroup {
+  const { format, fps, parentFormat, depth, firstFrame, endFrame, duration } = options
+  const attrs = el.attrs
+  const childSpine = synchronizedSpine(el)
+  if (attrs.tcStart !== undefined) time(el, 'tcStart')
+  const sourceStart = time(el, 'start', ZERO_TIME)
+  let earliest = sourceStart
+  for (const child of childSpine.children) {
+    if (!syncStoryTags.includes(child.tag)) continue
+    const childOffset = time(child, 'offset', ZERO_TIME)
+    if (compareTime(childOffset, earliest) < 0) earliest = childOffset
+    if (child.sequenceConnection) continue
+    const asset = context.byId.get(child.attrs.ref)
+    const localStart = time(child, 'start', asset?.tag === 'asset' ? time(asset, 'start', ZERO_TIME) : ZERO_TIME)
+    for (const connection of child.children) {
+      if (!syncStoryTags.includes(connection.tag)) continue
+      const connectedOffset = addTime(childOffset, subtractTime(time(connection, 'offset'), localStart))
+      if (compareTime(connectedOffset, earliest) < 0) earliest = connectedOffset
+    }
+  }
+  // Translate both clocks by a whole number of frames relative to the
+  // parent trim. Connected audio can start on either side of the picture.
+  const leadFrames = floorTime(divideTime(subtractTime(earliest, sourceStart), format.frameDuration))
+  const origin = addTime(sourceStart, multiplyTime(format.frameDuration, exactTime(leadFrames)))
+  const storyline = { ...childSpine, children: childSpine.children.map(child =>
+    syncStoryTags.includes(child.tag) && child.attrs.offset === undefined
+      ? { ...child, timing: { ...child.timing, offset: ZERO_TIME } } : child) }
+  const sourceIn = subtractTime(sourceStart, origin)
+  const sourceOut = addTime(sourceIn, duration)
+  const conforms = el.children.filter(node => node.tag === 'adjust-conform')
+  if (conforms.length > 1) fail(el, 'Only one spatial conform operation is supported on a synchronized clip.')
+  if (conforms[0]) check(conforms[0], ['type'])
+  const conform = conforms[0]?.attrs.type ?? 'fit'
+  if (conform !== 'fit' && conform !== 'fill' && conform !== 'none') fail(el, 'Spatial conform must be fit, fill or none.')
+  const metadata = el.children.filter(node => node.tag === 'note' || node.tag === 'metadata')
+  const label = attrs.name || 'Synchronized clip'
+  const childSequence: Element = { tag: 'sequence', line: el.line,
+    attrs: { format: attrs.format ?? parentFormat, ...(attrs.tcFormat !== undefined ? { tcFormat: attrs.tcFormat } : {}) },
+    timing: { tcStart: origin }, children: [storyline, ...metadata] }
+  const nested = parseSequence(childSequence, { ...el, attrs: { name: label } }, context, undefined, depth + 1)
+  if (nested.fps.num !== fps.num || nested.fps.den !== fps.den) {
+    fail(el, 'This synchronized clip runs at a different frame rate from its parent.')
+  }
+  if (compareTime(sourceOut, nested.authoredDuration) > 0) {
+    fail(el, 'The synchronized trim extends past its internal storyline.')
+  }
+  return { timeline: nested, label, enabled: attrs.enabled !== '0', firstFrame, endFrame,
+    sourceIn, sourceOut, conform, kind: 'synchronized' }
 }
 
 const multicamRemedy = 'Keep the selected angles by flattening this multicam edit to ordinary clips in the source editor, then export again.'
@@ -786,11 +875,14 @@ function multicamSequence(el: Element, context: SequenceContext, fps: ImportTime
 }
 
 function parseSequence(seq: Element, project: Element, context: SequenceContext,
-  selection?: { root: Element; library?: Element; choices: number },
+  selection?: { root: Element; library?: Element; choices: number }, depth = 0,
 ): ImportTimeline {
   const { effects, leaveTitleGaps, byId, compounds, active } = context
   check(seq, ['format', 'tcStart', 'tcFormat', 'duration', 'audioLayout', 'audioRate', 'renderFormat', 'keywords'],
     ['spine', 'note', 'metadata'])
+  if (depth > FCPXML_LIMITS.compoundDepth) {
+    fail(seq, 'This timeline contains too many levels of nested clips. Export a smaller sequence.')
+  }
   const hasMetadata = checkMetadata(seq)
   const sequenceNotes = seq.children.filter(child => child.tag === 'note')
   if (sequenceNotes.length > 1) fail(seq, 'Only one sequence note is supported')
@@ -811,7 +903,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const remedies: Record<string, string> = {
     transition: 'WeftCut cannot recreate this transition. Render the adjoining clips with the transition, or replace it with a cut before exporting.',
     title: 'WeftCut cannot recreate this title. Render it into a clip, or export it as an overlay with transparency and replace the title.',
-    'sync-clip': 'Open the synchronized clip in the source editor. Put the synchronized picture and sound directly on the timeline, or render them together before exporting.',
+    'sync-clip': syncRemedy,
     'mc-clip': 'Choose the camera angles you want to keep, then flatten the multicam edit to ordinary clips before exporting.',
     'ref-clip': 'Open this compound clip in the source editor and put its contents directly on the timeline, or render it as one clip.',
     timeMap: 'WeftCut cannot recreate this speed change. Render the retimed clip, then replace it in the source edit before exporting.',
@@ -840,7 +932,8 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       const candidateMap = child.tag !== 'timeMap' ||
         (['asset-clip', 'video', 'audio'].includes(parent.tag) && child.children.length === 2 &&
           child.children.every(point => point.tag === 'timept' && point.attrs.interp === 'linear'))
-      if (parent.tag === 'spine' && (child.tag === 'ref-clip' || child.tag === 'mc-clip' || (child.tag === 'transition' && dissolveFilter(child)))) {
+      if (parent.tag === 'spine' &&
+          (['ref-clip', 'mc-clip', 'sync-clip'].includes(child.tag) || (child.tag === 'transition' && dissolveFilter(child)))) {
         kept.push(child)
         continue
       }
@@ -942,7 +1035,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   if (tcFormat === 'DF' && !(fps.den === 1001 && [30_000, 60_000].includes(fps.num))) {
     fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
   }
-  check(spine, [], ['gap', 'asset-clip', 'video', 'audio', 'transition', 'ref-clip', 'mc-clip'])
+  check(spine, [], ['gap', 'asset-clip', 'video', 'audio', 'transition', 'ref-clip', 'mc-clip', 'sync-clip'])
   const clips: TimelineClip[] = []
   const groups: ImportTimeline['groups'] = []
   const assets = new Map<string, Asset>()
@@ -987,7 +1080,8 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     if (a.modDate !== undefined || clipNotes.length || hasClipMetadata) {
       notes.push('Clip notes and source-editor metadata, when present, are left out.')
     }
-    if (parent && !el.timing) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
+    if (el.sequenceConnection) notes.push('This clip keeps its timing on a separate track in the synchronized Group.')
+    else if (parent && !el.timing) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
     if (a.tcFormat === 'DF') notes.push('Clip drop-frame display metadata becomes zero-based non-drop-frame timecode')
     if (!['0', '1'].includes(a.enabled ?? '1') || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||
         (a.videoRole ?? 'video') !== 'video') {
@@ -1263,12 +1357,48 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   }
 
   for (const el of spine.children) {
+    if (el.sequenceConnection) {
+      readClip(el, { offset: ZERO_TIME, start: sequenceOrigin })
+      continue
+    }
+    if (el.tag === 'sync-clip') {
+      const attrs = el.attrs
+      if (pendingDissolve || (attrs.lane ?? '0') !== '0' || !['0', '1'].includes(attrs.enabled ?? '1')) {
+        fail(el, 'This synchronized placement needs a primary lane, no overlapping transition and a valid enabled flag. ' + syncRemedy)
+      }
+      const start = subtractTime(time(el, 'offset', sequenceOrigin), sequenceOrigin)
+      const duration = time(el, 'duration')
+      const end = addTime(start, duration)
+      if (start.num < 0 || duration.num <= 0 || compareTime(start, primaryEnd) < 0) {
+        fail(el, 'The synchronized placement overlaps another edit or has an invalid timeline range. ' + syncRemedy)
+      }
+      try {
+        groups.push(synchronizedGroup(el, context, { format, fps, parentFormat: seq.attrs.format, depth,
+          firstFrame: frames(start, format, el, 'offset'), endFrame: frames(end, format, el, 'end'), duration }))
+      } catch (error) {
+        if (error instanceof FcpxmlError && !error.message.includes(syncRemedy)) fail(el, error.message + ' ' + syncRemedy)
+        if (error instanceof TimelineEditFailure) {
+          for (const issue of error.issues) issue.notes.push(syncRemedy)
+        }
+        throw error
+      }
+      previousPrimary = undefined
+      primaryEnd = end
+      if (compareTime(end, lastEnd) > 0) lastEnd = end
+      notice(el, 'The synchronized clip becomes an editable Group. Picture and sound keep their timing inside the Group.')
+      if (attrs.tcStart !== undefined) notice(el, 'The synchronized clip’s display timecode is left out. This does not move its edits.')
+      if (attrs.modDate !== undefined) notice(el, 'The source modification date is left out.')
+      if (el.children.some(child => child.tag === 'spine' && child.attrs.name)) {
+        notice(el, 'The internal storyline name is left out.')
+      }
+      continue
+    }
     if (el.tag === 'mc-clip') {
       let multicam: ReturnType<typeof multicamSequence>
       let nested: ImportTimeline
       try {
         multicam = multicamSequence(el, context, fps)
-        nested = parseSequence(multicam.sequence, { ...el, attrs: { name: multicam.label } }, context)
+        nested = parseSequence(multicam.sequence, { ...el, attrs: { name: multicam.label } }, context, undefined, depth + 1)
       } catch (error) {
         if (error instanceof FcpxmlError && !error.message.includes(multicamRemedy)) {
           fail(el, error.message + ' ' + multicamRemedy)
@@ -1312,7 +1442,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
         }
         check(media, ['id', 'name', 'uid', 'modDate'], ['sequence'])
         active.add(ref)
-        nested = parseSequence(child, media, context)
+        nested = parseSequence(child, media, context, undefined, depth + 1)
         active.delete(ref)
         compounds.set(ref, nested)
       }
@@ -1402,7 +1532,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const durationFrames = ceilTime(frameCount)
   if (frameCount.den !== 1) notice(seq, 'The timeline end was extended to the next video frame to contain the final audio sample')
   if (!clips.length && !groups.length && !omittedTitles.length && !unsupported.length) {
-    fail(spine, 'The primary storyline needs at least one asset or compound clip')
+    fail(spine, 'The primary storyline needs at least one media clip or Group')
   }
   return { name: project.attrs.name, canvas: { width: format.width, height: format.height },
     fps: { num: fps.num, den: fps.den }, authoredDuration: sequenceDuration, durationFrames, clips, groups, dissolves, notices, omittedEffects, omittedTitles, editIssues: unsupported,

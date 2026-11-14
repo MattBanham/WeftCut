@@ -12,7 +12,7 @@ import { mediaItemTemplate } from '../mutations/media'
 import { PROJECT_FILE } from '../persistence'
 import { AUDIO_GRID, isCanonicalOnGrid, timeUsAtGridIndex } from '../snap'
 import { validate } from '../validate'
-import { listFcpxmlSequences, parseFcpxml } from './fcpxml'
+import { inspectFcpxml, listFcpxmlSequences, parseFcpxml } from './fcpxml'
 import { prepareTimelineProject } from './project'
 import type { TimelineMediaReplacement } from '../../../shared/timelineImport'
 
@@ -100,7 +100,67 @@ function multicamFixture() {
     '</mc-clip></spine></sequence></project></fcpxml>'].join('')
 }
 
+function synchronizedFixture(storyline: (body: string) => string = body => body) {
+  const body = `<asset-clip ref="camera" offset="20/30s" start="3600s" duration="1s" srcEnable="video">
+    <audio ref="recorder" lane="-1" offset="172799999/48000s" start="97/48s" duration="1s"/>
+    <marker start="108007/30s" value="Slate" duration="0s"/>
+  </asset-clip>`
+  return `<fcpxml version="1.10"><resources>
+    <format id="f" frameDuration="1/30s" width="320" height="240"/>
+    <asset id="camera" format="f" hasVideo="1" hasAudio="1" start="3600s" duration="2s" src="file:///fictional/Camera.mov"/>
+    <asset id="recorder" hasAudio="1" start="2s" duration="2s" src="file:///fictional/Sound.wav"/>
+  </resources><project name="Fictional interview"><sequence tcStart="60s" format="f"><spine>
+    <sync-clip name="Slate take" offset="1801/30s" start="26/30s" duration="10/30s" tcStart="600s">
+      <note>Double system sound</note>${storyline(body)}
+      <metadata><md key="fictional"><array><string>Slate B</string></array></md></metadata>
+    </sync-clip>
+  </spine></sequence></project></fcpxml>`
+}
+
 describe('FCPXML subset', () => {
+  it.each([false, true])('keeps synchronized clocks, early recorder audio and a source marker (spine: %s)', (hasSpine) => {
+    const timeline = parseFcpxml(synchronizedFixture(body => hasSpine ? `<spine name="Main">${body}</spine>` : body))
+    expect(timeline.groups).toHaveLength(1)
+    const group = timeline.groups[0]!
+    expect(group).toMatchObject({ kind: 'synchronized', firstFrame: 1, endFrame: 11, conform: 'fit',
+      sourceIn: { num: 700000, den: 3 }, sourceOut: { num: 1700000, den: 3 } })
+    const [picture, sound] = group.timeline.clips
+    expect(picture).toMatchObject({ hasVideo: true, audioRole: null, firstFrame: 1, endFrame: 31,
+      sourceIn: { num: 0, den: 1 }, markers: [{ label: 'Slate', frame: 8, source: { num: 700000, den: 3 } }] })
+    expect(sound).toMatchObject({ hasVideo: false, audioRole: 'dialogue', lane: -1,
+      timelineStart: { num: 66625, den: 2 }, sourceIn: { num: 62500, den: 3 } })
+    expect(timeline.notices.flatMap(item => item.notes).join(' ')).toMatch(/editable Group.*display timecode is left out/)
+    expect(group.timeline.notices.flatMap(item => item.notes)).toContain('Sequence keywords, notes and custom metadata are left out.')
+  })
+
+  it.each([false, true])('keeps a recorder connected directly to its synchronized clip (spine: %s)', (hasSpine) => {
+    const xml = synchronizedFixture(body => {
+      const recorder = body.match(/<audio[^>]+\/>/)![0]
+      const picture = body.replace(recorder, '')
+      const sound = recorder.replace('offset="172799999/48000s"', 'offset="31999/48000s"')
+      return (hasSpine ? '<spine>' + picture + '</spine>' : picture) + sound
+    })
+    const [group] = parseFcpxml(xml).groups
+    expect(group!.timeline.clips).toMatchObject([
+      { hasVideo: true, audioRole: null, firstFrame: 1 },
+      { hasVideo: false, audioRole: 'dialogue', lane: -1, timelineStart: { num: 66625, den: 2 },
+        sourceIn: { num: 62500, den: 3 } },
+    ])
+    expect(group!.timeline.clips[1]!.notes).toContain('This clip keeps its timing on a separate track in the synchronized Group.')
+  })
+
+  it('keeps independent relinking available when a synchronized clip trim needs repair', () => {
+    const result = inspectFcpxml(synchronizedFixture().replace('duration="10/30s" tcStart', 'duration="3s" tcStart'), 0, false, false)
+    expect(result).toMatchObject({ issues: [{ label: 'Slate take', notes: [expect.stringMatching(/trim extends past.*source editor/)] }],
+      sources: [{ asset: { ref: 'camera' } }, { asset: { ref: 'recorder' } }] })
+  })
+
+  it('explains that role routing needs a rendered or flattened edit without opening its source files', () => {
+    const xml = synchronizedFixture(body => body + '<sync-source sourceID="storyline"><audio-role-source role="dialogue" active="0"/></sync-source>')
+    expect(inspectFcpxml(xml, 0, false, false)).toMatchObject({ issues: [{ label: 'Slate take',
+      notes: [expect.stringMatching(/cannot yet reproduce that audio routing.*source editor/)] }], sources: [] })
+  })
+
   it('keeps an explicitly selected camera and separate audio across a source cut', () => {
     const timeline = parseFcpxml(multicamFixture())
     expect(timeline.groups).toHaveLength(1)
@@ -1130,7 +1190,7 @@ describe('timeline import transaction', () => {
     const xml = fixture(pathToFileURL(media).href)
       .replace('</resources>', `<asset id="hidden" hasVideo="1" duration="1s" src="${pathToFileURL(extra).href}"/></resources>`)
       .replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
-        '<sync-clip name="Hidden Take" offset="3003/30000s" duration="1001/30000s"><video ref="hidden" duration="1s"/></sync-clip>')
+        '<sync-clip name="Hidden Take" offset="3003/30000s" duration="1001/30000s"><video ref="hidden" duration="1s"/><sync-source sourceID="storyline"/></sync-clip>')
     await writeFile(document, xml)
     const run = setup()
     await expect(run.prepareReview()).rejects.toMatchObject({ issues: [{ assetRef: 'take' }], editIssues: [{ label: 'Hidden Take' }] })

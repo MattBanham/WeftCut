@@ -54,7 +54,7 @@ export interface TimelineClip extends TimelineSourceWindow {
 }
 
 export interface TimelineGroup {
-  kind: 'compound' | 'multicam'
+  kind: 'compound' | 'multicam' | 'synchronized'
   timeline: ImportTimeline
   label: string
   enabled: boolean

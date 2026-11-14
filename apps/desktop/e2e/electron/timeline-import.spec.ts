@@ -1099,6 +1099,72 @@ test('imports the selected multicam picture and recorder audio as editable Group
   } finally { await app.close() }
 })
 
+test('exports synchronized camera and recorder edits at the same authored instant', async () => {
+  test.setTimeout(150_000)
+  const folder = tmpDir('weftcut-synchronized-import-')
+  const source = join(folder, 'Field Interview.fcpxml')
+  const camera = join(folder, 'Camera.mov')
+  const recorder = join(folder, 'Recorder.wav')
+  const destination = join(folder, 'Field Interview')
+  const output = join(folder, 'Field Interview.mp4')
+  encodeSource(camera)
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+    '-i', "aevalsrc=if(gte(n\\,12808)\\,0.3*sin(2*PI*880*t)\\,0):s=48000", '-t', '1',
+    '-c:a', 'pcm_s16le', recorder], { windowsHide: true })
+  writeFileSync(source, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="v" format="f" start="600s" duration="1001/1000s" hasVideo="1" hasAudio="1" src="${pathToFileURL(camera).href}"/>
+    <asset id="a" start="2s" duration="1s" hasAudio="1" src="${pathToFileURL(recorder).href}"/>
+  </resources><project name="Field Interview"><sequence format="f" tcStart="60s"><spine>
+    <sync-clip name="Slate take" offset="1801001/30000s" start="25025/30000s" duration="5005/30000s">
+      <spine><asset-clip ref="v" offset="20020/30000s" start="600s" duration="12012/30000s" srcEnable="video"/></spine>
+      <audio ref="a" lane="-1" offset="22022/30000s" start="21/10s" duration="12012/30000s"/>
+    </sync-clip>
+  </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await newProject(page, { parentFolder: folder, name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, path) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
+    }, source)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('Picture and sound keep their timing inside the Group')
+    await review.getByRole('button', { name: 'Import', exact: true }).click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const group = (Object.values(project.compositions) as any[]).find(comp => comp.label === 'Slate take')
+    const layers = group.tracks.flatMap((track: any) => track.layers)
+    expect(layers).toHaveLength(2)
+    expect(layers.find((layer: any) => layer.params.kind === 'VideoClip')).toMatchObject({ t_start_us: 0, params: { src_in_us: 0 } })
+    expect(layers.find((layer: any) => layer.params.kind === 'Audio')).toMatchObject({ t_start_us: 66729, params: { src_in_us: 100000 } })
+    const imported = (Object.values(project.compositions) as any[]).find(comp => comp.label === 'Field Interview' && comp.id !== project.root_id)
+    const take = imported.tracks[0].layers[0]
+    expect(take).toMatchObject({ t_start_us: 33367, t_end_us: 200200,
+      params: { composition: group.id, src_in_us: 166833, src_out_us: 333666,
+        source_phase: { in: { num: 1, den: 3 }, out: { num: 2, den: 3 } } } })
+
+    const result = await driveExport(page, { outputAbsPath: output, settings: { audio: { include: true } } }, { hook: 'exportTimeline' })
+    expect(result.done).toMatchObject({ ok: true })
+    const pixels = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', output,
+      '-vf', 'crop=2:2:160:120', '-frames:v', '6', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { windowsHide: true })
+    const firstBrightFrame = [0, 1, 2, 3, 4, 5].find(frame => pixels[frame * 12]! > 200)
+    expect(firstBrightFrame).toBe(3)
+    expect(pixels[4 * 12]).toBeLessThan(32)
+    const samples = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', output,
+      '-vn', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1'], { windowsHide: true })
+    const firstAudibleSample = Array.from({ length: samples.length / 4 }, (_, index) => index)
+      .find(index => Math.abs(samples.readFloatLE(index * 4)) > 0.05)
+    expect(firstAudibleSample).toBeDefined()
+    const slateSeconds = firstBrightFrame! * 1001 / 30000
+    expect(Math.abs(firstAudibleSample! / 48000 - slateSeconds)).toBeLessThan(0.005)
+    await invokeCmd(page, 'project_undo')
+    expect(Object.keys((await invokeCmd<ProjectSummaryWire>(page, 'project_summary')).compositions)).toHaveLength(1)
+  } finally { await app.close() }
+})
+
 test('imports a built-in cross dissolve and renders both clips at its midpoint', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-dissolve-import-')

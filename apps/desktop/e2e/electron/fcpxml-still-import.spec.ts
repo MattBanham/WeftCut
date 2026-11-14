@@ -80,10 +80,12 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
     await waitForHook(page, 'weftcutSampleComposite')
     await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
     await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(700000))
-    await expect.poll(async () => {
-      const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(75, 120))
-      return pixel != null && pixel.r > 150 && pixel.g < 50 && pixel.b < 50
-    }).toBe(true)
+    await expect.poll(async () => page.evaluate(async () => {
+      const sample = (x: number) => (window as any).__weftcutTest.weftcutSampleComposite(x, 120)
+      const isRed = (pixel: Awaited<ReturnType<typeof sample>>) => pixel != null && pixel.r > 150 && pixel.g < 50 && pixel.b < 50
+      const isBlack = (pixel: Awaited<ReturnType<typeof sample>>) => pixel != null && pixel.r < 32 && pixel.g < 32 && pixel.b < 32
+      return isRed(await sample(75)) && isRed(await sample(245)) && isBlack(await sample(30)) && isBlack(await sample(290))
+    })).toBe(true)
   } finally { await app.close() }
 })
 

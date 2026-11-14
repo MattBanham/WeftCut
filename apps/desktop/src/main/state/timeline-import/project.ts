@@ -34,7 +34,10 @@ export class TimelineMediaFailure extends Error {
   }
 }
 
-type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'>
+type ImageSize = { width: number; height: number }
+type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'> & {
+  inspectImage?(path: string): Promise<ImageSize | 'too-large' | null>
+}
 
 async function readTimelineDocument(path: string, deps: MediaDeps): Promise<string> {
   const before = await lstat(path).catch(() => null)
@@ -317,7 +320,9 @@ export async function prepareTimelineProject(
       if (choice !== 'original' && asset.path !== mediaPath) relinkedMedia.push({ assetRef: ref, label, from: asset.path, to: mediaPath })
     } catch (error) {
       assertCurrent()
-      failed.push(replacementIssue(asset, 'Could not read ' + mediaPath + '. Choose another file or export a compatible copy. ' +
+      const remedy = asset.stillImage ? 'Choose another image or save a PNG copy and select it. '
+        : 'Choose another file or export a compatible copy. '
+      failed.push(replacementIssue(asset, 'Could not read ' + mediaPath + '. ' + remedy +
         (error instanceof Error ? error.message : String(error)), selected.get(ref)))
     }
   }
@@ -364,18 +369,42 @@ export async function prepareTimelineProject(
     assertCurrent()
   }
   const incompatibilities = new Map<string, TimelineMediaIssue>()
+  const imageSizes = new Map<string, ImageSize>()
+  const imageChecks = new Map<string, Promise<ImageSize>>()
+  async function checkImage(path: string, inspect: NonNullable<MediaDeps['inspectImage']>): Promise<ImageSize> {
+    let size: Awaited<ReturnType<typeof inspect>>
+    try { size = await inspect(await checkFile(path)) }
+    catch {
+      throw new Error('WeftCut could not check this image. Review again or choose a readable PNG copy.')
+    }
+    if (size === 'too-large') {
+      throw new Error('This image is too large to check during import. Save a copy smaller than 256 MiB and choose it as the replacement.')
+    }
+    if (!size?.width || !size.height) {
+      throw new Error('WeftCut found this image, but its editor cannot display it. Save the image as a PNG and choose that copy. The clip keeps its timing.')
+    }
+    return size
+  }
   for (const clip of clips) {
     const item = itemOf(clip)
     if (!item) continue
     try {
       const actualFrameUs = verifiedPoints.get(item.path_abs)?.get(clip.sourceIn.num / clip.sourceIn.den)
-      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.ref)!.path), actualFrameUs)
+      if (deps.inspectImage && clip.asset.stillImage && item.kind === 'Image') {
+        const checked = imageChecks.get(item.path_abs) ?? checkImage(item.path_abs, deps.inspectImage)
+        imageChecks.set(item.path_abs, checked)
+        imageSizes.set(item.id, await checked)
+        assertCurrent()
+      }
+      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.ref)!.path),
+        actualFrameUs, imageSizes.get(item.id))
       sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
         const issue = mediaIssue(clip.asset, detail)
         mediaChanges.set(JSON.stringify([clip.asset.ref, kind, detail]), { ...issue, kind, sourcePath: item.path_abs })
       }
     } catch (error) {
+      assertCurrent()
       const detail = error instanceof Error ? error.message : String(error)
       const key = JSON.stringify([clip.asset.ref, detail])
       incompatibilities.set(key, replacementIssue(clip.asset, detail, selected.get(clip.asset.ref)))
@@ -535,7 +564,8 @@ export async function prepareTimelineProject(
         : null
       const image = clip.asset.stillImage
         ? newLayer(idGen, clip, clip.sourceIn, videoEnd, boundary(clip.firstFrame), boundary(clip.endFrame),
-          visualAdjustments(fitVisualParams(imageOverlayParams(item.id, target) as Extract<Layer['params'], { kind: 'ImageOverlay' }>, item, target, clip), clip, target))
+          visualAdjustments(fitVisualParams(imageOverlayParams(item.id, target) as Extract<Layer['params'], { kind: 'ImageOverlay' }>,
+            imageSizes.get(item.id) ?? item.metadata.video, target, clip), clip, target))
         : null
       const audio = clip.audioRole
         ? newLayer(idGen, clip, audioWindow.sourceIn, audioSourceEnd, audioStart, audioEnd,
@@ -651,14 +681,13 @@ export async function prepareTimelineProject(
 
 function fitVideoParams(item: MediaItem, target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>,
   clip: TimelineClip) {
-  return fitVisualParams(videoClipParams(item.id, 0, 0, target), item, target, clip)
+  return fitVisualParams(videoClipParams(item.id, 0, 0, target), item.metadata.video, target, clip)
 }
 
 function fitVisualParams<T extends Extract<Layer['params'], { kind: 'VideoClip' | 'ImageOverlay' }>>(
-  params: T, item: MediaItem, target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>,
-  clip: TimelineClip,
+  params: T, video: { width?: number; height?: number } | null | undefined,
+  target: Pick<ReturnType<typeof rootComposition>, 'width' | 'height'>, clip: TimelineClip,
 ): T {
-  const video = item.metadata.video
   if (video?.width && video.height) {
     const ratio = clip.asset.videoFormat
       ? clip.asset.videoFormat.paspH / clip.asset.videoFormat.paspV : 1
@@ -711,21 +740,28 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceIn: ExactTime, sourceO
     enabled: clip.enabled ?? true, locked: false, metadata: {}, params, effects: [] }
 }
 
-function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['metadata'] | undefined, actualFrameUs?: number) {
+function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['metadata'] | undefined,
+  actualFrameUs?: number, displaySize?: ImageSize) {
   const { video, audio, duration_us: duration } = item.metadata
+  const dimensions = displaySize ?? video
   const fail = (message: string): never => { throw new Error(message) }
   const changes: Pick<TimelineMediaChange, 'kind' | 'detail'>[] = []
   const reportSize = (kind: 'still-size' | 'video-size', declared: { width?: number; height?: number }) => {
-    if ((declared.width === undefined || video!.width === declared.width) &&
-        (declared.height === undefined || video!.height === declared.height)) return
+    if ((declared.width === undefined || dimensions!.width === declared.width) &&
+        (declared.height === undefined || dimensions!.height === declared.height)) return
     const listedSize = declared.width === undefined ? declared.height + ' pixels tall'
       : declared.height === undefined ? declared.width + ' pixels wide'
         : declared.width + ' × ' + declared.height + ' pixels'
     changes.push({ kind, detail: 'The timeline lists ' + listedSize +
-      ', but this file is ' + video!.width + ' × ' + video!.height +
+      ', but this file is ' + dimensions!.width + ' × ' + dimensions!.height +
       '. WeftCut can use the file’s actual size. This may change the framing.' })
   }
   const withEnds = (videoEnd: ExactTime, audioEnd = videoEnd) => ({ videoEnd, audioEnd, changes })
+  const srgbStill = clip.asset.stillImage && clip.asset.sourceColor?.trim() === 'sRGB IEC61966-2.1'
+  if (srgbStill) {
+    changes.push({ kind: 'color-format', detail: 'The timeline declares sRGB for this image. WeftCut uses the colors decoded from the file. ' +
+      'If the source editor overrode an embedded profile, choose a copy exported as sRGB to preserve that appearance.' })
+  }
   if (clip.hasVideo && video) {
     const { color_matrix: matrix, color_primaries: primaries, color_transfer: transfer } = video
     const decoded = ffprobeColorToWebCodecs(video)
@@ -742,7 +778,7 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
     const tagged709 = decoded?.primaries === 'bt709' &&
       (decoded?.transfer === 'bt709' || decoded?.transfer === 'iec61966-2-1') &&
       (matrix == null || decoded.matrix === 'bt709' || decoded.matrix === 'rgb')
-    if (declared !== undefined && !declared601) {
+    if (!srgbStill && declared !== undefined && !declared601) {
       if (!tagged709) fail('The timeline describes this file as ' + declared +
         '. Export an SDR Rec. 709 copy with color tags and the same timing, then choose it as the replacement.')
       changes.push({ kind: 'color-format', detail: 'The timeline describes this file as ' + declared +
@@ -768,9 +804,17 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
     if (item.kind !== 'Image' || audio) {
       fail('A zero-duration FCPXML still image must reference original image media without audio')
     }
-    if (!video?.width || !video.height || !Number.isSafeInteger(video.width) || !Number.isSafeInteger(video.height) ||
-        video.width < 1 || video.height < 1) fail('The image dimensions must be known and positive')
+    if (!dimensions?.width || !dimensions.height || !Number.isSafeInteger(dimensions.width) ||
+        !Number.isSafeInteger(dimensions.height) || dimensions.width < 1 || dimensions.height < 1) {
+      fail('The image dimensions must be known and positive')
+    }
     if (clip.asset.imageSize) reportSize('still-size', clip.asset.imageSize)
+    if (displaySize && video?.width && video.height &&
+        (displaySize.width !== video.width || displaySize.height !== video.height)) {
+      changes.push({ kind: 'still-size', detail: 'The editor displays this image at ' +
+        displaySize.width + ' × ' + displaySize.height + ' pixels. The file probe reported ' +
+        video.width + ' × ' + video.height + '. WeftCut uses the displayed size for framing.' })
+    }
     return withEnds(clip.sourceOut)
   }
   if (clip.hasVideo) {

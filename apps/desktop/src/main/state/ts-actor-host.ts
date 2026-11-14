@@ -44,6 +44,7 @@ import type { WorkspaceStore } from '../workspace'
 import { ExportJobError } from '../exportJobs'
 import { TimelineEditFailure } from './timeline-import/fcpxml'
 import { listTimelineSequences, prepareTimelineProject, TimelineMediaFailure } from './timeline-import/project'
+import type { TimelineImageCheck } from '../timelineImageCheck'
 import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineProjectDestination } from '../../shared/timelineImport'
 import { validateProjectName } from '../../shared/newProject'
 import { WorkspaceFailure } from '../../shared/workspaceErrors'
@@ -80,6 +81,7 @@ export interface TsActorHostDeps {
   /** Rust compute facade for the native-compute → TS-write hybrids. */
   compute: ComputeNapi
   timelineReviewCompute?: Pick<ComputeNapi, 'probeMedia' | 'hashMediaSource'>
+  createTimelineImageCheck?: () => TimelineImageCheck
   /** Queue the background workspace-copy job (Backend.enqueueWorkspaceCopy). */
   enqueueWorkspaceCopy: (mediaId: string, sourcePath: string) => Promise<string | null | void>
   /** node:fs readFile (utf8) — for the subtitle hybrid. */
@@ -958,7 +960,13 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           assertSession()
           if (quitting || workspaceTransitions > 0 || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
         }
-        const media = startup ? { ...hybridDeps, compute: deps.timelineReviewCompute ?? deps.compute } : hybridDeps
+        const makeImageCheck = deps.createTimelineImageCheck
+        let imageCheck: TimelineImageCheck | undefined
+        const media = {
+          ...hybridDeps,
+          compute: startup ? deps.timelineReviewCompute ?? deps.compute : deps.compute,
+          inspectImage: makeImageCheck && ((path: string) => (imageCheck ??= makeImageCheck()).inspect(path)),
+        }
         let preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
         try {
           preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
@@ -974,6 +982,8 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
               editIssues: error.editIssues, mediaChanges: error.mediaChanges } satisfies TimelineMediaBlocked
           }
           throw error
+        } finally {
+          imageCheck?.close()
         }
         assertCurrent()
         if (actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')

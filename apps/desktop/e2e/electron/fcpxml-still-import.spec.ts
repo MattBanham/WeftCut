@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { expect, test } from '@playwright/test'
@@ -84,5 +84,69 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
       const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(75, 120))
       return pixel != null && pixel.r > 150 && pixel.g < 50 && pixel.b < 50
     }).toBe(true)
+  } finally { await app.close() }
+})
+
+test('offers a replacement for a TIFF the editor cannot display and keeps its timeline interval', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-fcpxml-still-relink-')
+  const source = join(folder, 'Signal.fcpxml')
+  const tiff = join(folder, 'Signal.tiff')
+  const png = join(folder, 'Signal.png')
+  const destination = join(folder, 'Signal Edit')
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+    '-i', 'color=c=red:size=120x130:rate=1', '-frames:v', '1', '-update', '1', tiff], { windowsHide: true })
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', tiff,
+    '-frames:v', '1', '-update', '1', png], { windowsHide: true })
+  const original = readFileSync(tiff)
+  writeFileSync(source, `<fcpxml version="1.10"><resources>
+    <format id="f" frameDuration="1/30s" width="320" height="240"/>
+    <asset id="a" name="Signal" duration="0s" hasVideo="1" colorSpaceOverride="sRGB IEC61966-2.1"
+      src="${pathToFileURL(tiff).href}"/>
+    </resources><project name="Signal Edit"><sequence format="f" duration="1s"><spine>
+      <video ref="a" offset="15/30s" start="0s" duration="9/30s"/>
+    </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    await expect(page.getByRole('button', { name: 'Import timeline…' })).toBeVisible()
+    await app.evaluate(({ dialog }, input) => {
+      let next = input.source
+      dialog.showOpenDialog = async (_window, options) => {
+        if (options.properties?.includes('openDirectory')) return { canceled: false, filePaths: [input.folder] }
+        const selected = next
+        next = input.png
+        return { canceled: false, filePaths: [selected] }
+      }
+    }, { source, png, folder })
+    await page.getByRole('button', { name: 'Import timeline…' }).click()
+    await page.getByRole('button', { name: 'Choose FCPXML file…' }).click()
+    const issue = page.getByRole('dialog', { name: 'Some media needs attention' })
+    await expect(issue.getByText(/its editor cannot display it.*Save the image as a PNG.*keeps its timing/)).toBeVisible()
+    expect(existsSync(destination)).toBe(false)
+    await issue.getByRole('button', { name: 'Replace this file…' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toContainText('The timeline declares sRGB for this image.')
+    await expect(review).toContainText('Check media replacements')
+    await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
+    await review.getByRole('button', { name: 'Choose project location…' }).click()
+    const setup = page.getByRole('dialog', { name: 'Create project from timeline' })
+    await setup.getByRole('button', { name: 'Choose…', exact: true }).click()
+    await setup.getByRole('button', { name: 'Create', exact: true }).click()
+    await expect(setup).toHaveCount(0)
+    await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
+    await waitForHook(page, 'weftcutSampleComposite')
+    await expect.poll(async () => (await rootSummary<ProjectSummary>(page)).layer_count).toBe(2)
+    await invokeCmd(page, 'project_save')
+    const project = JSON.parse(readFileSync(join(destination, 'project.json'), 'utf8'))
+    const root: any = Object.values(project.compositions).find((composition: any) => composition.id !== project.root_id)
+    expect(root.tracks.flatMap((track: { layers: unknown[] }) => track.layers)).toMatchObject([
+      { t_start_us: 500000, t_end_us: 800000, params: { kind: 'ImageOverlay' } },
+    ])
+    await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(650000))
+    await expect.poll(async () => {
+      const pixel = await page.evaluate(() => (window as any).__weftcutTest.weftcutSampleComposite(160, 120))
+      return pixel != null && pixel.r > 150 && pixel.g < 50 && pixel.b < 50
+    }).toBe(true)
+    expect(readFileSync(tiff)).toEqual(original)
   } finally { await app.close() }
 })

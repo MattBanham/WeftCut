@@ -41,6 +41,7 @@ import { resolveMotifTuning } from './motif/tuning.js'
 import { motifTuningArgument } from '../shared/motifs/tuning.js'
 import { setMotifMediaSource } from './motif/mediaProps.js'
 import { rasterizeSvg } from './svgRaster.js'
+import { createTimelineImageCheck } from './timelineImageCheck.js'
 import { MotifCaptureService, parseMotifCaptureControl, parseMotifCaptureRequest, parseMotifPresence } from './motif/captureService.js'
 import { UserMotifStore } from './motif/store.js'
 import { PackageRevisions } from './motif/packageRevisions.js'
@@ -1113,6 +1114,7 @@ app.whenReady().then(async () => {
     join: path.join,
     napi: napiFacadeWithCache,
     compute: computeFacade,
+    createTimelineImageCheck,
     timelineReviewCompute: {
       probeMedia: (p) => backend!.inspectTimelineMedia(p, false),
       hashMediaSource: (p) => backend!.inspectTimelineMedia(p, true),

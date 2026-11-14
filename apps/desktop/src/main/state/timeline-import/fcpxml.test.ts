@@ -1275,22 +1275,27 @@ describe('Illustrated Story still-image import transaction', () => {
           },
         })
       })
+      const inspectImage = vi.fn(async () => ({ width: 130, height: 120 }))
       const { project, report } = await prepareTimelineProject(
         document, join(folder, 'Imported project'), seededGen(),
         {
+          inspectImage,
           compute: { probeMedia, hashMediaSource: async (filepath: string) => filepath === imagePath ? 'a'.repeat(64) : 'b'.repeat(64) },
           statPath: (filepath) => existsSync(filepath) && statSync(filepath).isFile() ? { kind: 'file', readable: true } : null,
         },
         () => {},
       )
       expect(report).toMatchObject({ videoClips: 1, audioClips: 1, connectedClips: 2, durationFrames: 120 })
+      expect(inspectImage).toHaveBeenCalledExactlyOnceWith(imagePath)
+      expect(report.mediaChanges).toContainEqual(expect.objectContaining({ kind: 'still-size',
+        detail: expect.stringContaining('The editor displays this image at 130 × 120 pixels') }))
       const root = rootComposition(project)
       const images = root.tracks.flatMap((track) => track.layers.filter((layer) => layer.params.kind === 'ImageOverlay'))
       const audio = root.tracks.flatMap((track) => track.layers.filter((layer) => layer.params.kind === 'Audio'))
       expect(images).toHaveLength(1)
       expect(audio).toHaveLength(1)
       expect(images[0]).toMatchObject({ t_start_us: 500000, t_end_us: 1500000, params: { transform: {
-        scale_x: { mode: 'Static', value: 240 / 130 }, scale_y: { mode: 'Static', value: 240 / 130 },
+        scale_x: { mode: 'Static', value: 240 / 120 }, scale_y: { mode: 'Static', value: 240 / 120 },
       } } })
       expect(report.compatibilityItems.some(item => item.notes.some(note => note.includes('Still image uses fit')))).toBe(true)
       expect(audio[0]).toMatchObject({ t_start_us: 21, t_end_us: 1999979 })

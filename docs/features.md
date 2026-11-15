@@ -18,7 +18,7 @@ copied them to the workspace.
 Choose a local `.fcpxml` file or a `.fcpxmld` bundle with a regular
 `Info.fcpxml` at its root. Pick the sequence if the document contains more
 than one project. The importer supports the subset below with FCPXML headers
-1.6 through 1.13. The tests use fictional timelines and generated media.
+1.6 through 1.14. The tests use fictional timelines and generated media.
 
 | Source edit or condition | What WeftCut does |
 | --- | --- |

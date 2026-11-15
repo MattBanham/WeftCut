@@ -851,7 +851,7 @@ test('renders FCPXML static position/scale and normal opacity without baking med
   } finally { await app.close() }
 })
 
-test('imports a Final Cut bundle with Info.fcpxml and reports its source', async () => {
+test('imports a Final Cut 1.14 bundle with Info.fcpxml and reports its source', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-bundle-')
   const bundle = join(folder, 'Fictional Scene.fcpxmld')
@@ -861,7 +861,7 @@ test('imports a Final Cut bundle with Info.fcpxml and reports its source', async
   encodeSource(media)
   writeFileSync(join(bundle, 'Info.fcpxml'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
-<fcpxml version="1.10">
+<fcpxml version="1.14">
   <import-options><option key="library location" value="file:///fictional/Library.fcpbundle"/></import-options>
   <resources>
     <format id="f" frameDuration="1001/30000s" width="320" height="240"/>

@@ -395,8 +395,10 @@ interface SequenceChoice {
 
 function collectProjects(root: Element): SequenceChoice[] {
   check(root, ['version'], ['resources', 'import-options', 'project', 'library', 'event'])
-  if (!/^1\.(?:[6-9]|1[0-3])$/.test(required(root, 'version'))) {
-    fail(root, 'Use an FCPXML document version 1.6 through 1.13')
+  const version = required(root, 'version')
+  if (!/^1\.(?:[6-9]|1[0-4])$/.test(version)) {
+    fail(root, 'This file uses FCPXML ' + version + '. WeftCut reads versions 1.6 through 1.14. ' +
+      'In Final Cut Pro, choose File → Export XML and select a supported XML version.')
   }
   one(root, 'resources')
   const importOptions = root.children.filter(child => child.tag === 'import-options')

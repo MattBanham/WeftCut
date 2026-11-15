@@ -321,23 +321,29 @@ test('continues past an unplayably short audio trim only after review', async ()
   } finally { await app.close() }
 })
 
-test('keeps a marked gap for an offline source and preserves the cuts after it', async () => {
+test('finds restored media and previews marked gaps together without moving the cuts', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-offline-gap-')
   const xml = join(folder, 'Observatory.fcpxml')
   const camera = join(folder, 'Camera.mov')
   const offline = join(folder, 'Missing Camera.mov')
+  const secondOffline = join(folder, 'Missing Exterior.mov')
+  const restored = join(folder, 'Restored Camera.mov')
   encodeSource(camera)
   writeFileSync(xml, `<fcpxml version="1.10"><resources>
     <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
     <asset id="v" format="f" hasVideo="1" hasAudio="1" duration="1001/1000s" src="${pathToFileURL(camera).href}"/>
     <asset id="o" format="f" hasVideo="1" duration="1001/1000s" src="${pathToFileURL(offline).href}"/>
-    </resources><project name="Observatory"><sequence format="f" duration="3003/30000s"><spine>
+    <asset id="exterior" format="f" hasVideo="1" duration="1001/1000s" src="${pathToFileURL(secondOffline).href}"/>
+    <asset id="restored" format="f" hasVideo="1" hasAudio="1" duration="1001/1000s" src="${pathToFileURL(restored).href}"/>
+    </resources><project name="Observatory"><sequence format="f" duration="5005/30000s"><spine>
       <asset-clip ref="v" srcEnable="video" name="Arrival" offset="0s" duration="1001/30000s"/>
       <asset-clip ref="o" name="Control room" offset="1001/30000s" duration="1001/30000s">
         <marker value="Check the light" start="0s" duration="0s"/>
       </asset-clip>
-      <asset-clip ref="v" srcEnable="video" name="Return" offset="2002/30000s" duration="1001/30000s"/>
+      <asset-clip ref="exterior" name="Exterior" offset="2002/30000s" duration="1001/30000s"/>
+      <asset-clip ref="restored" srcEnable="video" name="Recovered shot" offset="3003/30000s" duration="1001/30000s"/>
+      <asset-clip ref="v" srcEnable="video" name="Return" offset="4004/30000s" duration="1001/30000s"/>
     </spine></sequence></project></fcpxml>`)
   const { app, page } = await launchApp()
   try {
@@ -355,8 +361,11 @@ test('keeps a marked gap for an offline source and preserves the cuts after it',
       window.setContentSize(520, 380)
     })
     await beginImport(page)
-    await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
-    await page.getByRole('button', { name: 'Review with a marked gap' }).click()
+    const blocked = page.getByRole('dialog', { name: 'Some media needs attention' })
+    await expect(blocked.getByRole('button', { name: 'Review with marked gaps for 3 media sources' })).toBeVisible()
+    writeFileSync(restored, readFileSync(camera))
+    await blocked.getByRole('button', { name: 'Review timeline again…' }).click()
+    await blocked.getByRole('button', { name: 'Review with marked gaps for 2 media sources' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     const destinationPath = review.getByText(/ObservatoryReview.*Imported Observatory/)
     await expect(destinationPath).toBeVisible()
@@ -383,6 +392,9 @@ test('keeps a marked gap for an offline source and preserves the cuts after it',
     const gaps = review.getByRole('region', { name: 'Media to replace later' })
     await expect(gaps).toContainText('Control room')
     await expect(gaps).toContainText('From frame 1 to the start of frame 2')
+    await expect(gaps).toContainText('Exterior')
+    await expect(gaps).toContainText('From frame 2 to the start of frame 3')
+    await expect(gaps).not.toContainText('Recovered shot')
     await expect(confirm).toBeDisabled()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await gaps.getByRole('checkbox', { name: 'Import with the marked gaps shown above' }).check()
@@ -392,14 +404,16 @@ test('keeps a marked gap for an offline source and preserves the cuts after it',
     await invokeCmd(page, 'project_save')
     await invokeCmd(page, 'project_open', { path: destination })
     const imported = await importedSummary(page)
-    expect(imported.duration_us).toBe(100100)
+    expect(imported.duration_us).toBe(166833)
     expect(imported.tracks.flatMap(track => track.layers)).toMatchObject([
       { label: 'Arrival', t_start_us: 0, t_end_us: 33367 },
-      { label: 'Return', t_start_us: 66733, t_end_us: 100100 },
+      { label: 'Recovered shot', t_start_us: 100100, t_end_us: 133467 },
+      { label: 'Return', t_start_us: 133467, t_end_us: 166833 },
     ])
     expect(imported.markers).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: 'Replace media — Control room', t_us: 33367, end_t_us: 66733, anchor_layer: null }),
       expect.objectContaining({ label: 'Check the light', t_us: 33367, anchor_layer: null }),
+      expect.objectContaining({ label: 'Replace media — Exterior', t_us: 66733, end_t_us: 100100, anchor_layer: null }),
     ]))
     expect(imported.media).toHaveLength(1)
   } finally { await app.close() }

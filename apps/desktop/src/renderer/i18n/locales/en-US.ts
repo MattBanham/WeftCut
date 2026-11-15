@@ -457,6 +457,7 @@ const enUS = {
     timeline_review_audio_resample: "Audio clips requiring 48 kHz resampling: {{count}}. The original media files are unchanged.",
     timeline_review_fps_conform: "Video clips using source-timestamp frame-rate conform: {{count}}. At the destination FPS, source frames may be repeated or skipped; playback speed and source trims stay unchanged.",
     import_review_with_media_gap: "Review with a marked gap",
+    import_review_with_multiple_media_gaps: "Review with marked gaps for {{count}} media sources",
     import_media_gaps: "Media to replace later",
     import_accept_media_gaps: "Import with the marked gaps shown above",
     timeline_review_video_fit: "Video clips with source-size or spatial-conform adjustments: {{count}}. Fit preserves aspect ratio; Fill/None may crop.",

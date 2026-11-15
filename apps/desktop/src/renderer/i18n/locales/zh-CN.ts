@@ -445,6 +445,7 @@ const zhCN: Resources = {
     timeline_review_audio_resample: "{{count}} 个音频片段将重采样至 WeftCut 内部使用的 48 kHz，原始媒体不会更改。",
     timeline_review_fps_conform: "{{count}} 个视频片段根据源时间戳转换帧率；目标帧率下可能重复或跳过帧，播放速度和修剪范围保持不变。",
     import_review_with_media_gap: "查看带缺失标记的导入",
+    import_review_with_multiple_media_gaps: "查看为 {{count}} 个媒体源保留缺失标记的导入",
     import_media_gaps: "稍后替换的媒体",
     import_accept_media_gaps: "导入并保留上方标出的缺失位置",
     timeline_review_video_fit: "{{count}} 个视频片段使用源尺寸或空间适配调整。适配保持比例；填充或原始尺寸可能裁剪。",

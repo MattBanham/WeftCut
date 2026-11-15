@@ -337,11 +337,22 @@ describe('FCPXML subset', () => {
       .toThrow(/Unsupported inside <asset-clip>/)
   })
 
-  it.each(['1.6', '1.7', '1.8', '1.9', '1.10', '1.11', '1.12', '1.13'])(
+  it.each(['1.6', '1.7', '1.8', '1.9', '1.10', '1.11', '1.12', '1.13', '1.14'])(
     'parses a supported interchange subset at FCPXML version %s', version => {
       expect(parseFcpxml(fixture().replace('version="1.10"', 'version="' + version + '"')).clips).toHaveLength(2)
     },
   )
+
+  it('explains how to re-export an XML version WeftCut cannot read', () => {
+    const xml = fixture().replace('version="1.10"', 'version="1.15"')
+    expect(() => listFcpxmlSequences(xml)).toThrow(/FCPXML 1\.15.*1\.6 through 1\.14.*Export XML/)
+  })
+
+  it('reports an unsupported edit in a supported version without dropping it', () => {
+    const xml = fixture().replace('version="1.10"', 'version="1.14"')
+      .replace('<marker value="Signal seen"', '<unknown-edit/><marker value="Signal seen"')
+    expect(() => parseFcpxml(xml)).toThrow(/Unsupported inside <asset-clip>/)
+  })
 
   it('accepts legacy asset URLs and a single library/event/project wrapper', () => {
     const url = pathToFileURL(join(tmpdir(), 'Harbor Lights.mov')).href

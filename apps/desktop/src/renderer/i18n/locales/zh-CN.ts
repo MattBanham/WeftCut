@@ -431,6 +431,8 @@ const zhCN: Resources = {
     import_accept_title_gaps: "省略这些标题并保留其时间位置",
     import_media_blocked: "部分媒体需要处理",
     import_output_color_difference: "源时间线使用 {{color}}。导入的剪辑将使用 SDR Rec. 709，颜色可能与源时间线不同。",
+    import_short_audio_omitted: "无法保留的过短音频编辑",
+    import_accept_short_audio_omissions: "导入时跳过这些过短的音频编辑",
     import_media_differences: "媒体差异",
     import_accept_media_differences: "接受以上差异并使用这些文件",
     import_media_placements_one: "用于 {{count}} 个片段。",

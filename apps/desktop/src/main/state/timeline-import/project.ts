@@ -5,7 +5,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import { pathToFileURL } from 'node:url'
 import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
-import { affineTimeMap, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
+import { affineTimeMap, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
 import { ffprobeColorToWebCodecs } from '../../../renderer/render/decoder/ffprobeColorSpace'
 import { createActor } from '../actor'
@@ -245,14 +245,53 @@ export async function prepareTimelineProject(
     }
   }
   if (timeline) visit(timeline)
+  const samplesPerUs = exactTime(AUDIO_GRID.num, 1_000_000)
+  function sampleIndex(time: ExactTime, sequenceEnd: number) {
+    const sample = multiplyTime(time, samplesPerUs)
+    const nearest = roundTime(sample)
+    // Rounding past the last frame would extend the composition by one frame.
+    return timeUsAtGridIndex(nearest, AUDIO_GRID) <= sequenceEnd ? nearest : floorTime(sample)
+  }
+  const audioSamples = new Map<TimelineClip, { first: number; last: number }>()
+  const omittedAudio = new Map<TimelineClip, TimelineCompatibilityItem>()
+  for (const sequence of sequences) {
+    const frameDuration = exactTime(1_000_000 * sequence.fps.den, sequence.fps.num)
+    const end = timeUsAtFrame(sequence.durationFrames, sequence.fps.num, sequence.fps.den)
+    for (const clip of sequence.clips) {
+      if (!clip.audioRole) continue
+      const window = clip.splitAudio ?? clip
+      const first = sampleIndex(window.timelineStart, end)
+      const last = sampleIndex(window.timelineEnd, end)
+      if (last > first) {
+        audioSamples.set(clip, { first, last })
+        continue
+      }
+      const label = clip.label || clip.asset.name || clip.asset.filename
+      const notes = ['Both audio edges land on the same 48 kHz sample boundary, leaving no audio to play. ' +
+        'This sound and any settings specific to it will be left out. ' +
+        'The surrounding edits keep their timing. To keep the sound, extend its trim in the source editor and export again.']
+      if (sequence !== timeline) notes.push('This frame range is inside “' + (sequence.name ?? 'Imported Group') + '”.')
+      if (!clip.hasVideo && clip.markers.length) {
+        notes.push('Its markers stay on the timeline as independent markers.')
+        for (const marker of clip.markers) notes.push(...marker.notes)
+      }
+      omittedAudio.set(clip, { location: clip.location, label, lane: clip.lane, status: 'approximated', notes,
+        timelineFrames: { start: floorTime(divideTime(window.timelineStart, frameDuration)),
+          end: ceilTime(divideTime(window.timelineEnd, frameDuration)) } })
+    }
+  }
+  const omittedShortAudio = [...omittedAudio.values()]
   const clips = [...sequences].flatMap(sequence => sequence.clips)
+  const retained = clips.filter(clip => clip.hasVideo || !omittedAudio.has(clip))
   const editIssues = 'issues' in inspection ? inspection.issues : [...sequences].flatMap(sequence => sequence.editIssues ?? [])
   const mediaUses = 'sources' in inspection ? inspection.sources : clips
   const originals = new Map<string, { asset: TimelineMediaReference; label: string; placements: number }>()
   for (const { asset, label } of mediaUses) {
     const original = originals.get(asset.ref)
-    if (original) original.placements++
-    else originals.set(asset.ref, { asset, label: asset.name || label || asset.ref, placements: 1 })
+    if (!original) originals.set(asset.ref, { asset, label: asset.name || label || asset.ref, placements: 0 })
+  }
+  for (const { asset } of 'sources' in inspection ? inspection.sources : retained) {
+    originals.get(asset.ref)!.placements++
   }
   const mediaIssue = (asset: TimelineMediaReference, detail: string): TimelineMediaIssue => {
     const { label, placements } = originals.get(asset.ref)!
@@ -281,7 +320,8 @@ export async function prepareTimelineProject(
   const offline: TimelineMediaReference[] = []
   const missing: TimelineMediaIssue[] = []
   const checkedPaths = new Map<string, Promise<string>>()
-  for (const { asset } of originals.values()) {
+  for (const { asset, placements } of originals.values()) {
+    if (placements === 0) continue
     const replacement = selected.get(asset.ref)
     const candidate = replacement ?? (asset.local ? asset.path : undefined)
     if (candidate !== undefined) {
@@ -434,7 +474,7 @@ export async function prepareTimelineProject(
     }
     return size
   }
-  for (const clip of clips) {
+  for (const clip of retained) {
     const item = itemOf(clip)
     if (!item) continue
     try {
@@ -445,7 +485,8 @@ export async function prepareTimelineProject(
         imageSizes.set(item.id, await checked)
         assertCurrent()
       }
-      const result = validateSource(clip, item, probed.get(resolved.get(clip.asset.ref)!.path),
+      const played = omittedAudio.has(clip) ? { ...clip, audioRole: null } : clip
+      const result = validateSource(played, item, probed.get(resolved.get(clip.asset.ref)!.path),
         actualFrameUs, imageSizes.get(item.id))
       sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
@@ -460,10 +501,10 @@ export async function prepareTimelineProject(
     }
   }
   if (missing.length || failed.length || incompatibilities.size) {
-    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0, editIssues,
-      [...mediaChanges.values()], mediaReview)
+    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0,
+      [...editIssues, ...omittedShortAudio], [...mediaChanges.values()], mediaReview)
   }
-  if (editIssues.length) throw new TimelineEditFailure(editIssues, editIssues.some(issue => issue.recovery === 'omit-effect'),
+  if (editIssues.length) throw new TimelineEditFailure([...editIssues, ...omittedShortAudio], editIssues.some(issue => issue.recovery === 'omit-effect'),
     [...mediaChanges.values()], mediaReview)
   const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
@@ -485,11 +526,12 @@ export async function prepareTimelineProject(
   const videoConversions = new Map<string, TimelineImportReport['videoConversions'][number]>()
   const compatibilityItems: TimelineCompatibilityItem[] = [...sequences].flatMap(sequence => sequence.notices)
   const built = new Map<ImportTimeline, Composition>([[timeline, target]])
-  const allLanes = [...new Set(clips.map(clip => clip.lane).concat(timeline.groups.length ? [0] : []))].sort((a, b) => a - b)
+  const allLanes = [...new Set(retained.map(clip => clip.lane).concat(timeline.groups.length ? [0] : []))].sort((a, b) => a - b)
 
   function mapSequence(sequence: ImportTimeline, target: Composition): void {
     const laneIds = new Map([[0, target.tracks[0]!.id]])
-    const lanes = [...new Set(sequence.clips.map((clip) => clip.lane))].sort((a, b) => a - b)
+    const layers = sequence.clips.filter(clip => clip.hasVideo || !omittedAudio.has(clip))
+    const lanes = [...new Set(layers.map(clip => clip.lane))].sort((a, b) => a - b)
     let lowerTracks = 0
     let firstOverlay = true
     for (const lane of lanes) {
@@ -501,33 +543,61 @@ export async function prepareTimelineProject(
     }
     const tracks = new Map(target.tracks.map((track) => [track.id, track]))
     const boundary = (frame: number) => timeUsAtFrame(frame, target.fps.num, target.fps.den)
-    const samplesPerUs = exactTime(AUDIO_GRID.num, 1_000_000)
     const sequenceEnd = boundary(sequence.durationFrames)
-    const sampleIndex = (time: ExactTime) => {
-      const sample = multiplyTime(time, samplesPerUs)
-      const nearest = roundTime(sample)
-      // A terminal sample boundary past the last frame would extend the project
-      // by a whole frame when WeftCut fits its duration to the last clip.
-      return timeUsAtGridIndex(nearest, AUDIO_GRID) <= sequenceEnd ? nearest : floorTime(sample)
+    function addMarkers(clip: TimelineClip, layer: Layer | null, notes?: string[]) {
+      for (const mark of clip.markers) {
+        notes?.push(...mark.notes)
+        const t_us = boundary(mark.frame)
+        const end_t_us = mark.endFrame === null ? null : boundary(mark.endFrame)
+        let anchor = null
+        if (layer) {
+          const { whole, fraction } = splitExact(mark.source)
+          const at = { src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) }
+          if (sourceInstantHibernating(at, layer) || sourceInstantTimelineUs(layer, at, target.fps) !== t_us) {
+            notes?.push('Marker “' + mark.label + '” stays at frame ' + mark.frame + ' as an independent marker. It will not follow the clip when moved.')
+          } else anchor = { ...at, layer: layer.id }
+        }
+        target.markers.push({
+          id: idGen(), t_us, end_t_us, label: mark.label, note: mark.note ?? '', color: DEFAULT_MARKER_COLOR, anchor,
+        })
+      }
     }
     const visualLayers = new Map<TimelineClip, Layer>()
     const splitLayers: Layer[] = []
     for (const clip of sequence.clips) {
+      const omission = omittedAudio.get(clip)
+      if (omission && !clip.hasVideo) {
+        addMarkers(clip, null)
+        continue
+      }
       const item = itemOf(clip)
       const notes = [...clip.notes]
+      const audioRole = omission ? null : clip.audioRole
       let approximation = false
       let converted = notes.length > 0
       const adjustment = (value: ExactTime) => (value.num / value.den).toFixed(6).replace(/\.?0+$/, '')
       const audioWindow = clip.splitAudio ?? clip
-      const audioStartIndex = sampleIndex(audioWindow.timelineStart)
-      const audioEndIndex = sampleIndex(audioWindow.timelineEnd)
-      const audioStart = timeUsAtGridIndex(audioStartIndex, AUDIO_GRID)
-      const audioEnd = timeUsAtGridIndex(audioEndIndex, AUDIO_GRID)
-      if (clip.audioRole) {
-        if (audioEnd <= audioStart) {
-          throw new Error(clip.location + ': This audio clip is too short to occupy a 48 kHz sample. Extend it in the source editor and export again.')
+      const sampleSpan = audioSamples.get(clip)
+      if (clip.playbackRate) {
+        notes.push('Constant playback speed is kept as an editable setting (' +
+          clip.playbackRate.num + '/' + clip.playbackRate.den + '×).')
+        converted = true
+      }
+      if (sampleSpan) {
+        if (clip.audioSubrole) {
+          notes.push('Audio subrole “' + clip.audioSubrole + '” is grouped under “' + clip.audioSubrole.split('.')[0] + '”')
+          converted = true
         }
-        for (const [label, time, sample] of [['start', audioWindow.timelineStart, audioStartIndex], ['end', audioWindow.timelineEnd, audioEndIndex]] as const) {
+        if (clip.splitAudio) {
+          notes.push(clip.hasVideo
+            ? 'Separate picture and sound trims are kept as linked editable clips.'
+            : 'The separate audio trim and its timeline position are kept.')
+          if (clip.splitAudio.clippedBeforeZero) {
+            notes.push('Audio before the timeline begins is left out. The remaining audio stays in sync.')
+          }
+          converted = true
+        }
+        for (const [label, time, sample] of [['start', audioWindow.timelineStart, sampleSpan.first], ['end', audioWindow.timelineEnd, sampleSpan.last]] as const) {
           const delta = subtractTime(divideTime(exactTime(sample), samplesPerUs), time)
           if (delta.num !== 0) {
             const direction = delta.num < 0 ? 'earlier' : 'later'
@@ -548,7 +618,7 @@ export async function prepareTimelineProject(
       }
       const { videoEnd, audioEnd: audioSourceEnd } = sourceEnds.get(clip)!
       const videoEndRounded = clip.hasVideo && videoEnd !== clip.sourceOut
-      const audioEndRounded = clip.audioRole !== null && audioSourceEnd !== audioWindow.sourceOut
+      const audioEndRounded = audioRole !== null && audioSourceEnd !== audioWindow.sourceOut
       if (videoEndRounded || audioEndRounded) {
         roundedEnds++
         converted = true
@@ -589,7 +659,7 @@ export async function prepareTimelineProject(
             rateConformed, scaledToFit })
         }
       }
-      if (clip.audioRole && item.metadata.audio) {
+      if (audioRole && item.metadata.audio) {
         if (item.metadata.audio.sample_rate != null && item.metadata.audio.sample_rate !== 48_000) {
           resampledAudioClips++
           converted = true
@@ -602,7 +672,7 @@ export async function prepareTimelineProject(
           approximation = true
         }
       }
-      if (clip.volumeDb) notes.push('Static clip gain: ' + clip.volumeDb + 'dB (editable)')
+      if (audioRole && clip.volumeDb) notes.push('Static clip gain: ' + clip.volumeDb + 'dB (editable)')
       if (clip.staticTransform) notes.push('Static position/scale/rotation (editable)')
       if (clip.opacity !== undefined && clip.opacity !== 1) {
         notes.push('Static opacity: ' + clip.opacity + ' (editable)')
@@ -617,9 +687,10 @@ export async function prepareTimelineProject(
           visualAdjustments(fitVisualParams(imageOverlayParams(item.id, target) as Extract<Layer['params'], { kind: 'ImageOverlay' }>,
             imageSizes.get(item.id) ?? item.metadata.video, target, clip), clip, target))
         : null
-      const audio = clip.audioRole
-        ? newLayer(idGen, clip, audioWindow.sourceIn, audioSourceEnd, audioStart, audioEnd,
-          { ...audioParams(item.id, 0, 0), role: clip.audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
+      const audio = sampleSpan && audioRole
+        ? newLayer(idGen, clip, audioWindow.sourceIn, audioSourceEnd,
+          timeUsAtGridIndex(sampleSpan.first, AUDIO_GRID), timeUsAtGridIndex(sampleSpan.last, AUDIO_GRID),
+          { ...audioParams(item.id, 0, 0), role: audioRole, gain_db: { mode: 'Static', value: clip.volumeDb ?? 0 } })
         : null
       if (video || image) {
         const layer = (video ?? image)!
@@ -633,23 +704,9 @@ export async function prepareTimelineProject(
         audioClips++
       }
       if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
-      for (const mark of clip.markers) {
-        const { whole, fraction } = splitExact(mark.source)
-        const t_us = boundary(mark.frame)
-        const end_t_us = mark.endFrame === null ? null : boundary(mark.endFrame)
-        const layer = video ?? (!clip.splitAudio ? audio : null)
-        let anchor = null
-        if (layer) {
-          const at = { src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) }
-          if (sourceInstantHibernating(at, layer) || sourceInstantTimelineUs(layer, at, target.fps) !== t_us) {
-            converted = true
-            notes.push('Marker “' + mark.label + '” stays at frame ' + mark.frame + ' as an independent marker. It will not follow the clip when moved.')
-          } else anchor = { ...at, layer: layer.id }
-        }
-        target.markers.push({
-          id: idGen(), t_us, end_t_us, label: mark.label, note: mark.note ?? '', color: DEFAULT_MARKER_COLOR, anchor,
-        })
-      }
+      const beforeMarkers = notes.length
+      addMarkers(clip, video ?? (!clip.splitAudio ? audio : null), notes)
+      converted ||= notes.length > beforeMarkers
       compatibilityItems.push({ location: clip.location,
         label: clip.label || clip.asset.ref, lane: clip.lane,
         status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
@@ -723,10 +780,10 @@ export async function prepareTimelineProject(
     outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
     compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.filter(group => group.kind === 'compound').length, 0),
     mediaChanges: [...mediaChanges.values()], omittedEffects: [...sequences].flatMap(sequence => sequence.omittedEffects ?? []),
-    omittedTitles: [...sequences].flatMap(sequence => sequence.omittedTitles ?? []),
+    omittedTitles: [...sequences].flatMap(sequence => sequence.omittedTitles ?? []), omittedShortAudio,
     videoClips, audioClips, markers: Object.values(project.compositions).reduce((count, composition) => count + composition.markers.length, 0), media: Object.keys(project.media_pool).length,
     lanes: allLanes, connectedClips: [...sequences].filter(sequence => !multicamSequences.has(sequence))
-      .reduce((count, sequence) => count + sequence.clips.filter(clip => clip.lane !== 0).length, 0), roundedEnds,
+      .reduce((count, sequence) => count + sequence.clips.filter(clip => clip.lane !== 0 && (clip.hasVideo || !omittedAudio.has(clip))).length, 0), roundedEnds,
     resampledAudioClips, downmixedAudioClips,
     rateConformedVideoClips, resizedVideoClips, videoConversions: [...videoConversions.values()],
     normalizedTimecode: [...sequences].some(sequence => sequence.normalizedTimecode),
@@ -736,7 +793,7 @@ export async function prepareTimelineProject(
     compatibilityCounts: {
       exact: compatibilityItems.filter(i => i.status === 'exact').length,
       converted: compatibilityItems.filter(i => i.status === 'converted').length,
-      approximated: compatibilityItems.filter(i => i.status === 'approximated').length,
+      approximated: compatibilityItems.filter(i => i.status === 'approximated').length + omittedShortAudio.length,
       unsupported: 0,
     },
   } }

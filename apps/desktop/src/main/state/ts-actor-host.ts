@@ -1012,6 +1012,9 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         if (report.omittedEffects.length && args.acceptOmittedEffects !== true) {
           throw new Error('Review and accept the omitted effects before importing')
         }
+        if (report.omittedShortAudio.length && args.acceptShortAudioOmissions !== true) {
+          throw new Error('Review and accept the short audio edits that will be left out before importing')
+        }
         if (report.omittedTitles.length && args.acceptTitleGaps !== true) {
           throw new Error('Review and accept the titles that will be left out before importing')
         }

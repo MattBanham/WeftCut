@@ -58,6 +58,7 @@ export interface TimelineImportReport extends TimelineMediaReview {
   outputColorChange: string | null
   omittedEffects: TimelineCompatibilityItem[]
   omittedTitles: TimelineCompatibilityItem[]
+  omittedShortAudio: TimelineCompatibilityItem[]
   name: string
   destination: string | null
   width: number

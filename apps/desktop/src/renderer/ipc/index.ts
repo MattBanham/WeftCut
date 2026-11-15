@@ -920,9 +920,9 @@ export function projectDiscardTimelinePreview(id: string): Promise<null> {
 
 export function projectImportTimeline(
   id: string, canvas: 'fit' | 'fill' | 'original' = 'fit', destination?: TimelineProjectDestination,
-  acceptMediaChanges = false, acceptOmittedEffects = false, acceptTitleGaps = false,
+  acceptMediaChanges = false, acceptOmittedEffects = false, acceptTitleGaps = false, acceptShortAudioOmissions = false,
 ): Promise<string> {
-  return invoke<string>("project_import_timeline", { id, canvas, destination, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps });
+  return invoke<string>("project_import_timeline", { id, canvas, destination, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions });
 }
 
 export async function projectOpen(path: string): Promise<void> {

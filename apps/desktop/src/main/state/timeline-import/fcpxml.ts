@@ -1338,7 +1338,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       const label = required(mark, 'value')
       const { completed } = mark.attrs
       if (completed !== undefined && completed !== '0' && completed !== '1') fail(mark, 'Invalid marker to-do status')
-      if (completed !== undefined) notes.push('Marker “' + label + '” keeps its text and timing. Its to-do status is left out.')
+      if (completed !== undefined) notes.push('Marker “' + label + '” keeps its text. Its to-do status is left out.')
       if (chapter) notes.push('Chapter “' + label + '” becomes a timeline marker. Chapter and poster-frame settings are left out.')
       const markerDuration = time(mark, 'duration', format.frameDuration)
       const at = time(mark, 'start')
@@ -1346,8 +1346,13 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       if (local.num < 0 || compareTime(local, duration) >= 0) fail(mark, 'Marker lies outside the clip trim')
       const timelineAt = addTime(offset, local)
       const markerFrame = divideTime(timelineAt, format.frameDuration)
-      const frame = roundTime(markerFrame)
-      if (markerFrame.den !== 1) notes.push('Marker “' + label + '” moved to the nearest timeline frame')
+      const nearest = roundTime(markerFrame)
+      const frame = Math.min(nearest, endFrame - 1)
+      if (frame !== nearest) {
+        notes.push('Marker “' + label + '” stays on frame ' + frame + ', the last frame of its clip. The nearest frame is outside the clip.')
+      } else if (markerFrame.den !== 1) {
+        notes.push('Marker “' + label + '” moved to the nearest timeline frame (' + frame + ').')
+      }
       let rangeEnd: number | null = null
       if (compareTime(markerDuration, format.frameDuration) > 0) {
         if (compareTime(addTime(local, markerDuration), duration) > 0) {
@@ -1355,7 +1360,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
         }
         const rangeFrame = divideTime(addTime(timelineAt, markerDuration), format.frameDuration)
         rangeEnd = roundTime(rangeFrame)
-        if (rangeFrame.den !== 1) notes.push('Marker range end moved to the nearest timeline frame')
+        if (rangeFrame.den !== 1) notes.push('The end of marker “' + label + '” moved to timeline frame ' + rangeEnd + '.')
       } else if (markerDuration.num > 0) {
         notes.push('Marker “' + label + '” becomes a point marker')
       }

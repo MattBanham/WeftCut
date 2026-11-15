@@ -727,6 +727,24 @@ describe('timeline import transaction', () => {
     expect(rootComposition(project).markers[0]).toMatchObject({ t_us: 33367, end_t_us: 100100, label: 'Signal seen' })
   })
 
+  it('keeps near-cut markers visible and discloses when they become independent', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('</asset-clip>', '<marker start="108004900/30000s" value="Before the cut" duration="0s"/></asset-clip>')
+    await writeFile(media, 'Fictional video')
+    await writeFile(document, xml)
+    const run = setup()
+    const { project, report } = await run.prepareReview()
+    const notes = report.compatibilityItems.flatMap(item => item.notes).join(' ')
+    expect(notes).toMatch(/Before the cut.*last frame of its clip.*Before the cut.*independent marker/)
+    const markers = rootComposition(project).markers
+    expect(markers).toMatchObject([
+      { label: 'Signal seen', t_us: 33367, anchor: { src_us: 100100 } },
+      { label: 'Before the cut', t_us: 66733, end_t_us: null, anchor: null },
+    ])
+    expect(run.actor.dispatch('import_timeline_group', { imported: project, expectedProjectId: run.before.project_id, canvas: 'fit' }).ok).toBe(true)
+    expect(run.actor.snapshot().compositions[project.root_id]!.markers).toEqual(markers)
+  })
+
   it('publishes imported static transform and opacity as editable visual params', async () => {
     const xml = fixture(pathToFileURL(media).href).replace('<marker value="Signal seen"',
       '<adjust-transform position="10 10" scale="0.5 0.75" rotation="30"/>' +
@@ -1305,7 +1323,21 @@ describe('timeline import transaction', () => {
     expect(notes).toMatch(/Named gap/)
     expect(notes).toMatch(/Disabled transform/)
     expect(notes).toMatch(/becomes a point marker/)
-    expect(notes).toMatch(/Audio start quantized to the 48 kHz sample grid: -?\d+\.\d+ µs/)
+    expect(notes).toMatch(/Audio start moved \d+\.\d+ µs (earlier|later) to fit the 48 kHz sample grid/)
+  })
+
+  it('reports an actual sample movement and leaves an already aligned edge out of the report', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('<asset-clip ref="take" name="Signal"', '<asset-clip ref="take" name="Signal" srcEnable="audio" offset="1/48000s"')
+      .replace('<gap offset="3003/30000s" duration="1001/30000s"/>', '')
+    await writeFile(media, 'Fictional video')
+    await writeFile(document, xml)
+    const { report, project } = await setup().prepareReview()
+    const signal = report.compatibilityItems.find(item => item.label === 'Signal')!
+    expect(signal.notes).not.toEqual(expect.arrayContaining([expect.stringContaining('Audio start moved')]))
+    expect(signal.notes).toContain('Audio end moved 4.166667 µs later to fit the 48 kHz sample grid.')
+    const audio = rootComposition(project).tracks[0]!.layers.find(layer => layer.label === 'Signal')!
+    expect(audio).toMatchObject({ t_start_us: timeUsAtGridIndex(1, AUDIO_GRID), t_end_us: timeUsAtGridIndex(4806, AUDIO_GRID) })
   })
 
   it('suggests a different case spelling for a foreign path and waits for the user to choose it', async () => {

@@ -57,6 +57,7 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
       <spine>
         <asset-clip ref="a" name="Glass" start="108002002/30000s" duration="3003/30000s">
           <marker value="Cue" start="108003003/30000s" duration="1001/30000s"/>
+          <marker value="Before the cut" note="Keep this beat" start="108004900/30000s" duration="0s"/>
         </asset-clip>
         <gap offset="3003/30000s" duration="1001/30000s"/>
         <asset-clip ref="a" name="Garden" offset="4004/30000s" start="108006006/30000s" duration="2002/30000s"/>
@@ -83,7 +84,9 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
 
     await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
-    await expect(review.getByText(/Video clips 2.*Audio clips 2.*Markers 1.*Media files 1/)).toBeVisible()
+    await expect(review.getByText(/Video clips 2.*Audio clips 2.*Markers 2.*Media files 1/)).toBeVisible()
+    await expect(review.getByText(/Before the cut.*last frame of its clip/)).toBeVisible()
+    await expect(review.getByText(/Before the cut.*independent marker/)).toBeVisible()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     expect(await invokeCmd(page, 'project_open_state')).not.toBeNull()
     await review.getByRole('button', { name: 'Cancel', exact: true }).click()
@@ -114,7 +117,11 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
     expect(imported).toMatchObject({ fps_num: 30000, fps_den: 1001, duration_us: 200200, layer_count: 4 })
     expect(imported.media).toHaveLength(1)
     expect(imported.links).toHaveLength(2)
-    expect(imported.markers).toMatchObject([{ t_us: 33367, label: 'Cue' }])
+    const markers = [
+      { t_us: 33367, label: 'Cue' },
+      { t_us: 66733, label: 'Before the cut', note: 'Keep this beat', anchor_layer: null, hibernating: false },
+    ]
+    expect(imported.markers).toMatchObject(markers)
     await waitForHook(page, 'weftcutSampleComposite')
     await page.waitForFunction(() => (window as any).__weftcutTest.previewResourceProbe?.() != null)
     await page.evaluate(() => (window as any).__weftcutTest.transportSeekUs(133467))
@@ -133,7 +140,7 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
     }, { timeout: 30_000 }).toBe(true)
     expect(readFileSync(projectFile, 'utf8')).toContain('Glass edit')
     await invokeCmd(page, 'project_open', { path: destination })
-    expect(await importedSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4 })
+    expect(await importedSummary(page)).toMatchObject({ duration_us: 200200, layer_count: 4, markers })
   } finally { await app.close() }
 })
 
@@ -822,7 +829,7 @@ test('reviews missing media, a size mismatch, a title and an effect before impor
     await expect(unsupported.getByText(/640 × 360 pixels, but this file is 120 × 130/)).toBeVisible()
     await unsupported.getByRole('button', { name: 'Review without these effects…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
-    await expect(review).toContainText('Audio end quantized to the 48 kHz sample grid')
+    await expect(review).toContainText(/Audio end moved \d+(?:\.\d+)? µs (earlier|later) to fit the 48 kHz sample grid/)
     await expect(review).toContainText('Check media replacements')
     await expect(review.getByRole('region', { name: 'Titles that will be left out' })).toContainText('End Card')
     await expect(review).toContainText('Source asset UID is not retained')

@@ -16,6 +16,7 @@ import { applyAddTrack, DEFAULT_MARKER_COLOR, defaultTransform } from '../mutati
 import { audioParams, imageOverlayParams, videoClipParams } from '../mutations/media'
 import { applyDurationAutofit } from '../mutations/helpers'
 import { AUDIO_GRID, timeUsAtFrame, timeUsAtGridIndex } from '../snap'
+import { sourceInstantHibernating, sourceInstantTimelineUs } from '../summary'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure } from './fcpxml'
 import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSourceWindow } from './timeline'
@@ -502,12 +503,12 @@ export async function prepareTimelineProject(
     const boundary = (frame: number) => timeUsAtFrame(frame, target.fps.num, target.fps.den)
     const samplesPerUs = exactTime(AUDIO_GRID.num, 1_000_000)
     const sequenceEnd = boundary(sequence.durationFrames)
-    const sampleBoundary = (time: ExactTime) => {
+    const sampleIndex = (time: ExactTime) => {
       const sample = multiplyTime(time, samplesPerUs)
-      const nearest = timeUsAtGridIndex(roundTime(sample), AUDIO_GRID)
+      const nearest = roundTime(sample)
       // A terminal sample boundary past the last frame would extend the project
       // by a whole frame when WeftCut fits its duration to the last clip.
-      return nearest <= sequenceEnd ? nearest : timeUsAtGridIndex(floorTime(sample), AUDIO_GRID)
+      return timeUsAtGridIndex(nearest, AUDIO_GRID) <= sequenceEnd ? nearest : floorTime(sample)
     }
     const visualLayers = new Map<TimelineClip, Layer>()
     const splitLayers: Layer[] = []
@@ -518,16 +519,20 @@ export async function prepareTimelineProject(
       let converted = notes.length > 0
       const adjustment = (value: ExactTime) => (value.num / value.den).toFixed(6).replace(/\.?0+$/, '')
       const audioWindow = clip.splitAudio ?? clip
-      const audioStart = sampleBoundary(audioWindow.timelineStart)
-      const audioEnd = sampleBoundary(audioWindow.timelineEnd)
+      const audioStartIndex = sampleIndex(audioWindow.timelineStart)
+      const audioEndIndex = sampleIndex(audioWindow.timelineEnd)
+      const audioStart = timeUsAtGridIndex(audioStartIndex, AUDIO_GRID)
+      const audioEnd = timeUsAtGridIndex(audioEndIndex, AUDIO_GRID)
       if (clip.audioRole) {
         if (audioEnd <= audioStart) {
           throw new Error(clip.location + ': This audio clip is too short to occupy a 48 kHz sample. Extend it in the source editor and export again.')
         }
-        for (const [label, time, snapped] of [['start', audioWindow.timelineStart, audioStart], ['end', audioWindow.timelineEnd, audioEnd]] as const) {
-          const delta = subtractTime(exactTime(snapped), time)
+        for (const [label, time, sample] of [['start', audioWindow.timelineStart, audioStartIndex], ['end', audioWindow.timelineEnd, audioEndIndex]] as const) {
+          const delta = subtractTime(divideTime(exactTime(sample), samplesPerUs), time)
           if (delta.num !== 0) {
-            notes.push('Audio ' + label + ' quantized to the 48 kHz sample grid: ' + adjustment(delta) + ' µs')
+            const direction = delta.num < 0 ? 'earlier' : 'later'
+            const magnitude = exactTime(Math.abs(delta.num), delta.den)
+            notes.push('Audio ' + label + ' moved ' + adjustment(magnitude) + ' µs ' + direction + ' to fit the 48 kHz sample grid.')
             converted = true
           }
         }
@@ -602,10 +607,6 @@ export async function prepareTimelineProject(
       if (clip.opacity !== undefined && clip.opacity !== 1) {
         notes.push('Static opacity: ' + clip.opacity + ' (editable)')
       }
-      compatibilityItems.push({ location: clip.location,
-        label: clip.label || clip.asset.ref, lane: clip.lane,
-        status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
-        notes })
       const track = tracks.get(laneIds.get(clip.lane)!)!
       const video = clip.hasVideo && !clip.asset.stillImage
         ? newLayer(idGen, clip, clip.sourceIn, videoEnd, boundary(clip.firstFrame), boundary(clip.endFrame),
@@ -634,13 +635,25 @@ export async function prepareTimelineProject(
       if (video && audio) target.links.push({ id: idGen(), members: [video.id, audio.id].sort() })
       for (const mark of clip.markers) {
         const { whole, fraction } = splitExact(mark.source)
+        const t_us = boundary(mark.frame)
+        const end_t_us = mark.endFrame === null ? null : boundary(mark.endFrame)
+        const layer = video ?? (!clip.splitAudio ? audio : null)
+        let anchor = null
+        if (layer) {
+          const at = { src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) }
+          if (sourceInstantHibernating(at, layer) || sourceInstantTimelineUs(layer, at, target.fps) !== t_us) {
+            converted = true
+            notes.push('Marker “' + mark.label + '” stays at frame ' + mark.frame + ' as an independent marker. It will not follow the clip when moved.')
+          } else anchor = { ...at, layer: layer.id }
+        }
         target.markers.push({
-          id: idGen(), t_us: boundary(mark.frame), end_t_us: mark.endFrame === null ? null : boundary(mark.endFrame),
-          label: mark.label, note: mark.note ?? '', color: DEFAULT_MARKER_COLOR,
-          anchor: image || (!video && clip.splitAudio) ? null
-            : { layer: (video ?? audio)!.id, src_us: whole, ...(fraction.num ? { src_fraction: fraction } : {}) },
+          id: idGen(), t_us, end_t_us, label: mark.label, note: mark.note ?? '', color: DEFAULT_MARKER_COLOR, anchor,
         })
       }
+      compatibilityItems.push({ location: clip.location,
+        label: clip.label || clip.asset.ref, lane: clip.lane,
+        status: approximation ? 'approximated' : converted ? 'converted' : 'exact',
+        notes })
     }
     const audioTracks: Composition['tracks'] = []
     for (const layer of splitLayers.sort((a, b) => a.t_start_us - b.t_start_us)) {

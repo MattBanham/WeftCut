@@ -1,7 +1,7 @@
 # MCP Server & Agent UX
 
-WeftCut is an MCP server. External agents (Claude Code, Claude Desktop, Codex,
-Cursor, custom clients) edit the open project through a structured tool
+WeftCut is an MCP server. External agents (ChatGPT / Codex, Claude Code,
+Claude Desktop, DeepSeek Harness, Cursor, custom clients) edit the open project through a structured tool
 surface, over **stdio through the `weftcut` binary** (recommended) or **HTTP-direct**.
 Per-tool arguments, return shapes and refusals live in the advertised catalog
 (tool descriptions and schemas) — that is the contract agents read. This doc
@@ -89,18 +89,18 @@ the agent-facing UX. Agent guidance ships as one skill (ADR 0046).
 ## Connection UX
 
 **Settings → Agent → Connect agent**:
-- **Primary: stdio config**, one snippet per client (Codex TOML, Claude
-  and Cursor JSON) plus a self-configuration prompt. The entry is the
+- **Primary: stdio config**, one tab per agent host, drawn from the host table
+  (`shared/agentHosts.ts`, [ADR 0167](adr/0167-the-app-registers-the-server-and-a-plugin-carries-content.md);
+  [below](#agent-hosts)), plus a self-configuration prompt. The entry is the
   profile's copy of the binary with the one argument `mcp`, and no
-  environment. The `Generic` tab prints
-  the connection facts unwrapped, because MCP standardises the protocol, not
-  the config file (`mcpServers` is a Claude Desktop convention). An `mcp add`
-  one-liner accompanies a snippet where the client's CLI can express the whole
+  environment. The `Generic` tab prints the connection facts unwrapped,
+  because MCP standardises the protocol, not the config file. An `mcp add`
+  one-liner accompanies a snippet where the host's CLI can express the whole
   entry (Codex and Claude Code for stdio; Claude Code alone for HTTP —
   `codex mcp add --url` takes only an env-var name for the bearer). Windows
   paths are double-quoted for Git Bash and PowerShell.
 - **Advanced: HTTP-direct** — URL, masked token, the same snippets in URL +
-  header form; breaks when the app is closed and goes stale when port or
+  header form, for each host whose config can name one; breaks when the app is closed and goes stale when port or
   token change. Until the binary is installed (an unpackaged run before
   `npm run build:cli`) HTTP renders as primary; "starting…" shows until the port is bound.
 - **`initialize` carries `instructions` on both transports**: the session
@@ -133,6 +133,194 @@ the agent-facing UX. Agent guidance ships as one skill (ADR 0046).
   `io.modelcontextprotocol/skills` extension is not declared (no `skills/list`
   or `skills/get`), because hosts have barely adopted it; the URIs conform, so
   declaring it later is additive.
+
+### Agent hosts
+
+What differs between hosts is data in one table, `shared/agentHosts.ts`: the
+config format and file, whether that file takes an HTTP entry, and the preview
+surface the host's desktop app offers beside the chat (a view in its side
+panel, a loopback page in its side browser, or none; a terminal session of
+the same host has none). Nothing reads the surface yet. The block below is
+rendered from the table; `main/mcp/agentHosts.test.ts` fails when it differs,
+and its expected side is the text to paste.
+
+<!-- agent-hosts:begin -->
+
+| Host | Config file | HTTP direct | Preview surface |
+|---|---|---|---|
+| ChatGPT / Codex | `~/.codex/config.toml` | yes | side panel |
+| Claude Code | `~/.claude.json`; project: `.mcp.json` | yes | side browser |
+| Claude Desktop | macOS `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows `%APPDATA%\Claude\claude_desktop_config.json`, Linux `~/.config/Claude/claude_desktop_config.json` | no | none |
+| DeepSeek Harness | `~/.dsh/cordis.patch.yml` | yes | side browser |
+| Cursor | `~/.cursor/mcp.json`; project: `.cursor/mcp.json` | yes | side browser |
+| Generic | the client's own docs | yes | none |
+
+The stdio entry per host, `<userData>/cli/weftcut` standing for the
+profile's copy of the binary:
+
+**ChatGPT / Codex**
+
+```toml
+[mcp_servers.weftcut]
+command = "<userData>/cli/weftcut"
+args = ["mcp"]
+```
+
+Or in a terminal: `codex mcp add weftcut -- <userData>/cli/weftcut mcp`
+
+**Claude Code**
+
+```json
+{
+  "mcpServers": {
+    "weftcut": {
+      "type": "stdio",
+      "command": "<userData>/cli/weftcut",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+Or in a terminal: `claude mcp add weftcut -s user -- <userData>/cli/weftcut mcp`
+
+**Claude Desktop**
+
+```json
+{
+  "mcpServers": {
+    "weftcut": {
+      "command": "<userData>/cli/weftcut",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+**DeepSeek Harness**
+
+```yaml
+- insert:
+    - id: mcp-weftcut
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: weftcut
+        transport: stdio
+        command: "<userData>/cli/weftcut"
+        args: ["mcp"]
+```
+
+**Cursor**
+
+```json
+{
+  "mcpServers": {
+    "weftcut": {
+      "command": "<userData>/cli/weftcut",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+**Generic**
+
+```text
+transport: stdio
+command:   <userData>/cli/weftcut
+arg:       mcp
+```
+
+<!-- agent-hosts:end -->
+
+**The content plugin** (`plugins/weftcut/`) carries a Claude manifest
+(`.claude-plugin/plugin.json`), an Agent Plugins manifest (`plugin.json`) and
+one small skill with no version in it. The skill sends the agent to the
+served skill (`skill://weftcut/SKILL.md`) before its first tool call and, when
+the `weftcut` tools are missing, sends the user to Settings → Agent. The plugin
+declares no MCP server, hook or executable: the app registers the server
+(ADR 0167). Its catalog lives in a separate repository whose one entry is a
+`git-subdir` source pointing here. `main/mcp/contentPlugin.test.ts` holds the
+two manifests' name, version and description equal, and fails when the
+plugin's files change while `version` does not: `content.lock.json` maps each
+version to a hash of the files, and a change needs a new version and entry.
+
+### Companion page
+
+The side preview: a page beside the chat, for a desktop host's built-in browser: the project's
+name and the latest agent call, on request a live picture of the preview, play
+/ pause and the time, a small timeline to seek on, and export progress. It
+reads the project and drives the player; it never edits. A terminal host has
+nowhere to show it. Why a page and not a card in the chat: ADR 0168.
+
+- **`open_side_preview {}`** answers `{ url }`:
+  `http://127.0.0.1:<port>/companion#k=<page key>`. It carries no UI resource,
+  so calling it draws nothing in the chat; the agent opens the link in the
+  host's browser or gives it to the user. It answers with or without a project
+  open, and the same over `weftcut mcp` as over HTTP. The name and description
+  start from what the user says ("open the preview") and rule out opening the
+  app: a host that found no match started another WeftCut install on its own.
+  With the app closed only the binary's two tools are listed; `launch_weftcut`
+  brings this one in through `tools/list_changed`.
+- **Served by the app** on the MCP listener (`main/companion/`). The page's
+  files are plain ES modules in `apps/desktop/cli/companion/`, where the
+  `weftcut` binary's module can also reach them; the app bundles them at
+  build time.
+- **The page key** is 32 random bytes, hex, in `<userData>/companion_key.json`
+  (`0600` on POSIX), apart from the MCP bearer: neither opens the other's
+  routes. It is made once and never rotated by itself, and *Refresh* in
+  Connect agent leaves it alone. With the port reused (the stored port is the
+  first one tried), a page left open finds the app again after a restart.
+- **Routes.** `GET /companion` and `/companion/ui/*` need no key: they hold no
+  project data, and the key travels in the fragment, which a browser never
+  sends. `/companion/state`, `/companion/events` (server-sent events read
+  over fetch), `/companion/video` (the picture) and `POST /companion/control`
+  (`play`, `pause`, `seek` with `t_us`, `focus`) need
+  `Authorization: Bearer <page key>`. A missing or wrong
+  key, the MCP bearer included, is `401` and a `Companion request rejected`
+  row (never the header); a `Host` other than the loopback bind is `403`. A
+  control while no editor is attached is `409 editor_not_ready`. The page's
+  CSP admits only its own files and origin, with no inline script or style.
+- **Sandboxed frames.** A host that frames the page with
+  `sandbox="allow-scripts"` gives it an opaque origin; its requests arrive
+  with `Origin: null`, which alone gets `Access-Control-Allow-Origin: null`.
+  The key, not the origin, authorizes. No cookie or storage is used, so such a
+  frame works as a tab does.
+- **What the editor does for it.** The editor window attaches a bridge once
+  it can hear main; main answers with what it needs and afterwards tells that
+  bridge only of changes. While a page is open the editor pushes its transport
+  (at most every 100 ms); with none open it pushes nothing. A reload, a crash
+  or the window closing drops the attach.
+- **The picture** is off until the user turns it on in the page; the choice
+  is not kept across a reload of the page. While some page shows it, no
+  export runs and the editor is attached, the editor captures its own preview
+  canvas (the final composite) and encodes it: H.264 (Annex B) on a hardware
+  encoder where one takes the size, else VP8 in software; an encoder that
+  fails hands over to the next. At most 15 frames a second and 960 px wide,
+  2 a second while paused (every frame for 600 ms after a seek), a keyframe
+  every 2 s, a frame dropped while the encoder is behind. With no page
+  showing it nothing is captured or encoded. Meanwhile main turns the editor
+  window's background throttling off, so a hidden window still paints.
+- **`/companion/video`** is a run of frames: `u8` kind (0 config, 1 key,
+  2 delta), `f64` timestamp in µs, `u32` length, little-endian, then the
+  payload; a config's payload is `{ codec, coded_width, coded_height }` as
+  JSON. A new viewer gets the config and the last keyframe at once and
+  continues from the next keyframe. A viewer with more than 2 MB unsent gets
+  nothing until it is under again, and then only from a keyframe. The page
+  decodes with WebCodecs; without them it says it cannot show the picture.
+- **What the page says**, first that holds: the link no longer works (`401`);
+  WeftCut is not running (it retries after 1 s, backing off to 5 s); WeftCut
+  is opening the project; no project is open. Then, over the picture: an
+  export runs (no picture until it ends); the picture is off ([Show picture]);
+  the browser cannot show it; WeftCut is minimized, so the picture updates
+  about once a second ([Show WeftCut]); starting; live. The stage carries the
+  state as `data-picture`. It speaks the app's UI language.
 
 ## Multi-agent semantics
 
@@ -267,7 +455,7 @@ dispatches nothing. Default-deny: only `APP_SCOPE_TOOLS` /
 `APP_SCOPE_RESOURCES` in `main/mcp/mutationTools.ts` answer — the
 Motif library tools, the export preset tools,
 `get_export_status`, `cancel_export`, `retry_export`, `open_project`,
-`create_project`, `read_project` for views `session` / `effects` / `taste` /
+`create_project`, `open_side_preview`, `read_project` for views `session` / `effects` / `taste` /
 `skill`, and the resources `project://session`, `project://taste`,
 `effects://catalog`, `motifs://current`, `skill://weftcut/*`. One predicate (`servesWithoutProject`) serves both gates;
 `mcp.project-scope` sweeps the whole catalog. `install_motif` with no project

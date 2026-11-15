@@ -634,6 +634,7 @@ const enUS = {
     follow_playhead: "Timeline auto-scroll",
     show_markers: "Show markers",
     show_safe_areas: "Show safe areas",
+    grid: "Grid",
     review_overlay: "Review overlay",
     close_active_panel: "Close Active Panel",
     reset_workspace: "Reset Workspace",
@@ -679,6 +680,10 @@ const enUS = {
     // pressed border says which state, the hint says what a click does.
     snap_on_hint: "Clip snapping on. Click to disable.",
     snap_off_hint: "Clip snapping off. Click to enable.",
+    canvas_snap_on_hint: "Canvas snapping on. Click to disable.",
+    canvas_snap_off_hint: "Canvas snapping off. Click to enable.",
+    grid_on_hint: "Grid on. Click to turn off.",
+    grid_off_hint: "Grid off. Click to turn on.",
     review_overlay_on_hint: "Review overlay on: tacks and unreviewed agent changes show on the timeline. Click to hide.",
     review_overlay_off_hint: "Review overlay off. Click to show tacks and unreviewed agent changes on the timeline.",
     follow_on_hint: "Timeline auto-scroll on. Click to disable.",
@@ -1077,6 +1082,8 @@ const enUS = {
     toggle_follow_playhead: "Toggle timeline auto-scroll",
     toggle_markers_visible: "Toggle timeline markers",
     toggle_safe_area_guides: "Toggle safe-area guides",
+    toggle_preview_grid: "Toggle grid",
+    toggle_preview_snap: "Toggle canvas snapping",
     toggle_tail_snap: "Toggle clip snapping",
     toggle_review_overlay: "Toggle review overlay",
     // Prefixed, unlike the bare "Full" / "1/2" the Settings radio uses: these
@@ -1320,6 +1327,14 @@ const enUS = {
     zoom_label: "Preview zoom",
     zoom_fit: "Fit",
     zoom_percent: "{{percent}}%",
+    // The grid row beside the render target, shown while the grid is on.
+    grid_label: "Grid",
+    grid_columns: "Columns",
+    grid_rows: "Rows",
+    grid_vertical_lines: "Vertical grid lines",
+    grid_horizontal_lines: "Horizontal grid lines",
+    grid_hide: "Hide grid lines (snapping stays on)",
+    grid_show: "Show grid lines",
     // The status-area note while the canvas fallback renderer (no WebGPU or
     // WebGL2) cannot draw something on screen (rendererCapability.ts).
     renderer_limit: "Not all drawn",
@@ -1597,6 +1612,7 @@ const enUS = {
     "begin_agent_session": "Start work session",
     "open_project": "Open project",
     "create_project": "New project",
+    "open_side_preview": "Open the side preview",
     "end_agent_session": "End work session",
     "create_tacks": "Add tacks",
     "check_composition": "Check the edit",
@@ -2305,26 +2321,18 @@ const enUS = {
       "Connects directly to the running app. The connection drops once the app closes, and the configuration becomes invalid when the port or token changes. Unless your client does not support stdio, use the configuration above.",
     cli_note: "Or run the following command in a terminal",
     copy_command: "Copy command",
+    // Host names come from shared/agentHosts.ts and stay untranslated; only a
+    // tab whose label is a common word has an entry here.
     tabs: {
-      codex: "Codex",
-      claude: "Claude",
-      cursor: "Cursor",
       generic: "Generic",
     },
-    hint: {
-      codex: "Paste into ~/.codex/config.toml",
-      claude: "Paste into .mcp.json (project) or ~/.claude.json",
-      cursor: "Paste into ~/.cursor/mcp.json or a project's .cursor/mcp.json",
-      generic:
-        "Connection details — refer to your client's own docs to fill in each value.",
-    },
-    hint_stdio: {
-      codex: "Paste into ~/.codex/config.toml",
-      claude: "Paste into .mcp.json (project) or ~/.claude.json",
-      cursor: "Paste into ~/.cursor/mcp.json or a project's .cursor/mcp.json",
-      generic:
-        "Connection details — refer to your client's own docs to fill in each value.",
-    },
+    paste_into: "Paste into {{places}}",
+    place_project: "a project's {{path}}",
+    place_or: " or ",
+    hint_facts:
+      "Connection details — refer to your client's own docs to fill in each value.",
+    http_unsupported:
+      "{{host}} takes local commands only, so it connects through the stdio configuration.",
   },
   settings: {
     auto_install_updates_on_quit: 'Automatically install available updates when closing the app',
@@ -2452,10 +2460,11 @@ const enUS = {
     preview_heading: "Preview",
     preview_snap_enabled: "Canvas snapping",
     preview_snap_enabled_hint:
-      "Align clips to the frame's edges and centre lines, and to other clips, while moving or resizing them on the preview. Hold {{mod}} to override.",
+      "Align clips to the frame, other clips and the grid's lines while moving or resizing them on the preview. Hold {{mod}} to override.",
     preview_snap_strength: "Snap strength",
     preview_snap_strength_hint:
       "Measured in screen pixels.",
+    grid_opacity: "Grid visibility",
     decode_engine: "Decode engine",
     decode_engine_auto: "Automatic",
     decode_engine_auto_desc: "Picks the best engine for each clip",

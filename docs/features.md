@@ -27,6 +27,7 @@ than one project. The importer supports the subset below with FCPXML headers
 | Canvas and media size | Preserves the sequence canvas. Source media uses Fit by default or the authored Fill or None setting. When still-image dimensions are missing, review explains that WeftCut reads them from the file. When a declared size differs, review shows both, with a choice to use the file or replace it. |
 | Different destination frame rate | Choose **Review as a new project…** to keep the sequence rate. The current project is saved before switching. If rates match and canvases differ, choose Fit, Fill or Original size for the imported Group. |
 | Missing or unplayable media | Choose a replacement or review a marked gap when the affected edits have known timing. After approval, WeftCut preserves other edits and adds a range marker to show where to add a replacement. The original clip's markers become independent. A source used in a transition needs a replacement or a rendered transition. |
+| Audio and video roles | Common audio roles map to WeftCut mixer roles. Review reports when a subrole is grouped under its main role, when a custom audio role uses Dialogue, and when a custom video role label is left out. Playback settings that depend on role-specific source routing still need to be rendered or flattened first. |
 | Source streams | Video and audio components can name the default stream explicitly. For an alternate stream WeftCut cannot select, export that stream to a separate file and update the source edit. |
 | Source frame rate | A rate difference can repeat or skip pictures. When an in-point misses the reported frame grid, WeftCut can check the file’s presentation timestamps. If a picture covers the requested time, review names the result and keeps the trim and cut timing. Otherwise, choose the original or a constant-frame-rate copy with the same timing. |
 | Audio and timecode | Audio-only placement uses the 48 kHz sample grid. Review reports sample rounding, resampling and downmixing. Nonzero origins and supported drop-frame display normalize to zero-based non-drop-frame without changing edit positions. |
@@ -1224,15 +1225,29 @@ changing geometry or progress.
 - Deltas below `1e-9` are dropped (trig residue would otherwise stamp invisible
   keyframes).
 - **Snapping** pulls moves and resizes onto the composition's edges and centre
-  lines and every other staged layer's bounds, **each axis independently**; ties
-  go to composition lines. Radius is in screen px (`preview_snap_strength_px`,
-  default 12; `preview_snap_enabled`), its own app setting, separate from the
-  timeline's. Holding Mod (Ctrl; ⌘ on macOS) suppresses snapping. Not Alt, which
-  opens the Windows menu bar; not a bare Ctrl on macOS, where Chromium turns a
-  Ctrl+press into a context-menu click. Guides are magenta, one per axis at
-  most. A uniform resize solves the snap by ray/line intersection, ranked by
-  displacement. Targets are frozen at pointer-down. Solver: `preview/previewSnap.ts`, run before the override is
-  written.
+  lines, every other staged layer's bounds and, while the grid is on, its lines,
+  **each axis independently**; ties go to composition lines, then layers, then
+  the grid. Radius is in screen px (`preview_snap_strength_px`, default 12;
+  `preview_snap_enabled`), its own app setting, separate from the timeline's.
+  Holding Mod (Ctrl; ⌘ on macOS) suppresses snapping. Not Alt, which opens the
+  Windows menu bar; not a bare Ctrl on macOS, where Chromium turns a Ctrl+press
+  into a context-menu click. Guides are magenta, one per axis at most. A uniform
+  resize solves the snap by ray/line intersection, ranked by displacement.
+  Targets are frozen at pointer-down. Solver: `preview/previewSnap.ts`, run
+  before the override is written.
+
+**Preview alignment grid:** a subdivision grid over the frame, toggled by Grid
+in Quick Actions, View › Grid and the search palette (Canvas snapping has its
+own toggle beside it in Quick Actions and the palette). While it is on, the preview bar shows
+`columns × rows` fields (default 3 × 3, 1–64) and an icon per axis; an axis
+that is off neither draws nor snaps, and keeps its count. The eye beside them
+hides the lines without turning the grid off, so an enabled grid still snaps
+while hidden. Line strength is Settings › General › Preview › Grid visibility
+(10–100%, default 70%). With safe-area guides on, the grid divides the
+title-safe rectangle and its edges join the snap targets; otherwise it divides
+the whole frame. It is an app preference (`preview_grid`), never project data,
+and never exported. The preview bar stays one row whether the grid is on or
+off. Geometry: `preview/gridGeometry.ts`.
 
 **Implementation invariants** (each one looks fixable and is not):
 
@@ -1337,6 +1352,20 @@ Agent view (preview, compact review timeline, Agent panel with Activity, Tacks a
 Changes tabs), Tacks and the Timeline diff with *Approve all* / *Revert all* are
 specified in [mcp.md § Review](mcp.md#review) and [§ Tacks](mcp.md#tacks).
 Revert all is a recorded, lock-gated revert path ([Undo-stack scope](#undo-stack-scope)).
+
+## Companion page
+
+A page beside an agent's chat, in a desktop host's built-in browser, opened
+from the link `open_side_preview` gives the agent: the project's name and the
+latest agent call, play / pause, the time, a small timeline to seek on, and
+export progress. It never edits. The preview's picture is off until the user
+presses *Show picture* (turning it on costs the editor some processing; a
+reload of the page turns it off again) and stops while an export runs. The
+page names its state instead of showing a frozen frame: link no longer valid,
+WeftCut not running (it reconnects by itself), opening, no project, exporting,
+minimized (*Show WeftCut* brings the editor forward). It speaks the app's
+language. Routes, key and wire: [mcp.md § Companion page](mcp.md#companion-page);
+why a page: [ADR 0168](adr/0168-the-preview-beside-an-agents-chat-is-a-page-or-a-panel-view.md).
 
 ## Strip overflow
 

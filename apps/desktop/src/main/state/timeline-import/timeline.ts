@@ -44,7 +44,7 @@ export interface TimelineClip extends TimelineSourceWindow {
   playbackRate?: ExactTime
   preservePitch?: boolean
   audioRole: AudioRole | null
-  audioSubrole?: string
+  sourceAudioRole?: { label: string; usesDialogueFallback: boolean }
   conform?: 'fit' | 'fill' | 'none'
   volumeDb?: number
   opacity?: number

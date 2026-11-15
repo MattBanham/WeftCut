@@ -325,6 +325,8 @@ jobs:
       # LANDMINE — must stay AFTER the LGPL fetch above: the decode addon's build
       # reads FFMPEG_DIR from resources/ffmpeg-lgpl/<os>.
       - uses: ./.github/actions/rust-artifacts
+        env:
+          LZMA_API_STATIC: "1"
 
       - name: Put LGPL DLLs on PATH (native-decode runtime)
         if: runner.os == 'Windows'

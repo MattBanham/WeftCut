@@ -4,6 +4,7 @@ import type { ExactTime } from '../../../shared/timeMapping'
 import { TimeMappingError } from '../../../shared/timeMapping'
 import { addTime, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime, ZERO_TIME } from '../../../renderer/timeMapping'
 import type { TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaReview } from '../../../shared/timelineImport'
+import type { AudioRole } from '../model'
 import type { ImportTimeline, TimelineClip, TimelineGroup, TimelineMediaReference, TimelineSource } from './timeline'
 import { originalMediaPath, type OriginalMediaPath } from './mediaPath'
 
@@ -48,6 +49,13 @@ export const FCPXML_LIMITS = {
 } as const
 
 const US_PER_SECOND = { num: 1_000_000, den: 1 }
+const FCPXML_AUDIO_ROLES = new Map<string, AudioRole>([
+  ['dialogue', 'dialogue'],
+  ['music', 'music'],
+  ['effects', 'sfx'],
+  ['sfx', 'sfx'],
+  ['voiceover', 'voiceover'],
+])
 
 function location(el: Element): string {
   const name = el.attrs.name || el.attrs.id
@@ -855,8 +863,12 @@ function multicamSequence(el: Element, context: SequenceContext, fps: ImportTime
           unsupported(node, 'More than one setting controls the same angle adjustment.')
         }
         const { role, ...rest } = attrs
-        if (node.tag === 'video' && role !== undefined && role !== 'video') unsupported(node, 'The camera clip uses an unsupported video role.')
+        const videoRole = node.tag === 'video' ? role : undefined
+        if (videoRole !== undefined && attrs.videoRole !== undefined && videoRole !== attrs.videoRole) {
+          unsupported(node, 'The camera clip has conflicting video role labels.')
+        }
         clips.push({ ...node, tag: 'asset-clip', attrs: { ...rest, name: attrs.name || name,
+          ...(videoRole === undefined ? {} : { videoRole }),
           lane: video ? '1' : '-1', audioRole: attrs.audioRole ?? (node.tag === 'audio' ? role : undefined) ?? 'dialogue',
           srcEnable: video && audio ? 'all' : video ? 'video' : 'audio' },
         timing: { offset: subtractTime(covered, start), duration: subtractTime(cutEnd, covered),
@@ -1096,9 +1108,8 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     if (el.sequenceConnection) notes.push('This clip keeps its timing on a separate track in the synchronized Group.')
     else if (parent && !el.timing) notes.push('Connected anchor relationship is replaced by independent placement; moving the former anchor will not move this clip')
     if (a.tcFormat === 'DF') notes.push('Clip drop-frame display metadata becomes zero-based non-drop-frame timecode')
-    if (!['0', '1'].includes(a.enabled ?? '1') || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF') ||
-        (a.videoRole ?? 'video') !== 'video') {
-      fail(el, 'The clip has an invalid enabled flag or timecode, or a custom video role')
+    if (!['0', '1'].includes(a.enabled ?? '1') || (a.tcFormat !== undefined && a.tcFormat !== 'NDF' && a.tcFormat !== 'DF')) {
+      fail(el, 'The clip has an invalid enabled flag or timecode')
     }
     const ref = gap ? undefined : required(el, 'ref')
     const assetNode = ref === undefined ? undefined : lookup(ref, 'asset', el)
@@ -1254,13 +1265,19 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       }
       opacity = Number(raw)
     }
-    if (a.role !== undefined && el.tag !== 'audio' && (el.tag !== 'video' || a.role !== 'video')) {
-      fail(el, 'This clip uses a role WeftCut cannot reproduce. Assign a standard role and export again.')
+    if (a.role !== undefined && el.tag !== 'audio' && el.tag !== 'video') {
+      fail(el, 'Use audioRole or videoRole to assign a role on this clip and export again.')
     }
-    const role = a.audioRole ?? (el.tag === 'audio' ? a.role : undefined) ?? 'dialogue'
-    const audioRole = role.split('.')[0]
-    if (audioRole !== 'dialogue' && audioRole !== 'music' && audioRole !== 'effects') {
-      fail(el, 'Assign the audio to dialogue, music or effects in the source editor and export again')
+    for (const role of new Set([a.videoRole, el.tag === 'video' ? a.role : undefined])) {
+      if (role !== undefined && role !== 'video') {
+        notes.push('The video role label “' + role + '” is left out.')
+      }
+    }
+    const role = a.audioRole ?? (el.tag === 'audio' ? a.role : undefined)
+    const mainRole = role?.split('.')[0]
+    const knownRole = mainRole === undefined ? 'dialogue' : FCPXML_AUDIO_ROLES.get(mainRole.toLowerCase())
+    if (!hasAudio && role !== undefined && role !== 'dialogue') {
+      notes.push('The audio role label “' + role + '” is left out because this placement uses picture only.')
     }
     if (asset.start.num !== 0) notes.push('Source timecode origin is normalized to file-relative source trims')
     const maps = el.children.filter(child => child.tag === 'timeMap')
@@ -1363,8 +1380,9 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     })
     const clip: TimelineClip = { label: a.name || assetNode.attrs.name, enabled: a.enabled !== '0', asset, lane,
       timelineStart: offset, timelineEnd: end, firstFrame, endFrame, sourceIn, sourceOut, hasVideo, splitAudio, playbackRate, preservePitch,
-      audioRole: !hasAudio ? null : audioRole === 'effects' ? 'sfx' : audioRole,
-      ...(hasAudio && role !== audioRole ? { audioSubrole: role } : {}),
+      audioRole: hasAudio ? knownRole ?? 'dialogue' : null,
+      ...(hasAudio && role !== undefined && (knownRole === undefined || role !== mainRole) ?
+        { sourceAudioRole: { label: role, usesDialogueFallback: knownRole === undefined } } : {}),
       conform, volumeDb, opacity, staticTransform, markers, notes, location: location(el) }
     if (parent) connected.push({ element: el, clip })
     else clips.push(clip)

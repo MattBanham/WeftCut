@@ -40,7 +40,7 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
   <library><event name="Illustrated Story"><project name="Illustrated Story test">
     <sequence format="f" duration="120/60s" tcStart="0s" tcFormat="NDF" audioLayout="mono" audioRate="48k">
       <spine><gap offset="0s" start="0s" duration="120/60s">
-        <asset-clip ref="voice" lane="-1" offset="0s" start="0s" duration="120/60s" audioRole="dialogue"/>
+        <asset-clip ref="voice" lane="-1" offset="0s" start="0s" duration="120/60s" audioRole="narration.guide"/>
         <video ref="mouth" format="still-clip" lane="1" name="A" offset="30/60s" start="0s" duration="60/60s"/>
       </gap></spine>
     </sequence>
@@ -64,6 +64,7 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
     await expect(review.getByText(/640 pixels wide, but this file is 120 × 130/)).toBeVisible()
     await expect(review.getByText(/WeftCut reads the dimensions from the image file/)).toBeVisible()
     await expect(review.getByText(/Its duration comes from the timeline/)).toBeVisible()
+    await expect(review.getByText(/narration.guide.*This clip will use Dialogue in the mixer/)).toBeVisible()
     await expect(review.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
     await review.getByRole('checkbox', { name: 'Use these files with the differences shown above' }).check()
     await review.getByRole('button', { name: 'Import', exact: true }).click()
@@ -75,6 +76,8 @@ test('imports fictional 48 kHz mono audio and a differently sized PNG as an edit
     const root: any = Object.values(project.compositions).find((c: any) => c.id !== project.root_id)
     const layers = root.tracks.flatMap((track: { layers: { params: { kind: string }; t_start_us: number; t_end_us: number }[] }) => track.layers)
     expect(layers.map((layer: { params: { kind: string } }) => layer.params.kind).sort()).toEqual(['Audio', 'ImageOverlay'])
+    expect(layers.find((layer: { params: { kind: string } }) => layer.params.kind === 'Audio'))
+      .toMatchObject({ t_start_us: 0, t_end_us: 2000000, params: { role: 'dialogue' } })
     expect(layers.find((layer: { params: { kind: string } }) => layer.params.kind === 'ImageOverlay'))
       .toMatchObject({ t_start_us: 500000, t_end_us: 1500000 })
     await waitForHook(page, 'weftcutSampleComposite')

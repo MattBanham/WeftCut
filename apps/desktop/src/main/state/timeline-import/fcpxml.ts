@@ -464,15 +464,16 @@ export function inspectFcpxml(xml: string, sequenceIndex: number | undefined, om
 
 function editDiagnostic(error: FcpxmlError, seq: Element, byId: Map<string, Element>): TimelineCompatibilityItem {
   const el = error.element
-  const lane = Number(el.attrs.lane ?? 0)
-  const issue: TimelineCompatibilityItem = { label: el.attrs.name || el.attrs.id || el.tag, location: location(el),
-    lane: Number.isSafeInteger(lane) ? lane : 0, status: 'unsupported', notes: error.details }
   const spine = seq.children.find(child => child.tag === 'spine')
-  if (spine?.children.includes(el)) {
-    const clock = primaryDiagnosticClock(seq, byId)
-    if (clock) issue.timelineFrames = explicitPrimaryRange(el, clock)
-  }
-  return issue
+  const clock = spine?.children.includes(el) ? primaryDiagnosticClock(seq, byId) : undefined
+  return mappingDiagnostic(error, clock ? explicitPrimaryRange(el, clock) : undefined)
+}
+
+function mappingDiagnostic(error: FcpxmlError, timelineFrames?: TimelineCompatibilityItem['timelineFrames']): TimelineCompatibilityItem {
+  const el = error.element
+  const lane = Number(el.attrs.lane ?? 0)
+  return { label: el.attrs.name || el.attrs.id || el.tag, location: location(el),
+    lane: Number.isSafeInteger(lane) ? lane : 0, status: 'unsupported', notes: error.details, timelineFrames }
 }
 
 function primaryDiagnosticClock(seq: Element, byId: Map<string, Element>) {
@@ -586,7 +587,7 @@ function parseSelectedTimeline(selection: ReturnType<typeof selectTimeline>, eff
 ): ImportTimeline {
   const { seq, project, byId } = selection
   const context: SequenceContext = {
-    byId, effects, leaveTitleGaps, storyIssues, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0,
+    byId, effects, leaveTitleGaps, storyIssues, compounds: new Map(), active: new Set(), multicams: new Map(), multicamSegments: 0, reviewedPlacements: 0,
   }
   let timeline: ImportTimeline
   try {
@@ -627,6 +628,7 @@ interface SequenceContext {
   active: Set<string>
   multicams: Map<Element, Map<string, MulticamAngle>>
   multicamSegments: number
+  reviewedPlacements: number
 }
 
 type ClipComponent = 'all' | 'audio' | 'video'
@@ -896,6 +898,8 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   }
   const unsupported: TimelineCompatibilityItem[] = []
   const primaryIssues = new Map<Element, TimelineCompatibilityItem>()
+  const blockedStoryItems = new Set<Element>()
+  const collecting = context.storyIssues !== undefined
   const omittedEffects: TimelineCompatibilityItem[] = []
   const omittedTitles: TimelineCompatibilityItem[] = []
   const supportedStory = new Set(['spine', 'gap', 'asset-clip', 'video', 'audio', 'marker', 'chapter-marker',
@@ -919,7 +923,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const titleAttributes = new Set(['ref', 'name', 'lane', 'offset', 'start', 'duration', 'enabled', 'role', 'modDate'])
   const safeTitleChild = (node: Element): boolean =>
     titlePresentation.has(node.tag) && node.children.every(safeTitleChild)
-  function scanStory(parent: Element, depth: number) {
+  function scanStory(parent: Element, depth: number, primary?: Element) {
     const kept: Element[] = []
     for (const child of parent.children) {
       // Nonlinear, reverse and incomplete maps get the ordinary retime remedy.
@@ -977,20 +981,25 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
           notes: ['FCPXML ' + location(child) + ': Unsupported inside <' + parent.tag + '>. ' + remedy] }
         unsupported.push(issue)
         if (depth === 0) primaryIssues.set(child, issue)
+        if (!safeToOmit) blockedStoryItems.add(primary ?? child)
         if (effects === 'inspect' && safeToOmit) continue
-      } else scanStory(child, depth + 1)
+      } else {
+        const scanned = scanStory(child, depth + 1, primary ?? child)
+        if (depth === 0 && blockedStoryItems.has(child)) blockedStoryItems.add(scanned)
+        kept.push(scanned)
+        continue
+      }
       kept.push(child)
     }
-    parent.children = kept
+    return { ...parent, children: kept }
   }
-  const spine = one(seq, 'spine')
-  scanStory(spine, 0)
+  const spine = scanStory(one(seq, 'spine'), 0)
   const diagnosticClock = primaryIssues.size > 0 ? primaryDiagnosticClock(seq, byId) : undefined
   if (diagnosticClock) {
     for (const [el, issue] of primaryIssues) issue.timelineFrames = explicitPrimaryRange(el, diagnosticClock)
   }
   context.storyIssues?.push(...unsupported)
-  if (unsupported.some(issue => !issue.recovery) || (effects === 'refuse' && unsupported.length)) {
+  if (!collecting && (unsupported.some(issue => !issue.recovery) || (effects === 'refuse' && unsupported.length))) {
     throw new TimelineEditFailure(unsupported, false)
   }
   const notices: TimelineCompatibilityItem[] = [...omittedEffects, ...omittedTitles]
@@ -1035,12 +1044,16 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   if (tcFormat === 'DF' && !(fps.den === 1001 && [30_000, 60_000].includes(fps.num))) {
     fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
   }
-  check(spine, [], ['gap', 'asset-clip', 'video', 'audio', 'transition', 'ref-clip', 'mc-clip', 'sync-clip'])
+  const storyItems = collecting ? spine.children.filter(item => !blockedStoryItems.has(item)) : spine.children
+  check({ ...spine, children: storyItems }, [], ['gap', 'asset-clip', 'video', 'audio', 'transition', 'ref-clip', 'mc-clip', 'sync-clip'])
   const clips: TimelineClip[] = []
   const groups: ImportTimeline['groups'] = []
   const assets = new Map<string, Asset>()
   const dissolves: NonNullable<ImportTimeline['dissolves']> = []
+  const mappingIssues: TimelineCompatibilityItem[] = []
   let previousPrimary: TimelineClip | undefined
+  let previousPrimaryUnknown = false
+  let transitionUnknown = false
   let pendingDissolve: { el: Element; from: TimelineClip; start: ExactTime; end: ExactTime } | undefined
   let primaryEnd = ZERO_TIME
   let lastEnd = ZERO_TIME
@@ -1356,10 +1369,10 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     else clips.push(clip)
   }
 
-  for (const el of spine.children) {
+  function readStoryItem(el: Element) {
     if (el.sequenceConnection) {
       readClip(el, { offset: ZERO_TIME, start: sequenceOrigin })
-      continue
+      return
     }
     if (el.tag === 'sync-clip') {
       const attrs = el.attrs
@@ -1391,7 +1404,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       if (el.children.some(child => child.tag === 'spine' && child.attrs.name)) {
         notice(el, 'The internal storyline name is left out.')
       }
-      continue
+      return
     }
     if (el.tag === 'mc-clip') {
       let multicam: ReturnType<typeof multicamSequence>
@@ -1421,7 +1434,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       notice(el, 'Selected angles become editable clips in a Group: ' + names.join(', ') +
         '. Unused angles are left out. Angle switching stays in the source editor.')
       if (el.attrs.modDate !== undefined) notice(el, 'The source multicam modification date is left out.')
-      continue
+      return
     }
     if (el.tag === 'ref-clip') {
       const remedy = 'Open the compound clip in the source editor and put its contents on the timeline, or render it as one clip.'
@@ -1442,9 +1455,12 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
         }
         check(media, ['id', 'name', 'uid', 'modDate'], ['sequence'])
         active.add(ref)
-        nested = parseSequence(child, media, context, undefined, depth + 1)
-        active.delete(ref)
-        compounds.set(ref, nested)
+        try {
+          nested = parseSequence(child, media, context, undefined, depth + 1)
+          compounds.set(ref, nested)
+        } finally {
+          active.delete(ref)
+        }
       }
       if (nested.fps.num !== fps.num || nested.fps.den !== fps.den) {
         fail(el, 'This compound clip runs at a different frame rate from its parent. ' + remedy)
@@ -1474,7 +1490,7 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
       if (compareTime(end, lastEnd) > 0) lastEnd = end
       notice(el, 'This compound clip becomes an editable Group. Other placements of the same compound share its contents.')
       if (childOrigin.num !== 0) notice(el, 'The compound’s source timecode origin is normalized to zero')
-      continue
+      return
     }
     if (el.tag === 'transition') {
       const filter = dissolveFilter(el)!
@@ -1492,12 +1508,12 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
         fail(el, 'The cross dissolve does not match the outgoing clip’s overlap. Render it in the source editor to keep its timing.')
       }
       pendingDissolve = { el, from, start, end }
-      continue
+      return
     }
     const before = clips.length
     readClip(el)
     previousPrimary = clips[before]
-    if (!pendingDissolve) continue
+    if (!pendingDissolve) return
     const { el: transition, from, start, end } = pendingDissolve
     pendingDissolve = undefined
     const to = clips[before]
@@ -1513,14 +1529,87 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
     notices.push({ location: location(transition), label: transition.attrs.name || 'Cross Dissolve', lane: 0,
       status: 'approximated', notes: ['WeftCut uses its editable crossfade over the original overlap. The blend may look slightly different.'] })
   }
-  if (pendingDissolve) fail(pendingDissolve.el, 'The cross dissolve has no incoming clip. Render it in the source editor.')
+  function reportMappingFailure(error: unknown, placement: Element) {
+    if (!collecting) throw error
+    if (error instanceof TimelineEditFailure) {
+      const range = depth === 0 ? explicitPrimaryRange(placement, { format, origin: sequenceOrigin }) : undefined
+      for (const issue of error.issues) mappingIssues.push({ ...issue, timelineFrames: range })
+    } else if (error instanceof FcpxmlError) {
+      const range = depth === 0 && !placement.sequenceConnection && error.element === placement
+        ? explicitPrimaryRange(placement, { format, origin: sequenceOrigin }) : undefined
+      mappingIssues.push(mappingDiagnostic(error, range))
+    } else if (error instanceof TimeMappingError) {
+      mappingIssues.push({ label: placement.attrs.name || placement.tag, location: location(placement),
+        lane: 0, status: 'unsupported',
+        notes: ['This edit uses timing outside the supported range. Check its start and duration in the source editor.'] })
+    } else throw error
+  }
+
+  for (const el of spine.children) {
+    if (!collecting) {
+      readStoryItem(el)
+      continue
+    }
+    if (++context.reviewedPlacements > FCPXML_LIMITS.expandedPlacements) {
+      fail(seq, 'This timeline expands into too many edits to review. Export a smaller sequence.')
+    }
+    // A failed edit cannot establish its neighbours' overlap or transition.
+    // Resume independent placement checks at the next known edit boundary.
+    if (el.tag === 'transition' && (previousPrimaryUnknown || blockedStoryItems.has(el))) {
+      pendingDissolve = undefined
+      transitionUnknown = true
+      continue
+    }
+    if (blockedStoryItems.has(el)) {
+      previousPrimaryUnknown = true
+      if (pendingDissolve) transitionUnknown = true
+      pendingDissolve = undefined
+      continue
+    }
+    const checkpoint = { clips: clips.length, groups: groups.length, connected: connected.length,
+      dissolves: dissolves.length, notices: notices.length, primaryEnd, lastEnd, splitAudioEnd }
+    const dependsOnDissolve = pendingDissolve !== undefined || el.tag === 'transition'
+    if (transitionUnknown && !el.sequenceConnection) primaryEnd = ZERO_TIME
+    try {
+      readStoryItem(el)
+      if (!el.sequenceConnection && el.tag !== 'transition') {
+        previousPrimaryUnknown = false
+        transitionUnknown = false
+      }
+    } catch (error) {
+      reportMappingFailure(error, el)
+      clips.length = checkpoint.clips
+      groups.length = checkpoint.groups
+      connected.length = checkpoint.connected
+      dissolves.length = checkpoint.dissolves
+      notices.length = checkpoint.notices
+      primaryEnd = checkpoint.primaryEnd
+      lastEnd = checkpoint.lastEnd
+      splitAudioEnd = checkpoint.splitAudioEnd
+      if (el.sequenceConnection) continue
+      transitionUnknown ||= dependsOnDissolve
+      pendingDissolve = undefined
+      previousPrimaryUnknown = true
+      previousPrimary = undefined
+    }
+  }
+  if (pendingDissolve) {
+    try { fail(pendingDissolve.el, 'The cross dissolve has no incoming clip. Render it in the source editor.') }
+    catch (error) { reportMappingFailure(error, pendingDissolve.el) }
+  }
   const laneEnds = new Map<number, ExactTime>()
   connected.sort((a, b) => a.clip.lane - b.clip.lane || compareTime(a.clip.timelineStart, b.clip.timelineStart))
   for (const { element, clip } of connected) {
-    if (compareTime(clip.timelineStart, laneEnds.get(clip.lane) ?? ZERO_TIME) < 0)
-      fail(element, 'Overlaps another clip on the same connected lane. Move one clip to a different lane')
+    if (compareTime(clip.timelineStart, laneEnds.get(clip.lane) ?? ZERO_TIME) < 0) {
+      try { fail(element, 'Overlaps another clip on the same connected lane. Move one clip to a different lane') }
+      catch (error) { reportMappingFailure(error, element) }
+      continue
+    }
     laneEnds.set(clip.lane, clip.timelineEnd)
     clips.push(clip)
+  }
+  if (mappingIssues.length || (collecting && unsupported.some(issue => !issue.recovery))) {
+    throw new TimelineEditFailure([...mappingIssues, ...unsupported], false)
   }
   let sequenceDuration = time(seq, 'duration', lastEnd)
   if (compareTime(sequenceDuration, lastEnd) < 0) fail(seq, 'Declared duration ends before the last storyline item')

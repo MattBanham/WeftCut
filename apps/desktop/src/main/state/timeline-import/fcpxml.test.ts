@@ -1111,6 +1111,21 @@ describe('timeline import transaction', () => {
     expect(layer).toMatchObject({ t_start_us: 0, t_end_us: 100000 })
   })
 
+  it('reports independent timing and clip errors without reporting a cascade from a failed dissolve', () => {
+    const xml = fixture()
+      .replace('</resources>', '<effect id="cross" uid="FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"/></resources>')
+      .replace('name="Signal" start=', 'name="Signal" unsupportedSetting="1" start=')
+      .replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
+        '<transition offset="2002/30000s" duration="1001/30000s"><filter-video ref="cross"/></transition>')
+      .replace('name="Dock" offset="4004/30000s"', 'name="Dock" offset="2002/30000s"')
+      .replace('</spine>', '<video ref="take" name="Off-grid cut" offset="1/3s" duration="1001/30000s"/></spine>')
+    const result = inspectFcpxml(xml, 0, false, false)
+    expect(result).toMatchObject({ issues: [
+      { label: 'Signal', notes: [expect.stringContaining('Unsupported attribute')] },
+      { label: 'Off-grid cut', notes: [expect.stringContaining('between frames')] },
+    ] })
+  })
+
   it('reports an unsupported transition alongside missing media without making a partial project', async () => {
     const xml = fixture(pathToFileURL(media).href).replace('<gap offset="3003/30000s" duration="1001/30000s"/>',
       '<transition name="Ripple" offset="3003/30000s" duration="1001/30000s"/>')
@@ -1138,11 +1153,14 @@ describe('timeline import transaction', () => {
     const run = setup()
     await expect(run.prepareReview()).rejects.toMatchObject({
       issues: [{ assetRef: 'take', placements: 2 }],
-      editIssues: [{ label: 'Signal', status: 'unsupported', timelineFrames: { start: 0, end: 3 },
-        notes: [expect.stringContaining('Unsupported attribute "unknownSetting"')] }],
+      editIssues: [
+        { label: 'Signal', status: 'unsupported', timelineFrames: { start: 0, end: 3 },
+          notes: [expect.stringContaining('Unsupported attribute "unknownSetting"')] },
+        { label: 'take', notes: [expect.stringContaining('Only one embedded audio stream')] },
+      ],
     })
     await writeFile(media, 'Fictional original video')
-    await expect(run.prepareReview()).rejects.toMatchObject({ issues: [{ label: 'Signal' }] })
+    await expect(run.prepareReview()).rejects.toMatchObject({ issues: [{ label: 'Signal' }, { label: 'take' }] })
     expect(run.probeMedia).not.toHaveBeenCalled()
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)

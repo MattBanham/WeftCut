@@ -193,7 +193,7 @@ test('verifies variable-rate in-points and preserves their selected pictures thr
   } finally { await app.close() }
 })
 
-test('keeps missing media actionable while a clip needs correction in the source editor', async () => {
+test('shows independent clip fixes alongside missing media in the source editor', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-structural-')
   const movedFolder = join(folder, 'Relocated')
@@ -209,7 +209,7 @@ test('keeps missing media actionable while a clip needs correction in the source
     </resources><project name="Signal"><sequence format="f" duration="3003/30000s"><spine>
     <asset-clip ref="a" offset="0s" start="0s" duration="1001/30000s"/>
     ${clip}
-    <asset-clip ref="a" offset="2002/30000s" start="6006/30000s" duration="1001/30000s"/>
+    <asset-clip ref="a" name="Dock cut" offset="2002/30000s" start="6006/30000s" duration="1001/30000s" enabled="invalid"/>
     </spine></sequence></project></fcpxml>`
   writeFileSync(xml, original)
 
@@ -230,6 +230,9 @@ test('keeps missing media actionable while a clip needs correction in the source
     await expect(mediaIssues.getByText('Alternate camera stream', { exact: true })).toBeVisible()
     await expect(mediaIssues.getByText(/selects source stream 2/)).toBeVisible()
     await expect(mediaIssues.getByText('From frame 1 to the start of frame 2')).toBeVisible()
+    await expect(mediaIssues.getByText('Dock cut', { exact: true })).toBeVisible()
+    await expect(mediaIssues.getByText(/invalid enabled flag/)).toBeVisible()
+    await expect(mediaIssues.getByText('From frame 2 to the start of frame 3')).toBeVisible()
     await mediaIssues.getByRole('button', { name: 'Replace this file…' }).click()
     const editIssues = page.getByRole('dialog', { name: 'Some edits need attention' })
     await expect(editIssues.getByText(/Export the selected stream as its own file/)).toBeVisible()
@@ -239,7 +242,7 @@ test('keeps missing media actionable while a clip needs correction in the source
     await editIssues.getByRole('button', { name: 'Review timeline again…' }).click()
     const retained = /kept your earlier choice of “Recovered Signal.mov”/
     await expect(editIssues.getByText(retained)).toBeVisible()
-    writeFileSync(xml, revised.replace('srcID="2"', 'srcID="1"'))
+    writeFileSync(xml, revised.replace('srcID="2"', 'srcID="1"').replace('enabled="invalid"', 'enabled="1"'))
     await editIssues.getByRole('button', { name: 'Review timeline again…' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(`${missing} → ${await realpath(media)}`, { exact: true })).toBeVisible()

@@ -44,7 +44,7 @@ than one project. The importer supports the subset below with FCPXML headers
 | Multicam | Supported primary cuts import the explicitly selected picture and audio as editable Group clips. Review names the angles used. Switching angles remains available in the source editor. |
 | Synchronized clips | A primary synchronized clip with a supported internal storyline becomes an editable Group. Camera and recorder clips retain their own source ranges and relative timing. Review reports discarded display timecode and the conversion to a Group. Synchronized clips with audio role routing or unsupported effects need a flattened edit or a render from the source editor. |
 | Titles | **Review without these titles…** can leave out a presentation-only primary or connected title after approval. Review shows its frame range. A primary title leaves a gap and a connected title reveals the picture underneath. Other media and cut times are kept. Render a title in the source editor to keep its appearance. |
-| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, and unsupported adjustments | Review identifies the affected edit and explains how to render, flatten or simplify it. When a story element or an edit setting blocks import, review can still check the availability of independently identified media. Fix those paths while the edit still needs attention, then refresh the review after re-exporting. |
+| Other transitions, complex retimes, unsupported multicam, compound or synchronized clips, and unsupported adjustments | Review identifies the affected edit and explains how to render, flatten or simplify it. When edits block import, review can show independent clip-setting and timing problems together, alongside missing media. It includes frame ranges where the placement is known. Fix those paths while the edit still needs attention, then refresh the review after re-exporting. |
 
 The importer handles local Windows drive and POSIX file URLs. A path from
 another platform can be relinked. It does not fetch media over the network or
@@ -333,7 +333,7 @@ Quick Actions `edit` section.
 row) is a session switch standing in for a held `Alt`: every site that consults
 links treats them as absent — click selects one member, drag moves or
 duplicates one, blade and `Mod+B` split one, marquee takes what it touched. The
-status bar shows `Links off` and link accents dim to 40 %. Nothing is written:
+Quick Actions toggle shows pressed and link accents dim to 40 %. Nothing is written:
 memberships stay, no history entry, not persisted. MCP is unaffected (agents
 pass `escape_link`).
 

@@ -341,20 +341,48 @@ test('keeps a marked gap for an offline source and preserves the cuts after it',
     </spine></sequence></project></fcpxml>`)
   const { app, page } = await launchApp()
   try {
-    const destination = join(folder, 'Imported Observatory')
-    await newProject(page, { parentFolder: folder, name: basename(destination),
+    const parentFolder = join(folder, 'ObservatoryReview'.repeat(5))
+    mkdirSync(parentFolder)
+    const destination = join(parentFolder, 'Imported Observatory')
+    await newProject(page, { parentFolder, name: basename(destination),
       canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
     await app.evaluate(({ dialog }, file) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] })
     }, xml)
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]!
+      window.setMinimumSize(0, 0)
+      window.setContentSize(520, 380)
+    })
     await beginImport(page)
     await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
     await page.getByRole('button', { name: 'Review with a marked gap' }).click()
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    const destinationPath = review.getByText(/ObservatoryReview.*Imported Observatory/)
+    await expect(destinationPath).toBeVisible()
+    const pathLayout = await destinationPath.evaluate((element) => {
+      const text = document.createRange()
+      text.selectNodeContents(element)
+      const lines = Array.from(text.getClientRects())
+      const bounds = element.getBoundingClientRect()
+      return { lines: lines.length, contained: lines.every(line =>
+        line.left >= bounds.left - 1 && line.right <= bounds.right + 1 &&
+        line.top >= bounds.top - 1 && line.bottom <= bounds.bottom + 1) }
+    })
+    expect(pathLayout.lines).toBeGreaterThan(1)
+    expect(pathLayout.contained).toBe(true)
+    const heading = review.getByRole('heading', { name: 'Review timeline import' })
+    await expect(heading).toBeInViewport({ ratio: 1 })
+    const confirm = review.getByRole('button', { name: 'Import', exact: true })
+    await expect(confirm).toBeInViewport({ ratio: 1 })
+    const lastClip = review.getByText(/^Return \(lane 0\)/)
+    await lastClip.scrollIntoViewIfNeeded()
+    await expect(lastClip).toBeInViewport({ ratio: 1 })
+    await expect(heading).toBeInViewport({ ratio: 1 })
+    await expect(confirm).toBeInViewport({ ratio: 1 })
     const gaps = review.getByRole('region', { name: 'Media to replace later' })
     await expect(gaps).toContainText('Control room')
     await expect(gaps).toContainText('From frame 1 to the start of frame 2')
-    const confirm = review.getByRole('button', { name: 'Import', exact: true })
     await expect(confirm).toBeDisabled()
     expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
     await gaps.getByRole('checkbox', { name: 'Import with the marked gaps shown above' }).check()

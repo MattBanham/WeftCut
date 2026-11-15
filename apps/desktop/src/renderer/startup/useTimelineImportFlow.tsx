@@ -1,5 +1,5 @@
 import { open as openDialog } from "@/bridge/dialog";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { AppDialog } from "../components/AppDialog";
 import { AppSelect } from "../components/AppSelect";
@@ -14,6 +14,20 @@ import type { TimelineEditBlocked, TimelineImportApprovals, TimelineImportPrevie
 import { fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 import { NewProjectForm } from "./NewProjectForm";
+
+function TimelineImportDialog({ title, onClose, actions, children }: {
+  title: string;
+  onClose?: (() => void) | undefined;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <AppDialog title={title} onClose={onClose} panelClassName="new-project-panel timeline-import-panel">
+      <div className="timeline-import-body" tabIndex={0}>{children}</div>
+      {actions && <footer className="new-project-actions">{actions}</footer>}
+    </AppDialog>
+  );
+}
 
 export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromStartup: boolean; onWorkspaceReady: () => void }) {
   const { t } = useTranslation();
@@ -166,21 +180,35 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   const dialogs = (
     <>
       {sourcePicker && (
-        <AppDialog title={t("startup.import_timeline_title")} onClose={() => setSourcePicker(false)} panelClassName="new-project-panel">
+        <TimelineImportDialog title={t("startup.import_timeline_title")} onClose={() => setSourcePicker(false)}>
           <Button onClick={() => void chooseSource(false)}>{t("startup.import_fcpxml_file")}</Button>
           <Button onClick={() => void chooseSource(true)}>{t("startup.import_fcpxml_bundle")}</Button>
-        </AppDialog>
+        </TimelineImportDialog>
       )}
       {error && (
-        <AppDialog title={t("startup.import_timeline_title")} onClose={cancel} panelClassName="new-project-panel">
-          <p className="new-project-error whitespace-pre-wrap break-words" role="alert">{error}</p>
-          <footer className="new-project-actions">
+        <TimelineImportDialog
+          title={t("startup.import_timeline_title")}
+          onClose={cancel}
+          actions={<>
             <Button onClick={cancel}>{t("new_project.cancel")}</Button>
-          </footer>
-        </AppDialog>
+          </>}
+        >
+          <p className="new-project-error whitespace-pre-wrap break-words" role="alert">{error}</p>
+        </TimelineImportDialog>
       )}
       {blocked?.kind === "edit-blocked" && (
-        <AppDialog title={t("startup.import_edit_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
+        <TimelineImportDialog
+          title={t("startup.import_edit_blocked")}
+          onClose={busy ? undefined : cancel}
+          actions={<>
+            <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
+            {refreshBlocked}
+            {blocked.canOmitEffects && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
+              {t("startup.import_review_without_effects")}
+            </Button>}
+            {titleFallback}
+          </>}
+        >
           <UnmatchedReplacements names={blocked.unmatchedReplacements} />
           {blocked.issues.map((issue, index) => (
             <div key={index} className="new-project-row">
@@ -195,18 +223,24 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               <MediaDifferenceRows changes={blocked.mediaChanges} onRelink={relink} disabled={busy} />
             </section>
           )}
-          <footer className="new-project-actions">
+        </TimelineImportDialog>
+      )}
+      {blocked?.kind === "media-blocked" && (
+        <TimelineImportDialog
+          title={t("startup.import_media_blocked")}
+          onClose={busy ? undefined : cancel}
+          actions={<>
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
             {refreshBlocked}
-            {blocked.canOmitEffects && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
+            {!needsSourceEdit && blocked.editIssues.some(issue => issue.recovery === "omit-effect") && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
               {t("startup.import_review_without_effects")}
             </Button>}
             {titleFallback}
-          </footer>
-        </AppDialog>
-      )}
-      {blocked?.kind === "media-blocked" && (
-        <AppDialog title={t("startup.import_media_blocked")} onClose={busy ? undefined : cancel} panelClassName="new-project-panel">
+            {blocked.canSearchFolder && <Button onClick={() => void relink()} disabled={busy}>
+              {t("startup.import_choose_relink_folder")}
+            </Button>}
+          </>}
+        >
           <UnmatchedReplacements names={blocked.unmatchedReplacements} />
           {blocked.issues.map((issue, index) => (
             <div key={index} className="new-project-row">
@@ -244,18 +278,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               <MediaDifferenceRows changes={blocked.mediaChanges} onRelink={relink} disabled={busy} />
             </section>
           )}
-          <footer className="new-project-actions">
-            <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
-            {refreshBlocked}
-            {!needsSourceEdit && blocked.editIssues.some(issue => issue.recovery === "omit-effect") && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
-              {t("startup.import_review_without_effects")}
-            </Button>}
-            {titleFallback}
-            {blocked.canSearchFolder && <Button onClick={() => void relink()} disabled={busy}>
-              {t("startup.import_choose_relink_folder")}
-            </Button>}
-          </footer>
-        </AppDialog>
+        </TimelineImportDialog>
       )}
       {sequenceImport && (
         <TimelineSequencePicker
@@ -314,7 +337,16 @@ function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
   const { t } = useTranslation();
   const [index, setIndex] = useState(String(choices[0]!.index));
   return (
-    <AppDialog title={t("startup.import_select_sequence_title")} onClose={busy ? undefined : onCancel} panelClassName="new-project-panel">
+    <TimelineImportDialog
+      title={t("startup.import_select_sequence_title")}
+      onClose={busy ? undefined : onCancel}
+      actions={<>
+        <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
+        <Button size="lg" onClick={() => void onChoose(Number(index))} disabled={busy}>
+          {t("startup.import_select_sequence_continue")}
+        </Button>
+      </>}
+    >
       <p>{t("startup.import_select_sequence_hint", { count: choices.length })}</p>
       <AppSelect
         ariaLabel={t("startup.import_select_sequence_label")}
@@ -326,13 +358,7 @@ function TimelineSequencePicker({ choices, busy, onCancel, onChoose }: {
         }))}
       />
       <p className="new-project-preview">{choices[Number(index)]?.location}</p>
-      <footer className="new-project-actions">
-        <Button size="lg" onClick={onCancel} disabled={busy}>{t("new_project.cancel")}</Button>
-        <Button size="lg" onClick={() => void onChoose(Number(index))} disabled={busy}>
-          {t("startup.import_select_sequence_continue")}
-        </Button>
-      </footer>
-    </AppDialog>
+    </TimelineImportDialog>
   );
 }
 
@@ -400,7 +426,26 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
   }
 
   return (
-    <AppDialog title={t("startup.timeline_review")} onClose={busy || busyRelinking ? undefined : onCancel} panelClassName="new-project-panel">
+    <TimelineImportDialog
+      title={t("startup.timeline_review")}
+      onClose={busy || busyRelinking ? undefined : onCancel}
+      actions={<>
+        <Button size="lg" onClick={onCancel} disabled={busy || busyRelinking}>{t("new_project.cancel")}</Button>
+        {error && (
+          <Button size="lg" onClick={() => void onRefreshReview()} disabled={busy || busyRelinking}>
+            {t("startup.import_refresh_review")}
+          </Button>
+        )}
+        {fpsMismatch && (
+          <Button size="lg" onClick={() => void onReviewAsNewProject()} disabled={busy || busyRelinking}>
+            {t("startup.import_review_as_new")}
+          </Button>
+        )}
+        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps) || (preview.omittedShortAudio.length > 0 && !acceptShortAudioOmissions) || (preview.mediaGaps.length > 0 && !acceptMediaGaps)}>
+          {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
+        </Button>
+      </>}
+    >
       <p>{preview.name}</p>
       {preview.destination && <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>}
       <p>{t("startup.timeline_review_format", {
@@ -580,22 +625,6 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
       {preview.resampledAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_resample", { count: preview.resampledAudioClips })}</p>}
       {preview.downmixedAudioClips > 0 && <p role="status">{t("startup.timeline_review_audio_downmix", { count: preview.downmixedAudioClips })}</p>}
       {error && <p className="new-project-error" role="alert">{error}</p>}
-      <footer className="new-project-actions">
-        <Button size="lg" onClick={onCancel} disabled={busy || busyRelinking}>{t("new_project.cancel")}</Button>
-        {error && (
-          <Button size="lg" onClick={() => void onRefreshReview()} disabled={busy || busyRelinking}>
-            {t("startup.import_refresh_review")}
-          </Button>
-        )}
-        {fpsMismatch && (
-          <Button size="lg" onClick={() => void onReviewAsNewProject()} disabled={busy || busyRelinking}>
-            {t("startup.import_review_as_new")}
-          </Button>
-        )}
-        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps) || (preview.omittedShortAudio.length > 0 && !acceptShortAudioOmissions) || (preview.mediaGaps.length > 0 && !acceptMediaGaps)}>
-          {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
-        </Button>
-      </footer>
-    </AppDialog>
+    </TimelineImportDialog>
   );
 }

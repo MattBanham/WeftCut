@@ -953,3 +953,38 @@ html.platform-mac :is(.startup-titlebar, .agent-titlebar, .perf-titlebar) {
   justify-content: flex-end;
   gap: calc(8 * var(--ui-px));
 }
+
+.timeline-import-panel {
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.timeline-import-panel > header,
+.timeline-import-panel > footer {
+  flex: none;
+}
+
+.timeline-import-body {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: inherit;
+}
+
+.timeline-import-panel .new-project-preview {
+  margin: 0;
+  direction: ltr;
+  white-space: normal;
+  overflow: visible;
+}
+
+.timeline-import-panel .new-project-actions {
+  flex-wrap: wrap;
+}
+
+.timeline-import-panel button {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+}

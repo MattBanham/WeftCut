@@ -10,7 +10,7 @@ import {
   projectImportTimeline,
   projectPreviewTimeline,
 } from "../ipc";
-import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineMediaChange, TimelineMediaReplacement, TimelineSequenceChoice } from "../../shared/timelineImport";
+import type { TimelineEditBlocked, TimelineImportApprovals, TimelineImportPreview, TimelineMediaBlocked, TimelineMediaChange, TimelineMediaReplacement, TimelineSequenceChoice } from "../../shared/timelineImport";
 import { fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 import { NewProjectForm } from "./NewProjectForm";
@@ -37,7 +37,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   async function review(next: ReviewRequest) {
     setRequest(next);
     const result = await projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements,
-      next.documentId, next.omitEffects, next.leaveTitleGaps, next.revalidateReplacements);
+      next.documentId, next.omitEffects, next.leaveTitleGaps, next.revalidateReplacements, next.leaveMediaGaps);
     setRequest({ ...next, replacements: result.replacements, revalidateReplacements: false });
     if ("kind" in result) setBlocked(result);
     else setTimelinePreview(result);
@@ -81,7 +81,10 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
       if (typeof path !== "string") return;
       const next = assetRef === undefined
         ? { ...request, folder: path }
-        : { ...request, replacements: [...request.replacements.filter(choice => choice.assetRef !== assetRef), { assetRef, path }] };
+        : { ...request,
+          replacements: [...request.replacements.filter(choice => choice.assetRef !== assetRef), { assetRef, path }],
+          leaveMediaGaps: request.leaveMediaGaps?.filter(ref => ref !== assetRef),
+        };
       setBlocked(null);
       setTimelinePreview(null);
       await review(next);
@@ -94,6 +97,15 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     setBusy(true);
     setBlocked(null);
     try { await review({ ...request, [option]: true }); }
+    catch (cause) { reportError(cause); }
+    finally { setBusy(false); }
+  }
+
+  async function reviewWithMediaGap(assetRef: string) {
+    if (!request || busy) return;
+    setBusy(true);
+    setBlocked(null);
+    try { await review({ ...request, leaveMediaGaps: [...new Set([...(request.leaveMediaGaps ?? []), assetRef])] }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -214,6 +226,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               <Button onClick={() => void relink(issue.assetRef)} disabled={busy}>
                 {t("startup.import_choose_replacement")}
               </Button>
+              {issue.canLeaveGaps && <Button onClick={() => void reviewWithMediaGap(issue.assetRef)} disabled={busy}>
+                {t("startup.import_review_with_media_gap")}
+              </Button>}
             </div>
           ))}
           {blocked.editIssues.map((issue, index) => (
@@ -265,9 +280,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           onReviewAsNewProject={reviewAsNewProject}
           onRefreshReview={refreshReview}
           onCancel={cancel}
-          onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions) => {
+          onImport={async (canvas, approvals) => {
             if (timelinePreview.current === null) setProjectForm(timelinePreview);
-            else await projectImportTimeline(timelinePreview.id, canvas, undefined, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions);
+            else await projectImportTimeline(timelinePreview.id, canvas, undefined, approvals);
             setTimelinePreview(null);
           }}
         />
@@ -286,6 +301,7 @@ interface ReviewRequest {
   replacements: TimelineMediaReplacement[];
   omitEffects?: boolean;
   leaveTitleGaps?: boolean;
+  leaveMediaGaps?: string[] | undefined;
   revalidateReplacements?: boolean;
 }
 
@@ -351,7 +367,7 @@ function MediaDifferenceRows({ changes, onRelink, disabled }: {
 
 function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, onRefreshReview, busyRelinking }: {
   preview: TimelineImportPreview;
-  onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean, acceptTitleGaps: boolean, acceptShortAudioOmissions: boolean) => Promise<void>;
+  onImport: (canvas: 'fit' | 'fill' | 'original', approvals: TimelineImportApprovals) => Promise<void>;
   onRelink: (assetRef: string) => Promise<void>;
   onReviewAsNewProject: () => Promise<void>;
   onRefreshReview: () => Promise<void>;
@@ -366,6 +382,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
   const [acceptOmittedEffects, setAcceptOmittedEffects] = useState(false);
   const [acceptTitleGaps, setAcceptTitleGaps] = useState(false);
   const [acceptShortAudioOmissions, setAcceptShortAudioOmissions] = useState(false);
+  const [acceptMediaGaps, setAcceptMediaGaps] = useState(false);
   const hasMediaChanges = preview.mediaChanges.length > 0 || preview.outputColorChange !== null;
   const current = preview.current;
   const fpsMismatch = current != null &&
@@ -375,7 +392,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
 
   async function submit() {
     setBusy(true);
-    try { await onImport(canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions); }
+    try { await onImport(canvas, { acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions, acceptMediaGaps }); }
     catch (cause) {
       setError(cleanIpcDetail(cause));
       setBusy(false);
@@ -480,6 +497,27 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
           </label>
         </section>
       )}
+      {preview.mediaGaps.length > 0 && (
+        <section aria-label={t("startup.import_media_gaps")}>
+          <p><strong>{t("startup.import_media_gaps")}</strong></p>
+          {preview.mediaGaps.map((gap, index) => (
+            <div key={index} className="new-project-row">
+              <strong title={gap.location}>{gap.label}</strong>
+              {gap.label !== gap.filename && <p>{gap.filename}</p>}
+              <p>{t("startup.import_edit_range", gap.timelineFrames)}</p>
+              <p>{gap.notes.join(" ")}</p>
+              <Button disabled={busy || busyRelinking} onClick={() => void onRelink(gap.assetRef)}>
+                {t("startup.import_choose_replacement")}
+              </Button>
+            </div>
+          ))}
+          <label>
+            <input type="checkbox" checked={acceptMediaGaps} disabled={busy || busyRelinking}
+              onChange={(event) => setAcceptMediaGaps(event.target.checked)} />
+            {" "}{t("startup.import_accept_media_gaps")}
+          </label>
+        </section>
+      )}
       {preview.omittedTitles.length > 0 && (
         <section aria-label={t("startup.import_titles_omitted")}>
           <p><strong>{t("startup.import_titles_omitted")}</strong></p>
@@ -554,7 +592,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
             {t("startup.import_review_as_new")}
           </Button>
         )}
-        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps) || (preview.omittedShortAudio.length > 0 && !acceptShortAudioOmissions)}>
+        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps) || (preview.omittedShortAudio.length > 0 && !acceptShortAudioOmissions) || (preview.mediaGaps.length > 0 && !acceptMediaGaps)}>
           {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
         </Button>
       </footer>

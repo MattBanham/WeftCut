@@ -20,7 +20,7 @@ import { sourceInstantHibernating, sourceInstantTimelineUs } from '../summary'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure } from './fcpxml'
 import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSourceWindow } from './timeline'
-import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaIssue, TimelineMediaReplacement, TimelineMediaReview, TimelineSequenceList } from '../../../shared/timelineImport'
+import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaGap, TimelineMediaIssue, TimelineMediaReplacement, TimelineMediaReview, TimelineSequenceList } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 import { MAX_VIDEO_IN_POINTS, readVideoInPoints } from './videoTiming'
 
@@ -184,7 +184,7 @@ function replacementSelection(replacements: unknown, originals: ReadonlyMap<stri
 export async function prepareTimelineProject(
   path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
   relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false, leaveTitleGaps = false,
-  revalidateReplacements = false,
+  revalidateReplacements = false, leaveMediaGaps?: unknown,
 ): Promise<{ project: Project; report: TimelineImportReport; assertDocumentUnchanged: () => Promise<void> }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
@@ -280,7 +280,6 @@ export async function prepareTimelineProject(
           end: ceilTime(divideTime(window.timelineEnd, frameDuration)) } })
     }
   }
-  const omittedShortAudio = [...omittedAudio.values()]
   const clips = [...sequences].flatMap(sequence => sequence.clips)
   const retained = clips.filter(clip => clip.hasVideo || !omittedAudio.has(clip))
   const editIssues = 'issues' in inspection ? inspection.issues : [...sequences].flatMap(sequence => sequence.editIssues ?? [])
@@ -304,6 +303,18 @@ export async function prepareTimelineProject(
   }
   if (originals.size > FCPXML_LIMITS.mediaFiles) {
     throw new Error('This sequence references too many media assets. Export the sequence in smaller parts')
+  }
+  const gapSelection = new Set<string>()
+  if (leaveMediaGaps !== undefined) {
+    if (!Array.isArray(leaveMediaGaps) || leaveMediaGaps.length > originals.size) {
+      throw new Error('Choose media from this timeline to leave out')
+    }
+    for (const ref of leaveMediaGaps) {
+      if (typeof ref !== 'string' || !originals.has(ref) || gapSelection.has(ref)) {
+        throw new Error('Choose each source at most once in this timeline')
+      }
+      gapSelection.add(ref)
+    }
   }
   const mediaReview = replacementSelection(replacements, originals, revalidateReplacements)
   const selected = new Map(mediaReview.replacements.map(choice => [choice.assetRef, choice.path]))
@@ -457,7 +468,7 @@ export async function prepareTimelineProject(
     } catch { /* Validation below gives the affected file a recovery action. */ }
     assertCurrent()
   }
-  const incompatibilities = new Map<string, TimelineMediaIssue>()
+  const incompatibilities = new Map<string, { issue: TimelineMediaIssue; clips: TimelineClip[] }>()
   const imageSizes = new Map<string, ImageSize>()
   const imageChecks = new Map<string, Promise<ImageSize>>()
   async function checkImage(path: string, inspect: NonNullable<MediaDeps['inspectImage']>): Promise<ImageSize> {
@@ -497,22 +508,79 @@ export async function prepareTimelineProject(
       assertCurrent()
       const detail = error instanceof Error ? error.message : String(error)
       const key = JSON.stringify([clip.asset.ref, detail])
-      incompatibilities.set(key, replacementIssue(clip.asset, detail, selected.get(clip.asset.ref)))
+      const known = incompatibilities.get(key)
+      if (known) known.clips.push(clip)
+      else incompatibilities.set(key, { issue: replacementIssue(clip.asset, detail, selected.get(clip.asset.ref)), clips: [clip] })
     }
   }
-  if (missing.length || failed.length || incompatibilities.size) {
-    throw new TimelineMediaFailure([...missing, ...failed, ...incompatibilities.values()], offline.length > 0,
-      [...editIssues, ...omittedShortAudio], [...mediaChanges.values()], mediaReview)
+  const clipsByAsset = new Map<string, TimelineClip[]>()
+  for (const clip of retained) {
+    const siblings = clipsByAsset.get(clip.asset.ref) ?? []
+    siblings.push(clip)
+    clipsByAsset.set(clip.asset.ref, siblings)
   }
-  if (editIssues.length) throw new TimelineEditFailure([...editIssues, ...omittedShortAudio], editIssues.some(issue => issue.recovery === 'omit-effect'),
-    [...mediaChanges.values()], mediaReview)
-  const video = timeline.canvas ? null : itemOf(timeline.clips[0]!).metadata.video
+  const transitionClips = new Set<TimelineClip>()
+  for (const sequence of sequences) {
+    for (const dissolve of sequence.dissolves ?? []) {
+      transitionClips.add(dissolve.from)
+      transitionClips.add(dissolve.to)
+    }
+  }
+  const unavailable: TimelineMediaIssue[] = []
+  const gapReasons = new Map<TimelineClip, string>()
+  for (const { issue, clips: affected } of [
+    ...[...missing, ...failed].map(issue => ({ issue, clips: clipsByAsset.get(issue.assetRef) ?? [] })),
+    ...incompatibilities.values(),
+  ]) {
+    const requiredForTransition = affected.some(clip => transitionClips.has(clip))
+    if (!affected.length || requiredForTransition || !timeline.canvas) {
+      unavailable.push(requiredForTransition
+        ? { ...issue, detail: issue.detail + ' A transition needs this media. Replace the file or render the transition in the source editor.' }
+        : issue)
+    } else if (!gapSelection.has(issue.assetRef)) {
+      unavailable.push({ ...issue, canLeaveGaps: true, placements: affected.length })
+    } else {
+      for (const clip of affected) gapReasons.set(clip, issue.detail)
+    }
+  }
+  const gaps = new Map<TimelineClip, TimelineMediaGap>()
+  for (const sequence of sequences) {
+    const duration = exactTime(1_000_000 * sequence.fps.den, sequence.fps.num)
+    for (const clip of sequence.clips) {
+      const reason = gapReasons.get(clip)
+      if (reason === undefined) continue
+      const { ref, filename } = clip.asset
+      const notes = [reason, 'This clip and its settings will be left out. Its place in the edit is marked so you can add a replacement later. ' +
+        'Other cuts stay at their original times.']
+      if (sequence !== timeline) notes.push('This frame range is inside “' + (sequence.name ?? 'Imported Group') + '”.')
+      if (clip.markers.length) {
+        notes.push('Its markers keep their timeline positions as shown in this review and can be moved independently.')
+        for (const marker of clip.markers) notes.push(...marker.notes)
+      }
+      const start = clip.splitAudio ? Math.min(clip.firstFrame, floorTime(divideTime(clip.splitAudio.timelineStart, duration))) : clip.firstFrame
+      const end = clip.splitAudio ? Math.max(clip.endFrame, ceilTime(divideTime(clip.splitAudio.timelineEnd, duration))) : clip.endFrame
+      gaps.set(clip, { assetRef: ref, filename, label: clip.label || clip.asset.name || filename,
+        lane: clip.lane, location: clip.location, status: 'approximated', notes, timelineFrames: { start, end } })
+    }
+  }
+  const mediaGaps = [...gaps.values()]
+  const omittedShortAudio = [...omittedAudio].filter(([clip]) => !gaps.has(clip)).map(([, issue]) => issue)
+  const blockedEdits = [...editIssues, ...omittedShortAudio, ...mediaGaps]
+  const playable = retained.filter(clip => !gaps.has(clip))
+  const activeAssetRefs = new Set(playable.map(({ asset }) => asset.ref))
+  const activeChanges = [...mediaChanges.values()].filter(change => activeAssetRefs.has(change.assetRef))
+  if (unavailable.length) {
+    throw new TimelineMediaFailure(unavailable, offline.length > 0, blockedEdits, activeChanges, mediaReview)
+  }
+  if (editIssues.length) throw new TimelineEditFailure(blockedEdits, editIssues.some(issue => issue.recovery === 'omit-effect'),
+    activeChanges, mediaReview)
+  const video = timeline.canvas ? null : itemOf(playable[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0
   if (canvasSizeError(width, height)) throw new Error('The original media must have a supported even-sized WeftCut canvas')
   const target = { ...root, width, height, tracks: root.tracks.map((track) => ({ ...track, layers: [] as Layer[] })),
     links: [...root.links], markers: [...root.markers] }
-  const usedMedia = new Set(mediaIds.values())
+  const usedMedia = new Set(playable.map(clip => mediaIds.get(clip.asset.ref)!))
   const project = { ...snapshot,
     media_pool: Object.fromEntries(Object.entries(snapshot.media_pool).filter(([id]) => usedMedia.has(id))),
     compositions: { ...snapshot.compositions, [root.id]: target } }
@@ -526,11 +594,11 @@ export async function prepareTimelineProject(
   const videoConversions = new Map<string, TimelineImportReport['videoConversions'][number]>()
   const compatibilityItems: TimelineCompatibilityItem[] = [...sequences].flatMap(sequence => sequence.notices)
   const built = new Map<ImportTimeline, Composition>([[timeline, target]])
-  const allLanes = [...new Set(retained.map(clip => clip.lane).concat(timeline.groups.length ? [0] : []))].sort((a, b) => a - b)
+  const allLanes = [...new Set(playable.map(clip => clip.lane).concat(timeline.groups.length ? [0] : []))].sort((a, b) => a - b)
 
   function mapSequence(sequence: ImportTimeline, target: Composition): void {
     const laneIds = new Map([[0, target.tracks[0]!.id]])
-    const layers = sequence.clips.filter(clip => clip.hasVideo || !omittedAudio.has(clip))
+    const layers = sequence.clips.filter(clip => !gaps.has(clip) && (clip.hasVideo || !omittedAudio.has(clip)))
     const lanes = [...new Set(layers.map(clip => clip.lane))].sort((a, b) => a - b)
     let lowerTracks = 0
     let firstOverlay = true
@@ -565,6 +633,17 @@ export async function prepareTimelineProject(
     const visualLayers = new Map<TimelineClip, Layer>()
     const splitLayers: Layer[] = []
     for (const clip of sequence.clips) {
+      const gap = gaps.get(clip)
+      if (gap) {
+        const { start, end } = gap.timelineFrames
+        target.markers.push({
+          id: idGen(), t_us: boundary(start), end_t_us: boundary(end), label: 'Replace media — ' + gap.label,
+          note: 'Add “' + gap.filename + '” or a replacement at this position. See the source timeline for the original trim.',
+          color: DEFAULT_MARKER_COLOR, anchor: null,
+        })
+        addMarkers(clip, null)
+        continue
+      }
       const omission = omittedAudio.get(clip)
       if (omission && !clip.hasVideo) {
         addMarkers(clip, null)
@@ -779,21 +858,22 @@ export async function prepareTimelineProject(
     name: project.metadata.name, destination, width, height, fps: target.fps, durationFrames: timeline.durationFrames,
     outputColorChange: videoClips ? [...new Set([...sequences].flatMap(sequence => sequence.sourceColor ? [sequence.sourceColor] : []))].join(', ') || null : null,
     compoundGroups: [...sequences].reduce((count, sequence) => count + sequence.groups.filter(group => group.kind === 'compound').length, 0),
-    mediaChanges: [...mediaChanges.values()], omittedEffects: [...sequences].flatMap(sequence => sequence.omittedEffects ?? []),
-    omittedTitles: [...sequences].flatMap(sequence => sequence.omittedTitles ?? []), omittedShortAudio,
+    mediaChanges: activeChanges, omittedEffects: [...sequences].flatMap(sequence => sequence.omittedEffects ?? []),
+    omittedTitles: [...sequences].flatMap(sequence => sequence.omittedTitles ?? []),
+    omittedShortAudio, mediaGaps,
     videoClips, audioClips, markers: Object.values(project.compositions).reduce((count, composition) => count + composition.markers.length, 0), media: Object.keys(project.media_pool).length,
     lanes: allLanes, connectedClips: [...sequences].filter(sequence => !multicamSequences.has(sequence))
-      .reduce((count, sequence) => count + sequence.clips.filter(clip => clip.lane !== 0 && (clip.hasVideo || !omittedAudio.has(clip))).length, 0), roundedEnds,
+      .reduce((count, sequence) => count + sequence.clips.filter(clip => clip.lane !== 0 && !gaps.has(clip) && (clip.hasVideo || !omittedAudio.has(clip))).length, 0), roundedEnds,
     resampledAudioClips, downmixedAudioClips,
     rateConformedVideoClips, resizedVideoClips, videoConversions: [...videoConversions.values()],
     normalizedTimecode: [...sequences].some(sequence => sequence.normalizedTimecode),
     dropFrameTimecode: [...sequences].some(sequence => sequence.dropFrameTimecode),
     namedFormatDefaults: [...sequences].some(sequence => sequence.namedFormatDefaults),
-    bundleSource: extension === '.fcpxmld', relinkedMedia, compatibilityItems,
+    bundleSource: extension === '.fcpxmld', relinkedMedia: relinkedMedia.filter(item => activeAssetRefs.has(item.assetRef)), compatibilityItems,
     compatibilityCounts: {
       exact: compatibilityItems.filter(i => i.status === 'exact').length,
       converted: compatibilityItems.filter(i => i.status === 'converted').length,
-      approximated: compatibilityItems.filter(i => i.status === 'approximated').length + omittedShortAudio.length,
+      approximated: compatibilityItems.filter(i => i.status === 'approximated').length + omittedShortAudio.length + mediaGaps.length,
       unsupported: 0,
     },
   } }
@@ -887,8 +967,15 @@ function validateSource(clip: TimelineClip, item: MediaItem, probe: MediaItem['m
     const decoded = ffprobeColorToWebCodecs(video)
     if ((primaries != null && decoded?.primaries === undefined) || (transfer != null && decoded?.transfer === undefined) ||
         matrix === 'bt2020nc' || matrix === 'bt2020c' || matrix === 'ictcp') {
-      fail('WeftCut cannot reproduce this file’s color settings. It has an unsupported color transfer, gamut or matrix (' +
-        [transfer, primaries, matrix].filter(tag => tag != null).join(', ') +
+      const hdrOrWideGamut = transfer === 'smpte2084' || transfer === 'arib-std-b67' ||
+        primaries === 'bt2020' || matrix === 'bt2020nc' || matrix === 'bt2020c' || matrix === 'ictcp'
+      const tags = [transfer, primaries, matrix].filter(tag => tag != null).join(', ')
+      if (hdrOrWideGamut) {
+        fail('This file uses HDR or wide-gamut color (' + tags + '). WeftCut edits in standard dynamic range. ' +
+          'Export an SDR Rec. 709 copy with the same timing. In the source editor, use tone mapping to preserve highlights, ' +
+          'then choose the new copy as the replacement.')
+      }
+      fail('WeftCut cannot reproduce this file’s color settings (' + tags +
         '). Export an SDR Rec. 709 copy with the same timing, then choose it as the replacement.')
     }
     const declared = clip.asset.sourceColor

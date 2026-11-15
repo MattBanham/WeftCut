@@ -22,7 +22,7 @@ import { ExportJobs } from '../exportJobs'
 import { autosaveMaxWaitMs } from './autosave'
 import { rootComposition } from './model'
 import { serializeProjectToJson } from './persistence'
-import type { TimelineImportPreview } from '../../shared/timelineImport'
+import type { TimelineImportPreview, TimelineMediaBlocked } from '../../shared/timelineImport'
 import { errno } from './__tests__/fixtures/memAtomicIo'
 import { SAVE_STATUS_CHANNEL, SAVE_STATUS_EVENT, type SaveStatus } from '../../shared/save-status'
 
@@ -310,6 +310,63 @@ describe('createTsActorHost — persistence-route integration', () => {
           { label: 'Next picture', t_start_us: 2_000_000, t_end_us: 3_000_000, params: { kind: 'VideoClip' } },
         ])
         expect(imported?.markers).toMatchObject([{ label: 'Mark this beat', t_us: 1_000_000, anchor: null }])
+      } finally { f.close() }
+    })
+
+    it('requires consent for only the unavailable media and restores it when found during review', async () => {
+      const f = timelineFixture()
+      try {
+        const missing = nodePath.join(f.folder, 'Missing camera.mov')
+        writeFileSync(f.path, readFileSync(f.path, 'utf8')
+          .replace('</resources>', '<asset id="offline" format="f" duration="1s" hasVideo="1" src="' +
+            pathToFileURL(missing).href + '"/></resources>')
+          .replace('</spine>', '<asset-clip ref="offline" name="Cutaway" offset="1s" duration="1s">' +
+            '<marker value="Beat" start="1/2s" duration="0s"/></asset-clip>' +
+            '<asset-clip ref="a" name="Return" offset="2s" duration="1s"/></spine>')
+          .replace('<sequence format="f" duration="1s"', '<sequence format="f" duration="3s"'))
+        const review = (leaveMediaGaps?: string[]) => f.host.handleInvoke('project_preview_timeline',
+          { path: f.path, newProject: true, leaveMediaGaps: leaveMediaGaps })
+        const blocked = await review() as TimelineMediaBlocked
+        expect(blocked).toMatchObject({ kind: 'media-blocked', issues: [{ assetRef: 'offline', canLeaveGaps: true }] })
+        const gap = await review(['offline', 'a']) as TimelineImportPreview
+        expect(gap.mediaGaps).toMatchObject([{ assetRef: 'offline', label: 'Cutaway', timelineFrames: { start: 30, end: 60 } }])
+        expect(gap).toMatchObject({ durationFrames: 90, videoClips: 2, media: 1 })
+        const args = { id: gap.id, destination: { parentFolder: f.folder, name: 'Rebuilt Edit' } }
+        await expect(f.host.handleInvoke('project_import_timeline', args)).rejects.toThrow(/accept the marked media gaps/)
+        expect(f.deps.workspaceDir()).toBeNull()
+
+        writeFileSync(missing, 'Replacement camera source')
+        const repaired = await review(['offline']) as TimelineImportPreview
+        expect(repaired.mediaGaps).toEqual([])
+        expect(repaired.videoClips).toBe(3)
+      } finally { f.close() }
+    })
+
+    it('can leave out an unusable range of a file used by another cut', async () => {
+      const f = timelineFixture()
+      try {
+        writeFileSync(f.path, readFileSync(f.path, 'utf8')
+          .replace('hasVideo="1" duration="1s"', 'hasVideo="1" duration="2s"')
+          .replace('<sequence format="f" duration="1s"', '<sequence format="f" duration="2s"')
+          .replace('</spine>', '<asset-clip ref="a" name="Outside the file" offset="1s" start="1s" duration="1s"/></spine>'))
+        const args = { path: f.path, newProject: true }
+        const blocked = await f.host.handleInvoke('project_preview_timeline', args) as TimelineMediaBlocked
+        expect(blocked.issues).toMatchObject([{ assetRef: 'a', canLeaveGaps: true, placements: 1 }])
+        const reviewed = await f.host.handleInvoke('project_preview_timeline', { ...args, leaveMediaGaps: ['a'] }) as TimelineImportPreview
+        expect(reviewed).toMatchObject({ videoClips: 1, media: 1, mediaGaps: [
+          { label: 'Outside the file', timelineFrames: { start: 30, end: 60 } },
+        ] })
+        await f.host.handleInvoke('project_import_timeline', {
+          id: reviewed.id, acceptMediaGaps: true, destination: { parentFolder: f.folder, name: 'Kept Cut' },
+        })
+        const imported = Object.values(f.host.actor.snapshot().compositions).find(comp => comp.label === 'Lantern')
+        expect(imported?.tracks.flatMap(track => track.layers)).toMatchObject([
+          { t_start_us: 0, t_end_us: 1_000_000, params: { kind: 'VideoClip' } },
+        ])
+        expect(imported?.markers).toMatchObject([
+          { label: 'Replace media — Outside the file', t_us: 1_000_000, end_t_us: 2_000_000, anchor: null },
+        ])
+        expect(imported?.duration_us).toBe(2_000_000)
       } finally { f.close() }
     })
 

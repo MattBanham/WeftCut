@@ -18,6 +18,7 @@ export interface TimelineMediaIssue {
   detail: string
   suggestedPaths?: string[]
   proxyPaths?: string[]
+  canLeaveGaps?: boolean
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
@@ -53,12 +54,27 @@ export interface TimelineMediaReplacement {
   reused?: boolean
 }
 
+export interface TimelineMediaGap extends TimelineCompatibilityItem {
+  assetRef: string
+  filename: string
+  timelineFrames: { start: number; end: number }
+}
+
+export interface TimelineImportApprovals {
+  acceptMediaChanges?: boolean
+  acceptOmittedEffects?: boolean
+  acceptTitleGaps?: boolean
+  acceptShortAudioOmissions?: boolean
+  acceptMediaGaps?: boolean
+}
+
 export interface TimelineImportReport extends TimelineMediaReview {
   mediaChanges: TimelineMediaChange[]
   outputColorChange: string | null
   omittedEffects: TimelineCompatibilityItem[]
   omittedTitles: TimelineCompatibilityItem[]
   omittedShortAudio: TimelineCompatibilityItem[]
+  mediaGaps: TimelineMediaGap[]
   name: string
   destination: string | null
   width: number

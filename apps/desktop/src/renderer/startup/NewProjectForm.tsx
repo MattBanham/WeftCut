@@ -112,7 +112,13 @@ export function NewProjectForm({
     setSubmitError(null);
     try {
       if (timeline) {
-        await projectImportTimeline(timeline.id, "fit", { parentFolder, name: name.trim() }, timeline.mediaChanges.length > 0 || timeline.outputColorChange !== null, timeline.omittedEffects.length > 0, timeline.omittedTitles.length > 0, timeline.omittedShortAudio.length > 0);
+        await projectImportTimeline(timeline.id, "fit", { parentFolder, name: name.trim() }, {
+          acceptMediaChanges: timeline.mediaChanges.length > 0 || timeline.outputColorChange !== null,
+          acceptOmittedEffects: timeline.omittedEffects.length > 0,
+          acceptTitleGaps: timeline.omittedTitles.length > 0,
+          acceptShortAudioOmissions: timeline.omittedShortAudio.length > 0,
+          acceptMediaGaps: timeline.mediaGaps.length > 0,
+        });
       } else {
         await projectNewWorkspace({
           parentFolder,

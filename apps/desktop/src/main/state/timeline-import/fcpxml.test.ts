@@ -694,6 +694,31 @@ describe('timeline import transaction', () => {
     expect(() => validate(project)).not.toThrow()
   })
 
+  it('keeps playable picture and sound when a clip uses custom role labels', async () => {
+    const xml = fixture(pathToFileURL(media).href)
+      .replace('name="Signal"', 'name="Signal" audioRole="interview.field" videoRole="B-roll.observatory"')
+      .replace('audioRole="music"', 'audioRole="voiceover"')
+    await writeFile(media, 'Fictional audiovisual source')
+    await writeFile(document, xml)
+    const { project, report } = await setup().prepareReview()
+    const layers = rootComposition(project).tracks.flatMap(track => track.layers)
+    expect(layers.filter(layer => layer.label === 'Signal')).toMatchObject([
+      { params: { kind: 'VideoClip' } },
+      { params: { kind: 'Audio', role: 'dialogue' } },
+    ])
+    expect(layers.find(layer => layer.label === 'Dock' && layer.params.kind === 'Audio'))
+      .toMatchObject({ params: { role: 'voiceover' } })
+    expect(rootComposition(project).links).toHaveLength(2)
+    expect(report.compatibilityItems.find(item => item.label === 'Signal')).toMatchObject({
+      status: 'approximated',
+      notes: expect.arrayContaining([
+        'The video role label “B-roll.observatory” is left out.',
+        expect.stringContaining('audio role named “interview.field”. This clip will use Dialogue'),
+      ]),
+    })
+    expect(() => validate(project)).not.toThrow()
+  })
+
   it('preserves a trimmed constant-speed edit and its audio pitch policy', async () => {
     const xml = fixture(pathToFileURL(media).href)
       .replace('<marker value="Signal seen" start="108003003/30000s" duration="1001/30000s"/>',

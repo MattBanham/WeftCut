@@ -663,8 +663,13 @@ export async function prepareTimelineProject(
         converted = true
       }
       if (sampleSpan) {
-        if (clip.audioSubrole) {
-          notes.push('Audio subrole “' + clip.audioSubrole + '” is grouped under “' + clip.audioSubrole.split('.')[0] + '”')
+        if (clip.sourceAudioRole?.usesDialogueFallback) {
+          notes.push('WeftCut has no audio role named “' + clip.sourceAudioRole.label +
+            '”. This clip will use Dialogue in the mixer. Its source audio stays editable.')
+          approximation = true
+        } else if (clip.sourceAudioRole) {
+          const { label } = clip.sourceAudioRole
+          notes.push('Audio subrole “' + label + '” is grouped under “' + label.split('.')[0] + '”')
           converted = true
         }
         if (clip.splitAudio) {

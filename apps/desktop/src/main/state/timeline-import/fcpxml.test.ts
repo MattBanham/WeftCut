@@ -952,7 +952,7 @@ describe('timeline import transaction', () => {
     probe.metadata.video.color_transfer = 'smpte2084'
     probe.metadata.video.color_primaries = 'bt2020'
     run.probeMedia.mockResolvedValue(JSON.stringify(probe))
-    await expect(run.prepareReview()).rejects.toThrow(/unsupported color transfer.*smpte2084.*bt2020/)
+    await expect(run.prepareReview()).rejects.toThrow(/HDR or wide-gamut color.*smpte2084.*bt2020.*SDR Rec. 709 copy.*tone mapping/)
     expect(run.actor.snapshot()).toBe(run.before)
   })
 

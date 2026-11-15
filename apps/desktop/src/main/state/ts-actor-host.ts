@@ -971,7 +971,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         try {
           preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
             args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true,
-            args.leaveTitleGaps === true, args.revalidateReplacements === true)
+            args.leaveTitleGaps === true, args.revalidateReplacements === true, args.leaveMediaGaps)
         } catch (error) {
           assertCurrent()
           if (error instanceof TimelineEditFailure || error instanceof TimelineMediaFailure) {
@@ -1017,6 +1017,9 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         }
         if (report.omittedTitles.length && args.acceptTitleGaps !== true) {
           throw new Error('Review and accept the titles that will be left out before importing')
+        }
+        if (report.mediaGaps.length && args.acceptMediaGaps !== true) {
+          throw new Error('Review and accept the marked media gaps before importing')
         }
         let destination: TimelineProjectDestination | undefined
         if (startup) {

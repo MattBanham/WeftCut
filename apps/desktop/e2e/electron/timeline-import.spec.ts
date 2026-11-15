@@ -321,6 +321,62 @@ test('continues past an unplayably short audio trim only after review', async ()
   } finally { await app.close() }
 })
 
+test('keeps a marked gap for an offline source and preserves the cuts after it', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-fcpxml-offline-gap-')
+  const xml = join(folder, 'Observatory.fcpxml')
+  const camera = join(folder, 'Camera.mov')
+  const offline = join(folder, 'Missing Camera.mov')
+  encodeSource(camera)
+  writeFileSync(xml, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="v" format="f" hasVideo="1" hasAudio="1" duration="1001/1000s" src="${pathToFileURL(camera).href}"/>
+    <asset id="o" format="f" hasVideo="1" duration="1001/1000s" src="${pathToFileURL(offline).href}"/>
+    </resources><project name="Observatory"><sequence format="f" duration="3003/30000s"><spine>
+      <asset-clip ref="v" srcEnable="video" name="Arrival" offset="0s" duration="1001/30000s"/>
+      <asset-clip ref="o" name="Control room" offset="1001/30000s" duration="1001/30000s">
+        <marker value="Check the light" start="0s" duration="0s"/>
+      </asset-clip>
+      <asset-clip ref="v" srcEnable="video" name="Return" offset="2002/30000s" duration="1001/30000s"/>
+    </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    const destination = join(folder, 'Imported Observatory')
+    await newProject(page, { parentFolder: folder, name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, file) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] })
+    }, xml)
+    await beginImport(page)
+    await expect(page.getByText(/Missing or unreadable original media/)).toBeVisible()
+    await page.getByRole('button', { name: 'Review with a marked gap' }).click()
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    const gaps = review.getByRole('region', { name: 'Media to replace later' })
+    await expect(gaps).toContainText('Control room')
+    await expect(gaps).toContainText('From frame 1 to the start of frame 2')
+    const confirm = review.getByRole('button', { name: 'Import', exact: true })
+    await expect(confirm).toBeDisabled()
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+    await gaps.getByRole('checkbox', { name: 'Import with the marked gaps shown above' }).check()
+    await expect(confirm).toBeEnabled()
+    await confirm.click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    await invokeCmd(page, 'project_open', { path: destination })
+    const imported = await importedSummary(page)
+    expect(imported.duration_us).toBe(100100)
+    expect(imported.tracks.flatMap(track => track.layers)).toMatchObject([
+      { label: 'Arrival', t_start_us: 0, t_end_us: 33367 },
+      { label: 'Return', t_start_us: 66733, t_end_us: 100100 },
+    ])
+    expect(imported.markers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Replace media — Control room', t_us: 33367, end_t_us: 66733, anchor_layer: null }),
+      expect.objectContaining({ label: 'Check the light', t_us: 33367, anchor_layer: null }),
+    ]))
+    expect(imported.media).toHaveLength(1)
+  } finally { await app.close() }
+})
+
 test('offers an available proxy for an offline original and imports only after approval', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-proxy-')
@@ -1269,6 +1325,14 @@ test('imports a built-in cross dissolve and renders both clips at its midpoint',
     await app.evaluate(({ dialog }, path) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
     }, source)
+    const bluePath = fileURLToPath(files[1]!)
+    const heldBlue = join(folder, 'Temporarily Offline.mov')
+    renameSync(bluePath, heldBlue)
+    await beginImport(page)
+    await expect(page.getByText(/A transition needs this media/)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Review with a marked gap' })).toHaveCount(0)
+    await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+    renameSync(heldBlue, bluePath)
     await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/uses its editable crossfade over the original overlap/)).toBeVisible()

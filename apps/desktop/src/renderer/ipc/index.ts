@@ -1,5 +1,5 @@
 import { parseManifestIsland } from '../../shared/motifs/catalog';
-import type { TimelineMediaReplacement, TimelinePreflight, TimelineProjectDestination, TimelineSequenceList } from '../../shared/timelineImport'
+import type { TimelineImportApprovals, TimelineMediaReplacement, TimelinePreflight, TimelineProjectDestination, TimelineSequenceList } from '../../shared/timelineImport'
 import type { TimingFields } from '../../shared/timeMapping'
 import type { CropRect } from '../../shared/crop';
 // Renderer-side IPC surface: typed `invoke` wrappers plus the wire shapes the
@@ -907,10 +907,10 @@ export function projectListTimelineSequences(path: string): Promise<TimelineSequ
 
 export function projectPreviewTimeline(
   path: string, relinkDirectory?: string, sequenceIndex?: number, newProject = false,
-  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false, leaveTitleGaps = false, revalidateReplacements = false,
+  replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false, leaveTitleGaps = false, revalidateReplacements = false, leaveMediaGaps?: string[],
 ): Promise<TimelinePreflight> {
   return invoke<TimelinePreflight>("project_preview_timeline", {
-    path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps, revalidateReplacements,
+    path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps, revalidateReplacements, leaveMediaGaps,
   });
 }
 
@@ -920,9 +920,9 @@ export function projectDiscardTimelinePreview(id: string): Promise<null> {
 
 export function projectImportTimeline(
   id: string, canvas: 'fit' | 'fill' | 'original' = 'fit', destination?: TimelineProjectDestination,
-  acceptMediaChanges = false, acceptOmittedEffects = false, acceptTitleGaps = false, acceptShortAudioOmissions = false,
+  approvals?: TimelineImportApprovals,
 ): Promise<string> {
-  return invoke<string>("project_import_timeline", { id, canvas, destination, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions });
+  return invoke<string>("project_import_timeline", { id, canvas, destination, ...approvals });
 }
 
 export async function projectOpen(path: string): Promise<void> {

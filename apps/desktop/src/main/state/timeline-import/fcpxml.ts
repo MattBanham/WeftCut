@@ -1039,8 +1039,8 @@ function parseSequence(seq: Element, project: Element, context: SequenceContext,
   const outputColor = format.sourceColor ?? (formatNode.attrs.colorSpace === undefined &&
     libraryColor !== undefined && libraryColor !== 'standard' ? 'a library using wide color processing' : undefined)
   const fps = FPS_OPTIONS.find(({ num, den }) =>
-    compareTime(format.frameDuration, exactTime(1_000_000 * den, num)) === 0)
-  if (!fps) fail(seq, 'Choose a supported WeftCut timeline frame rate')
+    compareTime(format.frameDuration, exactTime(1_000_000 * den, num)) === 0) ??
+    fail(seq, 'Choose a supported WeftCut timeline frame rate')
   if (tcFormat === 'DF' && !(fps.den === 1001 && [30_000, 60_000].includes(fps.num))) {
     fail(seq, 'Drop-frame display timecode requires 30000/1001 or 60000/1001 fps')
   }

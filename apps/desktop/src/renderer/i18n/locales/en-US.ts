@@ -443,6 +443,8 @@ const enUS = {
     import_accept_title_gaps: "Leave out these titles and keep their timing",
     import_media_blocked: "Some media needs attention",
     import_output_color_difference: "The source timeline uses {{color}}. The new edit will use SDR Rec. 709. Its colors can look different from the source.",
+    import_short_audio_omitted: "Audio edits too short to keep",
+    import_accept_short_audio_omissions: "Import without these short audio edits",
     import_media_differences: "Media differences",
     import_accept_media_differences: "Use these files with the differences shown above",
     import_media_placements_one: "Used in {{count}} clip.",

@@ -276,6 +276,43 @@ describe('createTsActorHost — persistence-route integration', () => {
       } finally { f.close() }
     })
 
+    it('requires consent to omit audio that cannot occupy a sample and preserves the rest of the edit', async () => {
+      const f = timelineFixture()
+      try {
+        const source = pathToFileURL(nodePath.join(f.folder, 'Offline Click.wav')).href
+        const original = readFileSync(f.path, 'utf8')
+        writeFileSync(f.path, original
+          .replace('hasVideo="1"', 'hasVideo="1" hasAudio="1"')
+          .replace('</resources>', '<asset id="tiny" src="' + source + '" duration="1s" hasAudio="1"/></resources>')
+          .replace('<asset-clip ref="a" start="0s" duration="1s"/>',
+            '<asset-clip ref="a" name="Picture" audioDuration="1/1000000s" audioRole="dialogue.slate" start="0s" duration="1s">' +
+            '<adjust-volume amount="-6dB"/></asset-clip>')
+          .replace('</spine>', '<audio ref="tiny" name="Slate click" offset="1s" start="0s" duration="7/1000000s">' +
+            '<marker value="Mark this beat" start="1/1000000s" duration="0s" completed="1"/></audio>' +
+            '<asset-clip ref="a" name="Next picture" srcEnable="video" offset="2s" start="0s" duration="1s"/></spine>')
+          .replace('<sequence format="f" duration="1s"', '<sequence format="f" duration="3s"'))
+        const ready = await f.host.handleInvoke('project_preview_timeline', { path: f.path, newProject: true }) as TimelineImportPreview
+        expect(ready).toMatchObject({ audioClips: 0, videoClips: 2, media: 1, durationFrames: 90, omittedShortAudio: [
+          { label: 'Picture', timelineFrames: { start: 0, end: 1 } },
+          { label: 'Slate click', timelineFrames: { start: 30, end: 31 } },
+        ] })
+        expect(ready.omittedShortAudio[1]!.notes.join(' ')).toContain('Its to-do status is left out.')
+        const picture = ready.compatibilityItems.find(item => item.label === 'Picture')
+        expect(picture).toBeDefined()
+        expect(picture!.notes.join(' ')).not.toMatch(/Separate picture and sound trims|Static clip gain|Audio subrole/)
+        const args = { id: ready.id, destination: { parentFolder: f.folder, name: 'Recovered Edit' } }
+        await expect(f.host.handleInvoke('project_import_timeline', args)).rejects.toThrow(/accept the short audio/)
+        expect(f.deps.workspaceDir()).toBeNull()
+        await f.host.handleInvoke('project_import_timeline', { ...args, acceptShortAudioOmissions: true })
+        const imported = Object.values(f.host.actor.snapshot().compositions).find(comp => comp.label === 'Lantern')
+        expect(imported?.tracks.flatMap(track => track.layers)).toMatchObject([
+          { label: 'Picture', t_start_us: 0, t_end_us: 1_000_000, params: { kind: 'VideoClip' } },
+          { label: 'Next picture', t_start_us: 2_000_000, t_end_us: 3_000_000, params: { kind: 'VideoClip' } },
+        ])
+        expect(imported?.markers).toMatchObject([{ label: 'Mark this beat', t_us: 1_000_000, anchor: null }])
+      } finally { f.close() }
+    })
+
     it('requires title-gap approval and keeps later cuts at their original positions', async () => {
       const f = timelineFixture()
       try {

@@ -40,15 +40,16 @@ export interface TimelineClip extends TimelineSourceWindow {
   timelineEnd: ExactTime
   firstFrame: number
   endFrame: number
-  splitAudio?: TimelineSourceWindow & { timelineStart: ExactTime; timelineEnd: ExactTime }
+  splitAudio?: TimelineSourceWindow & { timelineStart: ExactTime; timelineEnd: ExactTime; clippedBeforeZero: boolean }
   playbackRate?: ExactTime
   preservePitch?: boolean
   audioRole: AudioRole | null
+  audioSubrole?: string
   conform?: 'fit' | 'fill' | 'none'
   volumeDb?: number
   opacity?: number
   staticTransform?: { xPercent: number; yPercent: number; scaleX: number; scaleY: number; rotation: number }
-  markers: { label: string; note?: string; frame: number; endFrame: number | null; source: ExactTime }[]
+  markers: { label: string; note?: string; frame: number; endFrame: number | null; source: ExactTime; notes: string[] }[]
   location: string
   notes: string[]
 }

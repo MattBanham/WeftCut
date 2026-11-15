@@ -272,6 +272,55 @@ test('shows independent clip fixes alongside missing media in the source editor'
   } finally { await app.close() }
 })
 
+test('continues past an unplayably short audio trim only after review', async () => {
+  test.setTimeout(90_000)
+  const folder = tmpDir('weftcut-fcpxml-short-audio-')
+  const xml = join(folder, 'Short beat.fcpxml')
+  const camera = join(folder, 'Camera.mov')
+  const audio = join(folder, 'Offline click.wav')
+  encodeSource(camera)
+  writeFileSync(xml, `<fcpxml version="1.10"><resources>
+    <format id="f" width="320" height="240" frameDuration="1001/30000s"/>
+    <asset id="v" format="f" hasVideo="1" hasAudio="1" duration="1001/1000s" src="${pathToFileURL(camera).href}"/>
+    <asset id="a" hasAudio="1" duration="1s" src="${pathToFileURL(audio).href}"/>
+    </resources><project name="Short beat"><sequence format="f" duration="3003/30000s"><spine>
+      <asset-clip ref="v" offset="0s" srcEnable="video" duration="1001/30000s"/>
+      <audio ref="a" name="Slate tick" offset="1001/30000s" start="0s" duration="1/1000000s">
+        <marker value="Slate marker" note="Hold the beat" start="0s" duration="0s"/>
+      </audio>
+      <asset-clip ref="v" offset="2002/30000s" srcEnable="video" duration="1001/30000s"/>
+    </spine></sequence></project></fcpxml>`)
+  const { app, page } = await launchApp()
+  try {
+    const destination = join(folder, 'Imported Short Beat')
+    await newProject(page, { parentFolder: folder, name: basename(destination),
+      canvas: { width: 320, height: 240, fpsNum: 30000, fpsDen: 1001 } })
+    await app.evaluate(({ dialog }, file) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] })
+    }, xml)
+    await beginImport(page)
+    const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    const omission = review.getByRole('region', { name: 'Audio edits too short to keep' })
+    await expect(omission).toContainText('Slate tick')
+    await expect(omission).toContainText(/Both audio edges land on the same 48 kHz sample/)
+    await expect(omission).toContainText('From frame 1 to the start of frame 2')
+    const confirm = review.getByRole('button', { name: 'Import', exact: true })
+    await expect(confirm).toBeDisabled()
+    await omission.getByRole('checkbox', { name: 'Import without these short audio edits' }).check()
+    await confirm.click()
+    await expect(review).toHaveCount(0)
+    await invokeCmd(page, 'project_save')
+    await invokeCmd(page, 'project_open', { path: destination })
+    const project = await importedSummary(page)
+    expect(project.duration_us).toBe(100100)
+    expect(project.tracks.flatMap(track => track.layers)).toMatchObject([
+      { t_start_us: 0, t_end_us: 33367, params: { kind: 'VideoClip' } },
+      { t_start_us: 66733, t_end_us: 100100, params: { kind: 'VideoClip' } },
+    ])
+    expect(project.markers).toMatchObject([{ t_us: 33367, label: 'Slate marker', note: 'Hold the beat', anchor_layer: null }])
+  } finally { await app.close() }
+})
+
 test('offers an available proxy for an offline original and imports only after approval', async () => {
   test.setTimeout(90_000)
   const folder = tmpDir('weftcut-fcpxml-proxy-')

@@ -138,7 +138,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   }
 
   const editIssues = blocked?.kind === "media-blocked" ? blocked.editIssues : blocked?.issues ?? [];
-  const needsSourceEdit = editIssues.some(issue => issue.recovery === undefined);
+  const needsSourceEdit = editIssues.some(issue => issue.status === "unsupported" && issue.recovery === undefined);
   const canLeaveTitleGaps = !needsSourceEdit && editIssues.some(issue => issue.recovery === "leave-title-gap");
   const refreshBlocked = needsSourceEdit && (
     <Button onClick={() => void refreshReview()} disabled={busy}>
@@ -265,9 +265,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           onReviewAsNewProject={reviewAsNewProject}
           onRefreshReview={refreshReview}
           onCancel={cancel}
-          onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps) => {
+          onImport={async (canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions) => {
             if (timelinePreview.current === null) setProjectForm(timelinePreview);
-            else await projectImportTimeline(timelinePreview.id, canvas, undefined, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps);
+            else await projectImportTimeline(timelinePreview.id, canvas, undefined, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions);
             setTimelinePreview(null);
           }}
         />
@@ -351,7 +351,7 @@ function MediaDifferenceRows({ changes, onRelink, disabled }: {
 
 function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, onRefreshReview, busyRelinking }: {
   preview: TimelineImportPreview;
-  onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean, acceptTitleGaps: boolean) => Promise<void>;
+  onImport: (canvas: 'fit' | 'fill' | 'original', acceptMediaChanges: boolean, acceptOmittedEffects: boolean, acceptTitleGaps: boolean, acceptShortAudioOmissions: boolean) => Promise<void>;
   onRelink: (assetRef: string) => Promise<void>;
   onReviewAsNewProject: () => Promise<void>;
   onRefreshReview: () => Promise<void>;
@@ -365,6 +365,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
   const [acceptMediaChanges, setAcceptMediaChanges] = useState(false);
   const [acceptOmittedEffects, setAcceptOmittedEffects] = useState(false);
   const [acceptTitleGaps, setAcceptTitleGaps] = useState(false);
+  const [acceptShortAudioOmissions, setAcceptShortAudioOmissions] = useState(false);
   const hasMediaChanges = preview.mediaChanges.length > 0 || preview.outputColorChange !== null;
   const current = preview.current;
   const fpsMismatch = current != null &&
@@ -374,7 +375,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
 
   async function submit() {
     setBusy(true);
-    try { await onImport(canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps); }
+    try { await onImport(canvas, acceptMediaChanges, acceptOmittedEffects, acceptTitleGaps, acceptShortAudioOmissions); }
     catch (cause) {
       setError(cleanIpcDetail(cause));
       setBusy(false);
@@ -462,6 +463,23 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
           </label>
         </section>
       )}
+      {preview.omittedShortAudio.length > 0 && (
+        <section aria-label={t("startup.import_short_audio_omitted")}>
+          <p><strong>{t("startup.import_short_audio_omitted")}</strong></p>
+          {preview.omittedShortAudio.map((clip, index) => (
+            <div key={index} className="new-project-row">
+              <strong title={clip.location}>{clip.label}</strong>
+              {clip.timelineFrames && <p>{t("startup.import_edit_range", clip.timelineFrames)}</p>}
+              <p>{clip.notes.join(" ")}</p>
+            </div>
+          ))}
+          <label>
+            <input type="checkbox" checked={acceptShortAudioOmissions} disabled={busy || busyRelinking}
+              onChange={(event) => setAcceptShortAudioOmissions(event.target.checked)} />
+            {" "}{t("startup.import_accept_short_audio_omissions")}
+          </label>
+        </section>
+      )}
       {preview.omittedTitles.length > 0 && (
         <section aria-label={t("startup.import_titles_omitted")}>
           <p><strong>{t("startup.import_titles_omitted")}</strong></p>
@@ -536,7 +554,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
             {t("startup.import_review_as_new")}
           </Button>
         )}
-        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps)}>
+        <Button size="lg" onClick={submit} disabled={busy || busyRelinking || error !== null || fpsMismatch || (hasMediaChanges && !acceptMediaChanges) || (preview.omittedEffects.length > 0 && !acceptOmittedEffects) || (preview.omittedTitles.length > 0 && !acceptTitleGaps) || (preview.omittedShortAudio.length > 0 && !acceptShortAudioOmissions)}>
           {t(busy ? "startup.import_timeline_busy" : current ? "startup.import_timeline_submit" : "startup.import_timeline_location")}
         </Button>
       </footer>

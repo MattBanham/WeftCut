@@ -211,6 +211,7 @@ mod tests {
                     channels: 2,
                     codec: "pcm_s16le".into(),
                     start_pts_us: None,
+                    duration_us: None,
                 }),
                 ..Default::default()
             },

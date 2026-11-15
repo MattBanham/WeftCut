@@ -40,6 +40,7 @@ import { resolveMotifTuning } from './motif/tuning.js'
 import { motifTuningArgument } from '../shared/motifs/tuning.js'
 import { setMotifMediaSource } from './motif/mediaProps.js'
 import { rasterizeSvg } from './svgRaster.js'
+import { createTimelineImageCheck } from './timelineImageCheck.js'
 import { MotifCaptureService, parseMotifCaptureControl, parseMotifCaptureRequest, parseMotifPresence } from './motif/captureService.js'
 import { UserMotifStore } from './motif/store.js'
 import { PackageRevisions } from './motif/packageRevisions.js'
@@ -841,6 +842,7 @@ app.whenReady().then(async () => {
     readFile: (p: string) => fs.readFileSync(p, 'utf8'),
     writeFile: (p: string, t: string) => writeFileAtomic(nodeAtomicWriteIo, p, t),
     mkdirp: (d: string) => { fs.mkdirSync(d, { recursive: true }) },
+    mkdirExclusive: (d: string) => { fs.mkdirSync(d) },
     copyFile: (s: string, d: string) => fs.copyFileSync(s, d),
     readdir: (d: string) => fs.readdirSync(d) as string[],
     rm: (p: string) => { fs.rmSync(p, { force: true }) },
@@ -1111,6 +1113,11 @@ app.whenReady().then(async () => {
     join: path.join,
     napi: napiFacadeWithCache,
     compute: computeFacade,
+    createTimelineImageCheck,
+    timelineReviewCompute: {
+      probeMedia: (p) => backend!.inspectTimelineMedia(p, false),
+      hashMediaSource: (p) => backend!.inspectTimelineMedia(p, true),
+    },
     enqueueWorkspaceCopy: (id, p) => backend!.enqueueWorkspaceCopy(id, p, workspaceEvents.requireCurrent()),
     readFile: (p) => fs.readFileSync(p, 'utf8'),
     rasterizeSvg: (p) => rasterizeSvg(p, path.join(dataRoot.cacheDir, 'svg-import')),
@@ -1600,6 +1607,9 @@ app.whenReady().then(async () => {
         case 'export_job_suggest_name': return suggestExportName(a.path);
       }
     }
+    if (['project_list_timeline_sequences', 'project_preview_timeline', 'project_discard_timeline_preview', 'project_import_timeline'].includes(channel)
+      && _e.sender !== mainWindow?.webContents)
+      throw new Error('Timeline import requires the editor window')
     if (channel === 'project_open_state') return tsHost!.openedProject();
     if (channel === 'project_startup_open') {
       if (!tsHost!.openedProject() && !tsHost!.projectOperationPending?.()) await tsHost!.handleInvoke('project_open', {path:args.dir});
@@ -2353,13 +2363,15 @@ app.whenReady().then(async () => {
       title?: string
       multiple?: boolean
       directory?: boolean
+      treatPackageAsDirectory?: boolean
       filters?: { name: string; extensions: string[] }[]
       defaultPath?: string
     }
-    const properties: Array<'openFile' | 'openDirectory' | 'multiSelections'> = o.directory
+    const properties: NonNullable<import('electron').OpenDialogOptions['properties']> = o.directory
       ? ['openDirectory']
       : ['openFile']
     if (o.multiple) properties.push('multiSelections')
+    if (process.platform === 'darwin' && o.directory && o.treatPackageAsDirectory) properties.push('treatPackageAsDirectory')
     const res = await dialog.showOpenDialog(mainWindow!, {
       title: o.title,
       defaultPath: o.defaultPath,

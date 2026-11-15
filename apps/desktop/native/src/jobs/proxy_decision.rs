@@ -294,6 +294,7 @@ mod tests {
                     codec: "h264".into(),
                     pix_fmt: "yuv420p".into(),
                     start_pts_us: None,
+                    duration_us: None,
                     nb_frames: None,
                     color_matrix: None,
                     color_range: None,

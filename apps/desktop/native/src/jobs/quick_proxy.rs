@@ -208,6 +208,7 @@ mod tests {
                     codec: codec.into(),
                     pix_fmt: pix_fmt.into(),
                     start_pts_us: None,
+                    duration_us: None,
                     nb_frames: None,
                     color_matrix: None,
                     color_range: None,

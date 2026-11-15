@@ -79,6 +79,9 @@ pub struct VideoStreamMeta {
     /// it. Video decoders use this to map normalized source time to packets.
     #[serde(default)]
     pub start_pts_us: Option<TimeUs>,
+    /// Duration of this stream from its own first sample, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_us: Option<TimeUs>,
     /// Demuxer-reported frame count (ffprobe `nb_frames`), when the container
     /// carries one. `Some(1)` marks a single-frame stream — how `detect_kind`
     /// tells a still image from an animated GIF. `None` when the demuxer
@@ -111,6 +114,9 @@ pub struct AudioStreamMeta {
     /// persisted for diagnostics and future direct-audio decode paths.
     #[serde(default)]
     pub start_pts_us: Option<TimeUs>,
+    /// Duration of this stream from its own first sample, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_us: Option<TimeUs>,
 }
 
 #[cfg(test)]

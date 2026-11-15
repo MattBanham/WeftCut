@@ -232,6 +232,7 @@ mod tests {
                     codec: "h264".into(),
                     pix_fmt: "yuvj420p".into(),
                     start_pts_us: None,
+                    duration_us: None,
                     nb_frames: None,
                     color_matrix: matrix.map(Into::into),
                     color_range: range.map(Into::into),

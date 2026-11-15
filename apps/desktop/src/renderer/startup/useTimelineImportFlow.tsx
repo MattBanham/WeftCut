@@ -115,11 +115,11 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     finally { setBusy(false); }
   }
 
-  async function reviewWithMediaGap(assetRef: string) {
+  async function reviewWithMediaGaps(assetRefs: string[]) {
     if (!request || busy) return;
     setBusy(true);
     setBlocked(null);
-    try { await review({ ...request, leaveMediaGaps: [...new Set([...(request.leaveMediaGaps ?? []), assetRef])] }); }
+    try { await review({ ...request, leaveMediaGaps: [...new Set([...(request.leaveMediaGaps ?? []), ...assetRefs])] }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
   }
@@ -164,9 +164,12 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   }
 
   const editIssues = blocked?.kind === "media-blocked" ? blocked.editIssues : blocked?.issues ?? [];
+  const mediaGapAssets = blocked?.kind === "media-blocked"
+    ? [...new Set(blocked.issues.filter(issue => issue.canLeaveGaps).map(issue => issue.assetRef))]
+    : [];
   const needsSourceEdit = editIssues.some(issue => issue.status === "unsupported" && issue.recovery === undefined);
   const canLeaveTitleGaps = !needsSourceEdit && editIssues.some(issue => issue.recovery === "leave-title-gap");
-  const refreshBlocked = needsSourceEdit && (
+  const refreshBlocked = (needsSourceEdit || blocked?.kind === "media-blocked") && (
     <Button onClick={() => void refreshReview()} disabled={busy}>
       {t("startup.import_refresh_review")}
     </Button>
@@ -236,6 +239,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               {t("startup.import_review_without_effects")}
             </Button>}
             {titleFallback}
+            {mediaGapAssets.length > 1 && <Button onClick={() => void reviewWithMediaGaps(mediaGapAssets)} disabled={busy}>
+              {t("startup.import_review_with_multiple_media_gaps", { count: mediaGapAssets.length })}
+            </Button>}
             {blocked.canSearchFolder && <Button onClick={() => void relink()} disabled={busy}>
               {t("startup.import_choose_relink_folder")}
             </Button>}
@@ -260,7 +266,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
               <Button onClick={() => void relink(issue.assetRef)} disabled={busy}>
                 {t("startup.import_choose_replacement")}
               </Button>
-              {issue.canLeaveGaps && <Button onClick={() => void reviewWithMediaGap(issue.assetRef)} disabled={busy}>
+              {issue.canLeaveGaps && <Button onClick={() => void reviewWithMediaGaps([issue.assetRef])} disabled={busy}>
                 {t("startup.import_review_with_media_gap")}
               </Button>}
             </div>

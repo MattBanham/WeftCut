@@ -6,11 +6,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
 import { driveExport, invokeCmd, launchApp, newProject, rootSummary, tmpDir, waitForHook, type ProjectSummary, type ProjectSummaryWire } from './helpers/driver'
 
-function encodeSource(media: string) {
+function encodeSource(media: string, extraStream?: 'audio' | 'video') {
+  const extraInput = extraStream === 'audio' ? 'sine=frequency=880:sample_rate=48000' : 'color=red:s=320x240:r=30000/1001'
   execFileSync('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', "nullsrc=s=320x240:r=30000/1001,geq=lum='if(eq(N,7),235,16)':cb=128:cr=128",
-    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '1.001',
-    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'pcm_s16le', '-ac', '2', media,
+    '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+    "nullsrc=s=320x240:r=30000/1001,geq=lum='if(eq(N,7),235,16)':cb=128:cr=128",
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    ...(extraStream ? ['-f', 'lavfi', '-i', extraInput] : []),
+    '-map', '0:v', '-map', '1:a',
+    ...(extraStream === 'audio' ? ['-map', '2:a', '-ac:a:1', '1'] : []),
+    ...(extraStream === 'video' ? ['-map', '2:v', '-disposition:v:0', '0', '-disposition:v:1', 'default'] : []),
+    '-t', '1.001', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'pcm_s16le', '-ac:a:0', '2', media,
   ], { windowsHide: true })
 }
 
@@ -80,8 +86,15 @@ test('imports an editable FCPXML composition and refuses missing or changed medi
     expect(await invokeCmd(page, 'project_open_state')).not.toBeNull()
 
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
-    encodeSource(media)
+    for (const stream of ['audio', 'video'] as const) {
+      encodeSource(media, stream)
+      await beginImport(page)
+      await expect(page.getByText('This file contains more than one ' + stream + ' stream.', { exact: false }).first()).toBeVisible()
+      expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+    }
 
+    encodeSource(media)
     await beginImport(page)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
     await expect(review.getByText(/Video clips 2.*Audio clips 2.*Markers 2.*Media files 1/)).toBeVisible()

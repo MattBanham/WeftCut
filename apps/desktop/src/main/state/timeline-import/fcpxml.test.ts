@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -575,7 +575,7 @@ describe('timeline import transaction', () => {
     const assertCurrent = vi.fn()
     const inspectMedia = vi.fn(async (path = media): Promise<TimelineMediaProbe> => ({
       item: JSON.parse(await probeMedia(path)),
-      streams: { video_us: null, audio_us: null },
+      streams: { audio_count: 1, video_count: 1, video_us: null, audio_us: null },
     }))
     const deps = {
       compute: { probeMedia, hashMediaSource },
@@ -1106,6 +1106,22 @@ describe('timeline import transaction', () => {
     expect(notes).toMatch(/extended to keep split audio/)
   })
 
+  it('refuses when the source is replaced between probing and hashing', async () => {
+    const replacement = join(parent, 'New Take.mov')
+    await writeFile(media, 'Old take')
+    await writeFile(replacement, 'New take')
+    const run = setup()
+    run.hashMediaSource.mockImplementationOnce(async () => {
+      expect(run.inspectMedia).toHaveBeenCalledOnce()
+      await rename(replacement, media)
+      return 'b'.repeat(64)
+    })
+    await expect(run.prepareReview()).rejects.toThrow(/media file changed while WeftCut was checking it/)
+    expect(run.actor.snapshot()).toBe(run.before)
+    expect(existsSync(destination)).toBe(false)
+    await expect(run.prepareReview()).resolves.toBeDefined()
+  })
+
   it('checks each split trim against its own stream length', async () => {
     await writeFile(media, 'Fictional camera source')
     const xml = fixture(pathToFileURL(media).href)
@@ -1114,9 +1130,9 @@ describe('timeline import transaction', () => {
     await writeFile(document, xml)
     const run = setup()
     const { item } = await run.inspectMedia()
-    run.inspectMedia.mockResolvedValue({ item, streams: { video_us: 267_000, audio_us: 220_000 } })
+    run.inspectMedia.mockResolvedValue({ item, streams: { audio_count: 1, video_count: 1, video_us: 267_000, audio_us: 220_000 } })
     await expect(run.prepare()).resolves.toBeDefined()
-    run.inspectMedia.mockResolvedValue({ item, streams: { video_us: 267_000, audio_us: 190_000 } })
+    run.inspectMedia.mockResolvedValue({ item, streams: { audio_count: 1, video_count: 1, video_us: 267_000, audio_us: 190_000 } })
     await expect(run.prepare()).rejects.toThrow(/audio stream ends before this trim/)
     expect(run.actor.snapshot()).toBe(run.before)
   })
@@ -1126,7 +1142,7 @@ describe('timeline import transaction', () => {
     await writeFile(document, fixture(pathToFileURL(media).href).replace('duration="10s"', 'duration="1/30s"'))
     const run = setup()
     const { item } = await run.inspectMedia()
-    run.inspectMedia.mockResolvedValue({ item, streams: { video_us: 10_000_000, audio_us: 10_000_000 } })
+    run.inspectMedia.mockResolvedValue({ item, streams: { audio_count: 1, video_count: 1, video_us: 10_000_000, audio_us: 10_000_000 } })
     const { project, report } = await run.prepareReview()
     const importedMedia = Object.values(project.media_pool)[0]!
     expect(importedMedia.metadata.video).not.toHaveProperty('duration_us')
@@ -1140,9 +1156,9 @@ describe('timeline import transaction', () => {
       { t_start_us: 133467, t_end_us: 200200, params: { src_in_us: 200200, src_out_us: 266933 } },
     ])
     expect(() => validate(project)).not.toThrow()
-    run.inspectMedia.mockResolvedValue({ item, streams: { video_us: 10_000_000, audio_us: null } })
+    run.inspectMedia.mockResolvedValue({ item, streams: { audio_count: 1, video_count: 1, video_us: 10_000_000, audio_us: null } })
     await expect(run.prepareReview()).rejects.toThrow(/cannot verify that every requested stream covers it/)
-    run.inspectMedia.mockResolvedValue({ item, streams: { video_us: 10_000_000, audio_us: 90_000 } })
+    run.inspectMedia.mockResolvedValue({ item, streams: { audio_count: 1, video_count: 1, video_us: 10_000_000, audio_us: 90_000 } })
     await expect(run.prepareReview()).rejects.toThrow(/audio stream ends before this trim/)
     expect(run.actor.snapshot()).toBe(run.before)
     expect(existsSync(destination)).toBe(false)

@@ -44,7 +44,7 @@ import { playheadView } from '../mcp/playheadView'
 import type { WorkspaceStore } from '../workspace'
 import { ExportJobError } from '../exportJobs'
 import { TimelineEditFailure } from './timeline-import/fcpxml'
-import { listTimelineSequences, prepareTimelineProject, TimelineMediaFailure, type TimelineMediaProbe } from './timeline-import/project'
+import { listTimelineSequences, prepareTimelineProject, timelineMediaVersion, TimelineMediaFailure, type TimelineMediaProbe } from './timeline-import/project'
 import type { TimelineImageCheck } from '../timelineImageCheck'
 import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineProjectDestination } from '../../shared/timelineImport'
 import { validateProjectName } from '../../shared/newProject'
@@ -456,7 +456,13 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       try { actor.replaceState(next, firstEdit) } finally { swapping = false }
     },
   }
-  const orchestratorDeps = { actor: swapActor, napi: deps.napi, fs: deps.fs, join: deps.join, idGen, enqueueDerivatives, relink, onRelink, onGridRepair, onSchemaUpgrade, migration }
+  const onNewWorkspacePreferenceFailure = (message: string, error: unknown): void => {
+    console.warn('[workspace]', message, error)
+    try {
+      deps.emitLog?.({ level: 'warn', category: { kind: 'Project' }, source: { kind: 'System' }, message })
+    } catch (err) { console.warn('[ts-actor-host] emitLog failed (new workspace preferences)', err) }
+  }
+  const orchestratorDeps = { actor: swapActor, napi: deps.napi, fs: deps.fs, join: deps.join, idGen, enqueueDerivatives, relink, onRelink, onGridRepair, onSchemaUpgrade, migration, onNewWorkspacePreferenceFailure }
 
   // Hybrid orchestrator deps (native-compute → TS-write). enqueueDerivatives here
   // takes the inserted ITEMS (vs the orchestrator's whole-Project variant) and
@@ -1057,14 +1063,23 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           throw new Error('The current project changed during review. Review the import again')
         }
         const compute = (startup ? deps.timelineReviewCompute : undefined) ?? deps.compute
+        const checkedVersions = new Map<string, string>()
+        const staleMedia = () => new Error('Original media changed or became unreadable after review. Review the timeline again')
         for (const item of Object.values(project.media_pool)) {
-          let hash: string | undefined
-          try { hash = await compute.hashMediaSource(item.path_abs) } catch { /* a missing or unreadable original */ }
+          const version = await timelineMediaVersion(item.path_abs)
           assertCurrent()
-          if (hash !== item.file_hash_blake3)
-            throw new Error('Original media changed or became unreadable after review. Review the timeline again')
+          if (version === null) throw staleMedia()
+          let hash: string
+          try { hash = await compute.hashMediaSource(item.path_abs) } catch { throw staleMedia() }
+          assertCurrent()
+          if (hash !== item.file_hash_blake3) throw staleMedia()
+          checkedVersions.set(item.path_abs, version)
         }
         await assertDocumentUnchanged()
+        for (const [path, version] of checkedVersions) {
+          if (await timelineMediaVersion(path) !== version) throw staleMedia()
+          assertCurrent()
+        }
         assertCurrent()
         if (actor.snapshot() !== original) throw new Error('The current project changed during confirmation. Review the import again')
         deps.exportJobs?.assertWritable()

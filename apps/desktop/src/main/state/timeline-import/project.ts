@@ -39,11 +39,17 @@ export class TimelineMediaFailure extends Error {
 type ImageSize = { width: number; height: number }
 export type TimelineMediaProbe = {
   item: MediaItem
-  streams: { video_us: number | null; audio_us: number | null }
+  streams: { video_us: number | null; audio_us: number | null; audio_count: number; video_count: number }
 }
 type MediaDeps = Pick<MediaImportDeps, 'compute' | 'statPath' | 'realPath' | 'fileKey'> & {
   inspectMedia?(path: string): Promise<TimelineMediaProbe>
   inspectImage?(path: string): Promise<ImageSize | 'too-large' | null>
+}
+
+export async function timelineMediaVersion(path: string): Promise<string | null> {
+  const stat = await lstat(path, { bigint: true }).catch(() => null)
+  if (!stat?.isFile()) return null
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
 }
 
 async function readTimelineDocument(path: string, deps: MediaDeps): Promise<string> {
@@ -215,7 +221,7 @@ export async function prepareTimelineProject(
   const actor = createActor({ initial, idGen, clock: () => new Date().toISOString() })
   // Stage registration through the normal importer against the destination's
   // pool. Disk jobs wait for confirmation; cancellation discards this actor.
-  const streamDurations = new Map<string, TimelineMediaProbe['streams']>()
+  const streamFacts = new Map<string, TimelineMediaProbe['streams']>()
   const importer = createMediaImporter({
     ...deps, actor, workspaceDir: () => destination,
     compute: {
@@ -223,7 +229,11 @@ export async function prepareTimelineProject(
       async probeMedia(path) {
         if (!deps.inspectMedia) return deps.compute.probeMedia(path)
         const { item, streams } = await deps.inspectMedia(path)
-        streamDurations.set(path, streams)
+        if (!Number.isSafeInteger(streams?.audio_count) || streams.audio_count < 0 ||
+            !Number.isSafeInteger(streams.video_count) || streams.video_count < 0) {
+          throw new Error('WeftCut could not verify the number of streams in this file. Restart the app and review the timeline again.')
+        }
+        streamFacts.set(path, streams)
         return JSON.stringify(item)
       },
     },
@@ -413,11 +423,28 @@ export async function prepareTimelineProject(
   const mediaIds = new Map<string, string>()
   const failed: TimelineMediaIssue[] = []
   const importedPaths = new Map<string, ReturnType<typeof importer.ensureImported>>()
+  const mediaVersions = new Map<string, string>()
+  const requireReviewedVersion = async (path: string) => {
+    if (await timelineMediaVersion(path) !== mediaVersions.get(path)) {
+      throw new Error('This media file changed while WeftCut was checking it. Wait for it to finish saving and review again, or choose a stable copy.')
+    }
+  }
+  const importReviewedFile = async (path: string) => {
+    const version = await timelineMediaVersion(path)
+    if (version === null) throw new Error('The selected media is no longer a readable regular file.')
+    mediaVersions.set(path, version)
+    assertCurrent()
+    const result = await importer.ensureImported(path)
+    // The probe and hash open the source separately. Match both reads to
+    // one file version before trusting its metadata under the content hash.
+    await requireReviewedVersion(path)
+    return result
+  }
   for (const [ref, { path: mediaPath, choice }] of resolved) {
     assertCurrent()
     const { asset, label } = originals.get(ref)!
     try {
-      const imported = importedPaths.get(mediaPath) ?? importer.ensureImported(mediaPath)
+      const imported = importedPaths.get(mediaPath) ?? importReviewedFile(mediaPath)
       importedPaths.set(mediaPath, imported)
       const result = await imported
       if (result.disposition === 'relinked' && existing?.media_pool[result.mediaId]) {
@@ -456,7 +483,7 @@ export async function prepareTimelineProject(
         !Number.isSafeInteger(video.fps_num) || !Number.isSafeInteger(video.fps_den)) continue
     const frame = exactTime(1_000_000 * video.fps_den, video.fps_num)
     if (divideTime(clip.sourceIn, frame).den === 1) continue
-    const path = itemOf(clip).path_abs
+    const path = resolved.get(clip.asset.ref)!.path
     const points = pointsByPath.get(path) ?? new Set<number>()
     const time = clip.sourceIn.num / clip.sourceIn.den
     if (points.size >= MAX_VIDEO_IN_POINTS || timingChecks >= maxTimingChecks || points.has(time)) continue
@@ -495,15 +522,16 @@ export async function prepareTimelineProject(
     const item = itemOf(clip)
     if (!item) continue
     try {
-      const actualFrameUs = verifiedPoints.get(item.path_abs)?.get(clip.sourceIn.num / clip.sourceIn.den)
+      const reviewedPath = resolved.get(clip.asset.ref)!.path
+      const actualFrameUs = verifiedPoints.get(reviewedPath)?.get(clip.sourceIn.num / clip.sourceIn.den)
       if (deps.inspectImage && clip.asset.stillImage && item.kind === 'Image') {
-        const checked = imageChecks.get(item.path_abs) ?? checkImage(item.path_abs, deps.inspectImage)
-        imageChecks.set(item.path_abs, checked)
+        const checked = imageChecks.get(reviewedPath) ?? checkImage(reviewedPath, deps.inspectImage)
+        imageChecks.set(reviewedPath, checked)
         imageSizes.set(item.id, await checked)
         assertCurrent()
       }
       const played = omittedAudio.has(clip) ? { ...clip, audioRole: null } : clip
-      const result = validateSource(played, item, streamDurations.get(resolved.get(clip.asset.ref)!.path),
+      const result = validateSource(played, item, streamFacts.get(reviewedPath),
         actualFrameUs, imageSizes.get(item.id))
       sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
@@ -580,6 +608,13 @@ export async function prepareTimelineProject(
   }
   if (editIssues.length) throw new TimelineEditFailure(blockedEdits, editIssues.some(issue => issue.recovery === 'omit-effect'),
     activeChanges, mediaReview)
+  // The frame timestamp and still-image checks run after registration.
+  // Their evidence must describe the same file version as the saved hash.
+  const playablePaths = new Set(playable.map(clip => resolved.get(clip.asset.ref)!.path))
+  for (const path of playablePaths) {
+    await requireReviewedVersion(path)
+    assertCurrent()
+  }
   const video = timeline.canvas ? null : itemOf(playable[0]!).metadata.video
   const width = timeline.canvas?.width ?? video?.width ?? 0
   const height = timeline.canvas?.height ?? video?.height ?? 0
@@ -956,6 +991,12 @@ function validateSource(clip: TimelineClip, item: MediaItem, streams: TimelineMe
   const { video, audio, duration_us: duration } = item.metadata
   const dimensions = displaySize ?? video
   const fail = (message: string): never => { throw new Error(message) }
+  if (clip.hasVideo && !clip.asset.stillImage && (streams?.video_count ?? 0) > 1) {
+    fail('This file contains more than one video stream. Export a copy with just the intended video stream and the same timing, then choose it as the replacement.')
+  }
+  if (clip.audioRole && (streams?.audio_count ?? 0) > 1) {
+    fail('This file contains more than one audio stream. Export a copy with just the intended audio stream and the same timing, then choose it as the replacement.')
+  }
   const changes: Pick<TimelineMediaChange, 'kind' | 'detail'>[] = []
   const reportSize = (kind: 'still-size' | 'video-size', declared: { width?: number; height?: number }) => {
     if ((declared.width === undefined || dimensions!.width === declared.width) &&

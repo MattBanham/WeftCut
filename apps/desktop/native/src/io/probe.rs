@@ -127,15 +127,17 @@ pub async fn probe_metadata_scoped(
 }
 
 #[derive(Default, Serialize)]
-pub struct StreamDurations {
+pub struct TimelineStreamFacts {
     video_us: Option<i64>,
     audio_us: Option<i64>,
+    audio_count: usize,
+    video_count: usize,
 }
 
 pub async fn probe_timeline_media_scoped(
     path: &Path,
     cache: &crate::cache::CacheLayout,
-) -> Result<(MediaMetadata, StreamDurations)> {
+) -> Result<(MediaMetadata, TimelineStreamFacts)> {
     Ok(probe_scoped(path, cache).await?.into_metadata_and_streams())
 }
 
@@ -401,7 +403,7 @@ impl RawProbe {
         self.into_metadata_and_streams().0
     }
 
-    fn into_metadata_and_streams(self) -> (MediaMetadata, StreamDurations) {
+    fn into_metadata_and_streams(self) -> (MediaMetadata, TimelineStreamFacts) {
         let container_format = self.format.format_name;
         let format_start_us = self
             .format
@@ -440,17 +442,18 @@ impl RawProbe {
             d
         };
 
-        let mut streams = StreamDurations::default();
+        let mut streams = TimelineStreamFacts::default();
         let mut video = None;
         let mut audio = None;
         for stream in self.streams {
             // Embedded cover art (mp3/m4a/flac/ogg) probes as a video stream
             // with `attached_pic` set. It is neither video evidence nor a
             // duration source — skip it entirely.
-            if let RawStream::Video { disposition, .. } = &stream {
-                if disposition.attached_pic != 0 {
-                    continue;
-                }
+            match &stream {
+                RawStream::Video { disposition, .. } if disposition.attached_pic != 0 => continue,
+                RawStream::Video { .. } => streams.video_count += 1,
+                RawStream::Audio { .. } => streams.audio_count += 1,
+                RawStream::Other => {}
             }
             match stream {
                 RawStream::Video {

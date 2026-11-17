@@ -866,7 +866,28 @@ app.whenReady().then(async () => {
     readFile: (p: string) => fs.readFileSync(p, 'utf8'),
     writeFile: (p: string, t: string) => writeFileAtomic(nodeAtomicWriteIo, p, t),
     mkdirp: (d: string) => { fs.mkdirSync(d, { recursive: true }) },
-    mkdirExclusive: (d: string) => { fs.mkdirSync(d) },
+    mkdirExclusive: (dir: string) => {
+      fs.mkdirSync(dir)
+      const created = fs.lstatSync(dir, { bigint: true })
+      return (written?: { path: string; text: string }) => {
+        const current = fs.lstatSync(dir, { bigint: true, throwIfNoEntry: false })
+        if (!current) return
+        if (!current.isDirectory() || current.dev !== created.dev || current.ino !== created.ino) {
+          throw new Error('The destination was replaced while the project was being created')
+        }
+        if (written) {
+          const file = fs.lstatSync(written.path, { throwIfNoEntry: false })
+          if (file) {
+            if (!file.isFile() || fs.readFileSync(written.path, 'utf8') !== written.text) {
+              throw new Error('The new project file changed during creation')
+            }
+            fs.unlinkSync(written.path)
+          }
+        }
+        // rmdir deliberately leaves any files another process put here.
+        fs.rmdirSync(dir)
+      }
+    },
     copyFile: (s: string, d: string) => fs.copyFileSync(s, d),
     readdir: (d: string) => fs.readdirSync(d) as string[],
     rm: (p: string) => { fs.rmSync(p, { force: true }) },
@@ -937,20 +958,20 @@ app.whenReady().then(async () => {
     commitWorkspace: async (p: string) => {
       const previous = workspaceEvents.current()
       workspaceEvents.beginTransition()
-      motifReader?.workspaceChanged()
-      motifBakes?.reset()
-      // Native commit can schedule a sweep before the incoming actor/catalog
-      // is ready. Protect its existing cache until main has accepted a plan.
-      retainRasterDirectories([path.join(p, 'Cache', 'raster')])
+      let generation: number
       try {
-        const generation = await napiFacade.commitWorkspace(p)
-        workspaceEvents.activate(generation)
-        emitToRenderer('import:queue', [])
+        motifReader?.workspaceChanged()
+        motifBakes?.reset()
+        // Native commit can schedule a sweep before the incoming actor/catalog
+        // is ready. Protect its existing cache until main has accepted a plan.
+        retainRasterDirectories([path.join(p, 'Cache', 'raster')])
+        generation = await napiFacade.commitWorkspace(p)
       } catch (error) {
         if (previous !== null) workspaceEvents.activate(previous)
         motifReader?.workspaceChanged()
         throw error
       }
+      workspaceEvents.activate(generation)
       wsCache = p
       motifReader?.workspaceChanged()
       measureCacheDisk(p)
@@ -958,6 +979,9 @@ app.whenReady().then(async () => {
       // and cannot re-queue itself, and after the commit resolves, because that
       // is the call that installs this workspace's LogBus.
       deferredLog.flush(emitLogEntry)
+      // A notification failure after native activation cannot undo the workspace.
+      try { emitToRenderer('import:queue', []) }
+      catch (error) { console.warn('[workspace] Could not publish the cleared import queue', error) }
     },
     endWorkspace: async () => {
       workspaceEvents.beginTransition()

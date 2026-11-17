@@ -46,8 +46,8 @@ export interface OrchestratorFs {
   writeFile(path: string, text: string): void
   /** create_dir_all equivalent. */
   mkdirp(dir: string): void
-  /** Creates exactly this directory; refuses an occupied target atomically. */
-  mkdirExclusive?(dir: string): void
+  /** Creates exactly this directory and returns a rollback for its own output. */
+  mkdirExclusive?(dir: string): (written?: { path: string; text: string }) => void
   /** Best-effort delete (stale quick proxies); must not throw on a missing file. */
   rm(path: string): void
 }
@@ -79,6 +79,7 @@ export interface OrchestratorDeps {
    *  version — the one on-open event that changes what the next save will write.
    *  Same timing constraint as the two reports above. */
   onSchemaUpgrade?: (report: SchemaUpgradeReport) => void
+  onNewWorkspacePreferenceFailure?: (message: string, error: unknown) => void
 }
 
 export interface SchemaUpgradeReport {
@@ -282,8 +283,11 @@ export async function newWorkspace(
   // Stage and validate the first edit before touching the destination. It is
   // already on disk when the actor publishes the new workspace and its undo.
   const firstEdit = prepareFirstEdit?.(project)
-  if (firstEdit && fs.mkdirExclusive) {
-    try { fs.mkdirExclusive(target) }
+  const file = { path: join(target, PROJECT_FILE), text: serializeProjectToJson(firstEdit?.snapshot ?? project) }
+  let rollback: ReturnType<NonNullable<OrchestratorFs['mkdirExclusive']>> | undefined
+  if (firstEdit) {
+    if (!fs.mkdirExclusive) throw new Error('Creating a project from a timeline requires an exclusive project directory.')
+    try { rollback = fs.mkdirExclusive(target) }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new WorkspaceFailure({ error: 'ProjectFolderExists' })
       throw error
@@ -291,10 +295,32 @@ export async function newWorkspace(
   } else {
     fs.mkdirp(target)
   }
-  fs.writeFile(join(target, PROJECT_FILE), serializeProjectToJson(firstEdit?.snapshot ?? project))
-  await napi.commitWorkspace(target)
+  let written = false
+  try {
+    fs.writeFile(file.path, file.text)
+    written = true
+    await napi.commitWorkspace(target)
+  } catch (error) {
+    try { rollback?.(written ? file : undefined) }
+    catch (cleanupError) {
+      throw new Error('Could not create the project: ' + String(error) +
+        '. Could not clean up the new folder at ' + target + ': ' + String(cleanupError), { cause: error })
+    }
+    throw error
+  }
   actor.replaceState(project, firstEdit)
-  await napi.pushRecent(target, project.metadata.name)
-  await napi.setLastNewProjectParent(args.parentFolder)
+  // The new project is live. Preference failures must not turn a committed
+  // import into an apparent failure or prevent media jobs from being scheduled.
+  for (const [message, update] of [
+    ['The project opened, but the recent-project list could not be updated.', () => napi.pushRecent(target, project.metadata.name)],
+    ['The project opened, but the default parent folder could not be saved.', () => napi.setLastNewProjectParent(args.parentFolder)],
+  ] as const) {
+    try { await update() }
+    catch (error) {
+      if (!firstEdit) throw error
+      if (deps.onNewWorkspacePreferenceFailure) deps.onNewWorkspacePreferenceFailure(message, error)
+      else console.warn(message, error)
+    }
+  }
   return target
 }

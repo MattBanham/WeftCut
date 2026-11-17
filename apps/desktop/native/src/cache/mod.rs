@@ -490,8 +490,13 @@ impl CacheLayout {
     }
     fn create_dirs(&self) -> Result<()> {
         let root = self.current_root();
+        if let Some(parent) = root.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create cache parent {}", parent.display()))?;
+        }
+        let mut created = Vec::new();
         for p in [
-            root.clone(),
+            root,
             self.proxies_dir(),
             self.thumbnails_root(),
             self.waveforms_dir(),
@@ -505,7 +510,19 @@ impl CacheLayout {
             self.shot_stats_dir(),
             self.voiceover_dir(),
         ] {
-            fs::create_dir_all(&p).with_context(|| format!("create cache dir {}", p.display()))?;
+            match fs::create_dir(&p) {
+                Ok(()) => created.push(p),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && p.is_dir() => {}
+                Err(error) => {
+                    // A failed workspace commit must leave its previous cache
+                    // live. Remove only directories this attempt created, and
+                    // leave any files that appeared during setup alone.
+                    for dir in created.iter().rev() {
+                        let _ = fs::remove_dir(dir);
+                    }
+                    return Err(error).with_context(|| format!("create cache dir {}", p.display()));
+                }
+            }
         }
         Ok(())
     }
@@ -937,6 +954,29 @@ mod tests {
         // Idempotent: re-setting to the same workspace is a no-op.
         layout.set_workspace(ws.path()).unwrap();
         assert!(layout.proxies_dir().is_dir());
+    }
+
+    #[test]
+    fn failed_workspace_setup_preserves_existing_files_and_rolls_back_created_cache_dirs() {
+        let boot = TempDir::new().unwrap();
+        let layout = CacheLayout::new(boot.path().to_path_buf());
+        let generation = layout.generation();
+        let ws = TempDir::new().unwrap();
+        let cache = ws.path().join("Cache");
+        fs::create_dir(&cache).unwrap();
+        let collision = cache.join("waveforms");
+        fs::write(&collision, "existing file").unwrap();
+
+        assert!(layout.set_workspace(ws.path()).is_err());
+        assert_eq!(layout.current_root(), boot.path());
+        assert_eq!(layout.generation(), generation);
+        assert_eq!(fs::read_to_string(&collision).unwrap(), "existing file");
+        assert!(!cache.join("proxies").exists());
+        assert!(!cache.join("thumbnails").exists());
+
+        fs::remove_file(collision).unwrap();
+        layout.set_workspace(ws.path()).unwrap();
+        assert!(layout.waveforms_dir().is_dir());
     }
 
     #[test]

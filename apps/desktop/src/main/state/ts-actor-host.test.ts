@@ -64,6 +64,15 @@ describe('createTsActorHost — persistence-route integration', () => {
       writeFile: (p: string, t: string) => { vfs[p] = t },
       rename: (a: string, b: string) => { vfs[b] = vfs[a]!; delete vfs[a] },
       mkdirp: (d: string) => { dirsMade.add(d) },
+      mkdirExclusive: (d: string) => {
+        if (dirsMade.has(d)) throw Object.assign(new Error('Occupied'), { code: 'EEXIST' })
+        dirsMade.add(d)
+        return (written?: { path: string; text: string }) => {
+          if (written && vfs[written.path] === written.text) delete vfs[written.path]
+          if (Object.keys(vfs).some(p => p.startsWith(d + '/'))) throw new Error('Directory is not empty')
+          dirsMade.delete(d)
+        }
+      },
       copyFile: (s: string, d: string) => { vfs[d] = vfs[s]! },
       readdir: (d: string) => Object.keys(vfs).filter((k) => k.startsWith(d + '/') && k.slice(d.length + 1).indexOf('/') === -1).map((k) => k.slice(d.length + 1)),
       rm: (p: string) => { delete vfs[p] },
@@ -92,6 +101,7 @@ describe('createTsActorHost — persistence-route integration', () => {
       fs: memFs,
       join: (...parts: string[]) => parts.join('/').replace(/\/+/g, '/'),
       napi: memNapi,
+      emitLog: vi.fn(),
       compute: { probeMedia: async (_path: string) => '{}', hashMediaSource: async () => 'h', parseSubtitles: async () => '{}', synthesizeSpeechCompute: async () => '{}' },
       enqueueWorkspaceCopy: async () => {},
       readFile: (p: string) => memFs.readFile(p),
@@ -181,6 +191,56 @@ describe('createTsActorHost — persistence-route integration', () => {
         expect(f.host.actor.dispatch('redo', {}).ok).toBe(true)
         expect(f.host.actor.snapshot()).toEqual(imported)
       } finally { f.close() }
+    })
+
+    it.each(['project write', 'workspace commit'])('rolls back a failed %s and permits retry at the same destination', async failedStep => {
+      const f = timelineFixture()
+      try {
+        const before = f.host.actor.snapshot()
+        const preview = async () => await f.host.handleInvoke('project_preview_timeline',
+          { path: f.path, newProject: true }) as TimelineImportPreview
+        const destination = { parentFolder: f.folder, name: 'Lantern Edit' }
+        const target = f.deps.join(f.folder, destination.name)
+        const failure = new Error('Could not finish ' + failedStep)
+        const write = vi.spyOn(f.deps.fs, 'writeFile')
+        const commit = vi.spyOn(f.deps.napi, 'commitWorkspace')
+        if (failedStep === 'project write') {
+          write.mockImplementationOnce(() => { throw failure })
+        } else {
+          commit.mockRejectedValueOnce(failure)
+        }
+
+        await expect(f.host.handleInvoke('project_import_timeline', { id: (await preview()).id, destination })).rejects.toThrow(failure)
+        expect(f.deps.fs.exists(target)).toBe(false)
+        expect(f.deps.fs.exists(f.deps.join(target, 'project.json'))).toBe(false)
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.deps.workspaceDir()).toBeNull()
+        expect(f.copy).not.toHaveBeenCalled()
+
+        await expect(f.host.handleInvoke('project_import_timeline', { id: (await preview()).id, destination })).resolves.toBe(target)
+        expect(f.copy).toHaveBeenCalledOnce()
+      } finally { f.close() }
+    })
+
+    it('reports preference failures without failing the committed import or skipping media jobs', async () => {
+      const f = timelineFixture()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        vi.spyOn(f.deps.napi, 'pushRecent').mockImplementationOnce(() => { throw new Error('Recent list is not writable') })
+        const setParent = vi.spyOn(f.deps.napi, 'setLastNewProjectParent')
+        const { id } = await f.host.handleInvoke('project_preview_timeline', { path: f.path, newProject: true }) as TimelineImportPreview
+        const destination = { parentFolder: f.folder, name: 'Lantern Edit' }
+        const target = f.deps.join(f.folder, destination.name)
+        await expect(f.host.handleInvoke('project_import_timeline', { id, destination })).resolves.toBe(target)
+        expect(f.host.openedProject()?.dir).toBe(target)
+        expect(f.deps.fs.exists(f.deps.join(target, 'project.json'))).toBe(true)
+        expect(setParent).toHaveBeenCalledWith(f.folder)
+        expect(f.deps.emitLog).toHaveBeenCalledWith(expect.objectContaining({
+          level: 'warn', message: expect.stringContaining('recent-project list could not be updated'),
+        }))
+        expect(f.copy).toHaveBeenCalledOnce()
+        expect(f.napiCalls).toContainEqual(expect.objectContaining({ method: 'enqueueJobsForMedia' }))
+      } finally { warn.mockRestore(); f.close() }
     })
 
     it('reviews without writes, cancels without edits, and imports a reusable composition in one undo', async () => {

@@ -19,6 +19,7 @@ export interface TimelineMediaIssue {
   suggestedPaths?: string[]
   proxyPaths?: string[]
   canLeaveGaps?: boolean
+  stalePoolMetadata?: boolean
 }
 
 export interface TimelineMediaChange extends TimelineMediaIssue {
@@ -112,8 +113,21 @@ export interface TimelineImportReport extends TimelineMediaReview {
   compatibilityCounts: { exact: number; converted: number; approximated: number; unsupported: number }
 }
 
+export interface TimelineImportMutedRole {
+  role: string
+  reason: 'muted' | 'solo'
+}
+
+export type TimelineImportStep =
+  | { stage: 'reading' | 'finding-media' | 'checking-edits' | 'committing' }
+  | { stage: 'checking-media' | 'verifying'; done: number; total: number }
+
+export const TIMELINE_IMPORT_PROGRESS_EVENT = 'timeline-import:progress'
+export type TimelineImportProgress = TimelineImportStep & { id: string }
+
 export interface TimelineImportPreview extends TimelineImportReport {
   id: string
+  mutedRoles: TimelineImportMutedRole[]
   current: { width: number; height: number; fps: { num: number; den: number }; sampleRate: number; channels: number } | null
 }
 

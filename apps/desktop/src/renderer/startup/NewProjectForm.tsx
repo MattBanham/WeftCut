@@ -1,15 +1,15 @@
 import { open as openDialog } from "@/bridge/dialog";
 import { documentDir } from "@/bridge/path";
 import { Button } from "@/components/ui/button";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { validateProjectName } from "../../shared/newProject";
-import type { TimelineImportPreview } from "../../shared/timelineImport";
+import type { TimelineImportApprovals, TimelineImportPreview, TimelineProjectDestination } from "../../shared/timelineImport";
 import { AppDialog } from "../components/AppDialog";
 import { AppInput } from "../components/AppInput";
 import { AppNumberField } from "../components/AppNumberField";
 import { AppSelect } from "../components/AppSelect";
-import { projectImportTimeline, projectNewWorkspace, recentsLastNewProjectParent } from "../ipc";
+import { projectNewWorkspace, recentsLastNewProjectParent } from "../ipc";
 import { DEFAULT_CANVAS, FPS_OPTIONS, RESOLUTION_PRESETS, canvasSizeError, fpsLabel, resolutionLabel } from "./canvasPresets";
 import { describeCreateError } from "./openError";
 
@@ -26,14 +26,20 @@ export function NewProjectForm({
   onCancel,
   onCreated,
   onReviewTimeline,
-  timeline,
+  timelineImport,
 }: {
   onCancel: () => void;
   onCreated: () => void;
   onReviewTimeline?: () => Promise<void>;
-  timeline?: TimelineImportPreview;
+  timelineImport?: {
+    preview: TimelineImportPreview;
+    submit: (destination: TimelineProjectDestination, approvals: TimelineImportApprovals) => Promise<string | null>;
+    progress?: ReactNode;
+    cancelProgress?: (() => void) | undefined;
+  };
 }) {
   const { t } = useTranslation();
+  const timeline = timelineImport?.preview;
   const [name, setName] = useState(timeline?.name ?? "");
   const [parentFolder, setParentFolder] = useState<string>("");
   /// Size and rate are authored separately, exactly as Settings › Canvas does it:
@@ -111,14 +117,15 @@ export function NewProjectForm({
     setBusy(true);
     setSubmitError(null);
     try {
-      if (timeline) {
-        await projectImportTimeline(timeline.id, "fit", { parentFolder, name: name.trim() }, {
+      if (timeline && timelineImport) {
+        const created = await timelineImport.submit({ parentFolder, name: name.trim() }, {
           acceptMediaChanges: timeline.mediaChanges.length > 0 || timeline.outputColorChange !== null,
           acceptOmittedEffects: timeline.omittedEffects.length > 0,
           acceptTitleGaps: timeline.omittedTitles.length > 0,
           acceptShortAudioOmissions: timeline.omittedShortAudio.length > 0,
           acceptMediaGaps: timeline.mediaGaps.length > 0,
         });
+        if (created === null) return;
       } else {
         await projectNewWorkspace({
           parentFolder,
@@ -136,9 +143,10 @@ export function NewProjectForm({
       // The refusal carries no path — main composed the same target this dialog
       // is already previewing — so hand the copy map that, not a parsed-back one.
       setSubmitError(describeCreateError(e, previewPath ?? "", t));
+    } finally {
       setBusy(false);
     }
-  }, [canCreate, parentFolder, name, size, fps, previewPath, t, onCreated, timeline]);
+  }, [canCreate, parentFolder, name, size, fps, previewPath, t, onCreated, timeline, timelineImport]);
 
   return (
     <AppDialog
@@ -283,8 +291,10 @@ export function NewProjectForm({
           <p className="new-project-error" role="alert">{submitError}</p>
         )}
 
+        {timelineImport?.progress}
         <footer className="new-project-actions">
-          <Button size="lg" onClick={onCancel} disabled={busy}>
+          <Button size="lg" onClick={busy ? timelineImport?.cancelProgress : onCancel}
+            disabled={busy && !timelineImport?.cancelProgress}>
             {t("new_project.cancel")}
           </Button>
           {onReviewTimeline && submitError && (

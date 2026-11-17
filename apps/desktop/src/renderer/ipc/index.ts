@@ -908,14 +908,15 @@ export function projectListTimelineSequences(path: string): Promise<TimelineSequ
 export function projectPreviewTimeline(
   path: string, relinkDirectory?: string, sequenceIndex?: number, newProject = false,
   replacements?: TimelineMediaReplacement[], documentId?: string, omitEffects = false, leaveTitleGaps = false, revalidateReplacements = false, leaveMediaGaps?: string[],
+  requestId?: string,
 ): Promise<TimelinePreflight> {
   return invoke<TimelinePreflight>("project_preview_timeline", {
-    path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps, revalidateReplacements, leaveMediaGaps,
+    path, relinkDirectory, sequenceIndex, newProject, replacements, documentId, omitEffects, leaveTitleGaps, revalidateReplacements, leaveMediaGaps, requestId,
   });
 }
 
-export function projectDiscardTimelinePreview(id: string): Promise<null> {
-  return invoke<null>("project_discard_timeline_preview", { id });
+export function projectDiscardTimelinePreview(id: string): Promise<boolean> {
+  return invoke<boolean>("project_discard_timeline_preview", { id });
 }
 
 export function projectImportTimeline(

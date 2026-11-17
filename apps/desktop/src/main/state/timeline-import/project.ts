@@ -3,9 +3,11 @@ import { constants } from 'node:fs'
 import { lstat, open, opendir, realpath } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { setImmediate as yieldToMain } from 'node:timers/promises'
 import { canvasSizeError } from '../../../shared/newProject'
 import type { ExactTime } from '../../../shared/timeMapping'
 import { affineTimeMap, ceilTime, compareTime, divideTime, exactTime, floorTime, multiplyTime, roundTime, subtractTime } from '../../../renderer/timeMapping'
+import { roleAudible } from '../../../renderer/eval'
 import { splitExact, writeSourceWindow } from '../../../renderer/layerTiming'
 import { ffprobeColorToWebCodecs } from '../../../renderer/render/decoder/ffprobeColorSpace'
 import { createActor } from '../actor'
@@ -20,7 +22,7 @@ import { sourceInstantHibernating, sourceInstantTimelineUs } from '../summary'
 import { validate } from '../validate'
 import { FCPXML_LIMITS, inspectFcpxml, listFcpxmlSequences, TimelineEditFailure } from './fcpxml'
 import type { ImportTimeline, TimelineClip, TimelineMediaReference, TimelineSourceWindow } from './timeline'
-import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaGap, TimelineMediaIssue, TimelineMediaReplacement, TimelineMediaReview, TimelineSequenceList } from '../../../shared/timelineImport'
+import type { TimelineImportReport, TimelineCompatibilityItem, TimelineMediaChange, TimelineMediaGap, TimelineMediaIssue, TimelineMediaReplacement, TimelineMediaReview, TimelineSequenceList, TimelineImportMutedRole, TimelineImportStep } from '../../../shared/timelineImport'
 import { originalMediaPath } from './mediaPath'
 import { MAX_VIDEO_IN_POINTS, readVideoInPoints } from './videoTiming'
 
@@ -110,7 +112,7 @@ function comparableFilename(name: string): string {
   return name.normalize('NFC').toLowerCase()
 }
 
-async function findRelinkCandidates(directory: string, wanted: ReadonlySet<string>): Promise<{
+async function findRelinkCandidates(directory: string, wanted: ReadonlySet<string>, assertCurrent: () => void): Promise<{
   exact: Map<string, string>; suggestions: Map<string, string[]>
 }> {
   const root = await realpath(directory)
@@ -121,6 +123,7 @@ async function findRelinkCandidates(directory: string, wanted: ReadonlySet<strin
   const maxSuggestions = 5
   let scanned = 0
   for await (const entry of entries) {
+    assertCurrent()
     if (++scanned > FCPXML_LIMITS.directoryEntries) throw new Error('The relink folder contains too many entries. Choose a smaller folder containing the original files')
     if (!entry.isFile() || entry.isSymbolicLink()) continue
     const key = comparableFilename(entry.name)
@@ -195,7 +198,7 @@ function replacementSelection(replacements: unknown, originals: ReadonlyMap<stri
 export async function prepareTimelineProject(
   path: unknown, destination: string | null, idGen: IdGen, deps: MediaDeps, assertCurrent: () => void,
   relinkDirectory?: unknown, sequenceIndex?: unknown, existing?: Project, replacements?: unknown, expectedDocument?: unknown, omitEffects = false, leaveTitleGaps = false,
-  revalidateReplacements = false, leaveMediaGaps?: unknown,
+  revalidateReplacements = false, leaveMediaGaps?: unknown, reportProgress?: (step: TimelineImportStep) => void,
 ): Promise<{ project: Project; report: TimelineImportReport; assertDocumentUnchanged: () => Promise<void> }> {
   const { inputFile, extension } = await resolveTimelineInput(path)
   if (sequenceIndex !== undefined &&
@@ -221,19 +224,23 @@ export async function prepareTimelineProject(
   const actor = createActor({ initial, idGen, clock: () => new Date().toISOString() })
   // Stage registration through the normal importer against the destination's
   // pool. Disk jobs wait for confirmation; cancellation discards this actor.
-  const streamFacts = new Map<string, TimelineMediaProbe['streams']>()
+  const probes = new Map<string, { item: MediaItem; streams?: TimelineMediaProbe['streams'] }>()
   const importer = createMediaImporter({
     ...deps, actor, workspaceDir: () => destination,
     compute: {
       ...deps.compute,
       async probeMedia(path) {
-        if (!deps.inspectMedia) return deps.compute.probeMedia(path)
+        if (!deps.inspectMedia) {
+          const json = await deps.compute.probeMedia(path)
+          probes.set(path, { item: JSON.parse(json) as MediaItem })
+          return json
+        }
         const { item, streams } = await deps.inspectMedia(path)
         if (!Number.isSafeInteger(streams?.audio_count) || streams.audio_count < 0 ||
             !Number.isSafeInteger(streams.video_count) || streams.video_count < 0) {
           throw new Error('WeftCut could not verify the number of streams in this file. Restart the app and review the timeline again.')
         }
-        streamFacts.set(path, streams)
+        probes.set(path, { item, streams })
         return JSON.stringify(item)
       },
     },
@@ -343,11 +350,13 @@ export async function prepareTimelineProject(
     return importer.checkPath(actual)
   }
 
+  reportProgress?.({ stage: 'finding-media' })
   const resolved = new Map<string, { path: string; choice: 'original' | 'selected' | 'folder' }>()
   const offline: TimelineMediaReference[] = []
   const missing: TimelineMediaIssue[] = []
   const checkedPaths = new Map<string, Promise<string>>()
   for (const { asset, placements } of originals.values()) {
+    assertCurrent()
     if (placements === 0) continue
     const replacement = selected.get(asset.ref)
     const candidate = replacement ?? (asset.local ? asset.path : undefined)
@@ -367,9 +376,10 @@ export async function prepareTimelineProject(
     offline.push(asset)
   }
   const candidates = relinkRoot && offline.length
-    ? await findRelinkCandidates(relinkRoot, new Set(offline.map(asset => asset.filename)))
+    ? await findRelinkCandidates(relinkRoot, new Set(offline.map(asset => asset.filename)), assertCurrent)
     : undefined
   for (const asset of offline) {
+    assertCurrent()
     const candidate = candidates?.exact.get(asset.filename)
     if (candidate !== undefined) {
       const checked = checkedPaths.get(candidate) ?? checkFile(candidate)
@@ -423,6 +433,9 @@ export async function prepareTimelineProject(
   const mediaIds = new Map<string, string>()
   const failed: TimelineMediaIssue[] = []
   const importedPaths = new Map<string, ReturnType<typeof importer.ensureImported>>()
+  const totalPaths = new Set([...resolved.values()].map(source => source.path)).size
+  let checkedPathsCount = 0
+  reportProgress?.({ stage: 'checking-media', done: 0, total: totalPaths })
   const mediaVersions = new Map<string, string>()
   const requireReviewedVersion = async (path: string) => {
     if (await timelineMediaVersion(path) !== mediaVersions.get(path)) {
@@ -443,9 +456,15 @@ export async function prepareTimelineProject(
   for (const [ref, { path: mediaPath, choice }] of resolved) {
     assertCurrent()
     const { asset, label } = originals.get(ref)!
-    try {
-      const imported = importedPaths.get(mediaPath) ?? importReviewedFile(mediaPath)
+    let imported = importedPaths.get(mediaPath)
+    if (!imported) {
+      imported = importReviewedFile(mediaPath).finally(() => {
+        assertCurrent()
+        reportProgress?.({ stage: 'checking-media', done: ++checkedPathsCount, total: totalPaths })
+      })
       importedPaths.set(mediaPath, imported)
+    }
+    try {
       const result = await imported
       if (result.disposition === 'relinked' && existing?.media_pool[result.mediaId]) {
         throw new Error('An existing pool item needs repair. Relink it through the media pool before reviewing this timeline')
@@ -461,6 +480,7 @@ export async function prepareTimelineProject(
     }
   }
   assertCurrent()
+  reportProgress?.({ stage: 'checking-edits' })
   const snapshot = actor.snapshot()
   const root = rootComposition(snapshot)
   const itemOf = (clip: TimelineClip) => snapshot.media_pool[mediaIds.get(clip.asset.ref)!]!
@@ -518,7 +538,11 @@ export async function prepareTimelineProject(
     }
     return size
   }
-  for (const clip of retained) {
+  for (const [index, clip] of retained.entries()) {
+    if (index % 128 === 0) {
+      await yieldToMain()
+      assertCurrent()
+    }
     const item = itemOf(clip)
     if (!item) continue
     try {
@@ -531,7 +555,12 @@ export async function prepareTimelineProject(
         assertCurrent()
       }
       const played = omittedAudio.has(clip) ? { ...clip, audioRole: null } : clip
-      const result = validateSource(played, item, streamFacts.get(reviewedPath),
+      const probe = probes.get(reviewedPath)
+      if (probe && existing?.media_pool[item.id]) {
+        const changed = changedPoolMetadata(item, probe.item, played)
+        if (changed.length) throw new StalePoolMetadata(changed)
+      }
+      const result = validateSource(played, item, probe?.streams,
         actualFrameUs, imageSizes.get(item.id))
       sourceEnds.set(clip, result)
       for (const { kind, detail } of result.changes) {
@@ -544,7 +573,11 @@ export async function prepareTimelineProject(
       const key = JSON.stringify([clip.asset.ref, detail])
       const known = incompatibilities.get(key)
       if (known) known.clips.push(clip)
-      else incompatibilities.set(key, { issue: replacementIssue(clip.asset, detail, selected.get(clip.asset.ref)), clips: [clip] })
+      else {
+        const issue = replacementIssue(clip.asset, detail, selected.get(clip.asset.ref))
+        if (error instanceof StalePoolMetadata) issue.stalePoolMetadata = true
+        incompatibilities.set(key, { issue, clips: [clip] })
+      }
     }
   }
   const clipsByAsset = new Map<string, TimelineClip[]>()
@@ -984,6 +1017,69 @@ function newLayer(idGen: IdGen, clip: TimelineClip, sourceIn: ExactTime, sourceO
   }
   return { id: idGen(), label: clip.label ?? null, t_start_us: start, t_end_us: end,
     enabled: clip.enabled ?? true, locked: false, metadata: {}, params, effects: [] }
+}
+
+class StalePoolMetadata extends Error {
+  constructor(changed: string[]) {
+    super('An existing Media Pool entry disagrees with the file’s current ' + changed.join(', ') +
+      '. If the entry is unused, remove it from the Media Pool and reimport the file. If existing edits use it, ' +
+      'review the timeline as a new project or choose a different compatible file.')
+  }
+}
+
+function changedPoolMetadata(held: MediaItem, fresh: MediaItem, clip: TimelineClip): string[] {
+  const saved = held.metadata
+  const found = fresh.metadata
+  const changes: string[] = []
+  if (held.kind !== fresh.kind) changes.push('media type')
+  if (!clip.asset.stillImage && (saved.duration_us !== found.duration_us ||
+      (saved.start_pts_us ?? null) !== (found.start_pts_us ?? null))) changes.push('source timing')
+
+  if (clip.hasVideo) {
+    const a = saved.video
+    const b = found.video
+    if ((a?.width ?? null) !== (b?.width ?? null) || (a?.height ?? null) !== (b?.height ?? null)) changes.push('dimensions')
+    if (!clip.asset.stillImage) {
+      const rate = (video: typeof a) => video?.fps_num && video.fps_den ? video.fps_num / video.fps_den : null
+      if (rate(a) !== rate(b)) changes.push('frame rate')
+      if ((a?.start_pts_us ?? null) !== (b?.start_pts_us ?? null)) changes.push('video start time')
+      const tags = ['color_matrix', 'color_primaries', 'color_transfer', 'color_range'] as const
+      if (tags.some(tag => (a?.[tag] ?? null) !== (b?.[tag] ?? null))) changes.push('color information')
+    }
+  }
+  if (clip.audioRole) {
+    if ((saved.audio?.sample_rate ?? null) !== (found.audio?.sample_rate ?? null) ||
+        (saved.audio?.channels ?? null) !== (found.audio?.channels ?? null)) changes.push('audio format')
+    if ((saved.audio?.start_pts_us ?? null) !== (found.audio?.start_pts_us ?? null)) changes.push('audio start time')
+  }
+  return changes
+}
+
+export function timelineMutedRoles(imported: Project, existing: Project): TimelineImportMutedRole[] {
+  const anySolo = Object.values(existing.audio_roles).some(mix => mix.solo)
+  const muted = new Map<string, TimelineImportMutedRole>()
+  const visited = new Set<string>()
+  function visit(composition: Composition) {
+    if (visited.has(composition.id)) return
+    visited.add(composition.id)
+    for (const track of composition.tracks) {
+      if (!track.enabled) continue
+      for (const layer of track.layers) {
+        if (!layer.enabled) continue
+        const params = layer.params
+        if (params.kind === 'CompositionRef') {
+          visit(imported.compositions[params.composition]!)
+        } else if (params.kind === 'Audio' && !params.mute) {
+          const mix = existing.audio_roles[params.role]
+          if (!roleAudible(mix?.muted ?? false, mix?.solo ?? false, anySolo)) {
+            muted.set(params.role, { role: params.role, reason: mix?.muted ? 'muted' : 'solo' })
+          }
+        }
+      }
+    }
+  }
+  visit(rootComposition(imported))
+  return [...muted.values()]
 }
 
 function validateSource(clip: TimelineClip, item: MediaItem, streams: TimelineMediaProbe['streams'] | undefined,

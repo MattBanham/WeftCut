@@ -1174,11 +1174,12 @@ app.whenReady().then(async () => {
     compute: computeFacade,
     createTimelineImageCheck,
     timelineReviewCompute: {
-      async inspectMedia(p, startup) {
-        const generation = startup ? undefined : workspaceEvents.requireCurrent()
-        return JSON.parse(await backend!.inspectTimelineMedia(p, false, generation)) as TimelineMediaProbe
+      begin: (id, startup) => backend!.beginTimelineMediaRead(id, startup ? undefined : workspaceEvents.requireCurrent()),
+      end: (id) => backend!.endTimelineMediaRead(id),
+      async inspectMedia(p, id) {
+        return JSON.parse(await backend!.inspectTimelineMedia(p, false, id)) as TimelineMediaProbe
       },
-      hashMediaSource: (p) => backend!.inspectTimelineMedia(p, true),
+      hashMediaSource: (p, id) => backend!.inspectTimelineMedia(p, true, id),
     },
     enqueueWorkspaceCopy: (id, p) => backend!.enqueueWorkspaceCopy(id, p, workspaceEvents.requireCurrent()),
     readFile: (p) => fs.readFileSync(p, 'utf8'),

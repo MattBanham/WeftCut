@@ -1066,11 +1066,42 @@ test('imports into the current project as one undoable Group without replacing i
       dialog.showSaveDialog = async () => { throw new Error('Unexpected Save As dialog') }
     }, { source })
 
-    await page.locator('.menu-trigger').filter({ hasText: /^File$/ }).click()
-    await page.getByRole('menuitem', { name: 'Import FCPXML…' }).click()
-    await page.getByRole('button', { name: 'Choose FCPXML file…' }).click()
+    await page.evaluate(() => {
+      const state = globalThis as typeof globalThis & {
+        __releaseTimelinePreview?: () => void
+        __weftcutE2EBackendInvokeInterceptor?: (cmd: string, args: unknown, next: (cmd: string, args: unknown) => Promise<unknown>) => Promise<unknown>
+      }
+      const pending = new Promise<void>(resolve => { state.__releaseTimelinePreview = resolve })
+      state.__weftcutE2EBackendInvokeInterceptor = async (cmd, args, next) => {
+        const result = await next(cmd, args)
+        if (cmd === 'project_preview_timeline') await pending
+        return result
+      }
+    })
+    await beginImport(page)
+    const preparing = page.getByRole('dialog', { name: 'Preparing timeline import' })
+    await expect(preparing.getByRole('status')).toHaveText('Checking edits and source timing…')
+    await preparing.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(preparing.getByRole('status')).toHaveText('Cancelling timeline import…')
+    await page.evaluate(() => {
+      const state = globalThis as typeof globalThis & {
+        __releaseTimelinePreview?: () => void
+        __weftcutE2EBackendInvokeInterceptor?: unknown
+      }
+      state.__releaseTimelinePreview?.()
+      delete state.__releaseTimelinePreview
+      delete state.__weftcutE2EBackendInvokeInterceptor
+    })
+    await expect(preparing).toHaveCount(0)
     const review = page.getByRole('dialog', { name: 'Review timeline import' })
+    await expect(review).toHaveCount(0)
+    expect((await rootSummary<ProjectSummary>(page)).layer_count).toBe(0)
+
+    await invokeCmd(page, 'update_role_flags', { role: 'music', patch: { solo: true } })
+    await beginImport(page)
     await expect(review).toContainText('Compare project settings')
+    await expect(review.getByRole('region', { name: 'Current project mixer' }))
+      .toContainText(/Imported Dialogue audio will be silent.*another role is soloed/)
     await expect(review.getByText(/1920 × 1080/)).toBeVisible()
     await review.getByRole('button', { name: 'Cancel', exact: true }).click()
     await expect(review).toHaveCount(0)

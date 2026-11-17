@@ -22,7 +22,7 @@ import { ExportJobs } from '../exportJobs'
 import { autosaveMaxWaitMs } from './autosave'
 import { rootComposition } from './model'
 import { serializeProjectToJson } from './persistence'
-import type { TimelineImportPreview, TimelineMediaBlocked } from '../../shared/timelineImport'
+import { TIMELINE_IMPORT_PROGRESS_EVENT, type TimelineImportPreview, type TimelineMediaBlocked } from '../../shared/timelineImport'
 import { errno } from './__tests__/fixtures/memAtomicIo'
 import { settleQuitSave } from '../quitSave'
 import { SAVE_STATUS_CHANNEL, SAVE_STATUS_EVENT, type SaveStatus } from '../../shared/save-status'
@@ -241,6 +241,103 @@ describe('createTsActorHost — persistence-route integration', () => {
         expect(f.copy).toHaveBeenCalledOnce()
         expect(f.napiCalls).toContainEqual(expect.objectContaining({ method: 'enqueueJobsForMedia' }))
       } finally { warn.mockRestore(); f.close() }
+    })
+
+    it('blocks stale pooled timing and offers review in a new project without changing the pool', async () => {
+      const f = timelineFixture()
+      try {
+        await f.host.handleInvoke('project_new_workspace', { parentFolder: '/projects', name: 'Existing',
+          width: 320, height: 240, fpsNum: 30, fpsDen: 1 })
+        const probe = f.deps.compute.probeMedia
+        f.deps.compute.probeMedia = async path => {
+          const item = JSON.parse(await probe(path))
+          item.metadata.video.fps_num = 25
+          return JSON.stringify(item)
+        }
+        await f.host.handleInvoke('import_media', { path: f.source })
+        f.deps.compute.probeMedia = probe
+        const before = f.host.actor.snapshot()
+
+        const blocked = await f.host.handleInvoke('project_preview_timeline', { path: f.path })
+        expect(blocked).toMatchObject({ kind: 'media-blocked', issues: [
+          { assetRef: 'a', stalePoolMetadata: true, detail: expect.stringMatching(/frame rate.*new project/) },
+        ] })
+        expect(f.host.actor.snapshot()).toBe(before)
+        const fresh = await f.host.handleInvoke('project_preview_timeline', { path: f.path, newProject: true })
+        expect(fresh).toMatchObject({ current: null, videoClips: 1 })
+      } finally { f.close() }
+    })
+
+    it('reports when the destination mixer mutes or solos out imported dialogue', async () => {
+      const f = timelineFixture()
+      try {
+        writeFileSync(f.path, readFileSync(f.path, 'utf8').replace('hasVideo="1"', 'hasVideo="1" hasAudio="1"'))
+        const probe = f.deps.compute.probeMedia
+        f.deps.compute.probeMedia = async path => {
+          const item = JSON.parse(await probe(path))
+          item.metadata.audio = { channels: 2, sample_rate: 48000 }
+          return JSON.stringify(item)
+        }
+        await f.host.handleInvoke('project_new_workspace', { parentFolder: '/projects', name: 'Existing',
+          width: 320, height: 240, fpsNum: 30, fpsDen: 1 })
+        const review = (newProject = false) => f.host.handleInvoke('project_preview_timeline', { path: f.path, newProject })
+        expect(await review()).toMatchObject({ audioClips: 1, mutedRoles: [] })
+        await f.host.handleInvoke('update_role_flags', { role: 'music', patch: { solo: true } })
+        expect(await review()).toMatchObject({ mutedRoles: [{ role: 'dialogue', reason: 'solo' }] })
+        await f.host.handleInvoke('update_role_flags', { role: 'dialogue', patch: { muted: true } })
+        expect(await review()).toMatchObject({ mutedRoles: [{ role: 'dialogue', reason: 'muted' }] })
+        expect(await review(true)).toMatchObject({ mutedRoles: [] })
+      } finally { f.close() }
+    })
+
+    it('cancels a preview by its request ID before a ready review can be published', async () => {
+      const f = timelineFixture()
+      try {
+        const actualProbe = f.deps.compute.probeMedia
+        let resume!: () => void
+        const waiting = new Promise<void>(resolve => { resume = resolve })
+        const probe = vi.spyOn(f.deps.compute, 'probeMedia').mockImplementationOnce(async path => {
+          await waiting
+          return actualProbe(path)
+        })
+        const before = f.host.actor.snapshot()
+        const requestId = 'preflight-test'
+        const pending = expect(f.host.handleInvoke('project_preview_timeline',
+          { path: f.path, newProject: true, requestId })).rejects.toThrow(/review expired/)
+        await vi.waitFor(() => expect(probe).toHaveBeenCalledOnce())
+        expect(f.sent).toContainEqual({ event: TIMELINE_IMPORT_PROGRESS_EVENT,
+          payload: { id: requestId, stage: 'checking-media', done: 0, total: 1 } })
+        expect(await f.host.handleInvoke('project_discard_timeline_preview', { id: 'different' })).toBe(false)
+        expect(await f.host.handleInvoke('project_discard_timeline_preview', { id: requestId })).toBe(true)
+        resume()
+        await pending
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.napiCalls).toEqual([])
+        expect(f.copy).not.toHaveBeenCalled()
+      } finally { f.close() }
+    })
+
+    it('cancels confirmation before a startup project or media job is created', async () => {
+      const f = timelineFixture()
+      try {
+        const before = f.host.actor.snapshot()
+        const { id } = await f.host.handleInvoke('project_preview_timeline', { path: f.path, newProject: true }) as TimelineImportPreview
+        let resume!: (hash: string) => void
+        const waiting = new Promise<string>(resolve => { resume = resolve })
+        const hash = vi.spyOn(f.deps.compute, 'hashMediaSource').mockReturnValueOnce(waiting)
+        const destination = { parentFolder: f.folder, name: 'Cancelled Edit' }
+        const pending = expect(f.host.handleInvoke('project_import_timeline', { id, destination })).rejects.toThrow(/review expired/)
+        await vi.waitFor(() => expect(hash).toHaveBeenCalledOnce())
+        expect(f.sent).toContainEqual({ event: TIMELINE_IMPORT_PROGRESS_EVENT,
+          payload: { id, stage: 'verifying', done: 0, total: 1 } })
+        expect(await f.host.handleInvoke('project_discard_timeline_preview', { id })).toBe(true)
+        resume('h')
+        await pending
+        expect(f.host.actor.snapshot()).toBe(before)
+        expect(f.deps.fs.exists(f.deps.join(f.folder, destination.name))).toBe(false)
+        expect(f.napiCalls).toEqual([])
+        expect(f.copy).not.toHaveBeenCalled()
+      } finally { f.close() }
     })
 
     it('reviews without writes, cancels without edits, and imports a reusable composition in one undo', async () => {

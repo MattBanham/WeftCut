@@ -44,9 +44,12 @@ import { playheadView } from '../mcp/playheadView'
 import type { WorkspaceStore } from '../workspace'
 import { ExportJobError } from '../exportJobs'
 import { TimelineEditFailure } from './timeline-import/fcpxml'
-import { listTimelineSequences, prepareTimelineProject, timelineMediaVersion, TimelineMediaFailure, type TimelineMediaProbe } from './timeline-import/project'
+import { listTimelineSequences, prepareTimelineProject, timelineMediaVersion, timelineMutedRoles, TimelineMediaFailure, type TimelineMediaProbe } from './timeline-import/project'
 import type { TimelineImageCheck } from '../timelineImageCheck'
-import type { TimelineEditBlocked, TimelineImportPreview, TimelineMediaBlocked, TimelineProjectDestination } from '../../shared/timelineImport'
+import {
+  TIMELINE_IMPORT_PROGRESS_EVENT, type TimelineEditBlocked, type TimelineImportPreview,
+  type TimelineImportProgress, type TimelineImportStep, type TimelineMediaBlocked, type TimelineProjectDestination,
+} from '../../shared/timelineImport'
 import { validateProjectName } from '../../shared/newProject'
 import { WorkspaceFailure } from '../../shared/workspaceErrors'
 
@@ -84,8 +87,11 @@ export interface TsActorHostDeps {
   napi: WorkspaceNapi
   /** Rust compute facade for the native-compute → TS-write hybrids. */
   compute: ComputeNapi
-  timelineReviewCompute?: Pick<ComputeNapi, 'hashMediaSource'> & {
-    inspectMedia(path: string, startup: boolean): Promise<TimelineMediaProbe>
+  timelineReviewCompute?: {
+    begin(id: string, startup: boolean): void
+    end(id: string): void
+    inspectMedia(path: string, id: string): Promise<TimelineMediaProbe>
+    hashMediaSource(path: string, id: string): Promise<string>
   }
   createTimelineImageCheck?: () => TimelineImageCheck
   /** Queue the background workspace-copy job (Backend.enqueueWorkspaceCopy). */
@@ -510,7 +516,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
 
   // Serialize all cache-root/session changes, including Save As and Close.
   let persistenceTail: Promise<unknown> = Promise.resolve()
-  let timelineReviewId: string | null = null
+  let timelineRead: { id: string; requestId: string; stop(): void } | null = null
   let timelineReview: {
     preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
     assertCurrent: () => void
@@ -518,8 +524,14 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
     startup: boolean
   } | null = null
   function discardTimelineReview() {
-    timelineReviewId = null
+    const read = timelineRead
+    timelineRead = null
     timelineReview = null
+    read?.stop()
+  }
+  function reportTimelineProgress(id: string, step: TimelineImportStep) {
+    try { deps.send(TIMELINE_IMPORT_PROGRESS_EVENT, { id, ...step } satisfies TimelineImportProgress) }
+    catch (error) { console.warn('[timeline import] Could not publish progress', error) }
   }
   /** The outgoing project's flush may fail without blocking the replacement
    *  only when nothing is lost by it: nothing of it is unsaved, or `keepsEdits`
@@ -970,30 +982,43 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         const dir = startup ? null : opened!.dir
         const original = actor.snapshot()
         const id = idGen()
-        timelineReviewId = id
-        timelineReview = null
-        const assertSession = captureImportSession(hybridDeps)
-        const assertCurrent = () => {
-          assertSession()
-          if (quitting || workspaceTransitions > 0 || timelineReviewId !== id) throw new Error('The timeline review expired. Review the timeline again')
-        }
+        const requestId = typeof args.requestId === 'string' && args.requestId.length <= 64 ? args.requestId : id
+        discardTimelineReview()
         const makeImageCheck = deps.createTimelineImageCheck
         let imageCheck: TimelineImageCheck | undefined
         const reviewCompute = deps.timelineReviewCompute
+        const stop = () => {
+          reviewCompute?.end(id)
+          imageCheck?.close()
+          imageCheck = undefined
+        }
+        const read = { id, requestId, stop }
+        timelineRead = read
+        const assertSession = captureImportSession(hybridDeps)
+        const assertCurrent = () => {
+          assertSession()
+          if (quitting || workspaceTransitions > 0 || timelineRead !== read) throw new Error('The timeline review expired. Review the timeline again')
+        }
+        const progress = (step: TimelineImportStep) => {
+          assertCurrent()
+          reportTimelineProgress(requestId, step)
+        }
         const media = {
           ...hybridDeps,
           compute: {
             probeMedia: deps.compute.probeMedia,
-            hashMediaSource: (startup ? reviewCompute : undefined)?.hashMediaSource ?? deps.compute.hashMediaSource,
+            hashMediaSource: reviewCompute ? (path: string) => reviewCompute.hashMediaSource(path, id) : deps.compute.hashMediaSource,
           },
-          inspectMedia: reviewCompute && ((path: string) => reviewCompute.inspectMedia(path, startup)),
+          inspectMedia: reviewCompute && ((path: string) => reviewCompute.inspectMedia(path, id)),
           inspectImage: makeImageCheck && ((path: string) => (imageCheck ??= makeImageCheck()).inspect(path)),
         }
         let preparation: Awaited<ReturnType<typeof prepareTimelineProject>>
         try {
+          reviewCompute?.begin(id, startup)
+          progress({ stage: 'reading' })
           preparation = await prepareTimelineProject(args.path, dir, idGen, media, assertCurrent,
             args.relinkDirectory, args.sequenceIndex, startup ? undefined : original, args.replacements, args.documentId, args.omitEffects === true,
-            args.leaveTitleGaps === true, args.revalidateReplacements === true, args.leaveMediaGaps)
+            args.leaveTitleGaps === true, args.revalidateReplacements === true, args.leaveMediaGaps, progress)
         } catch (error) {
           assertCurrent()
           if (error instanceof TimelineEditFailure || error instanceof TimelineMediaFailure) {
@@ -1007,25 +1032,27 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           }
           throw error
         } finally {
-          imageCheck?.close()
+          stop()
         }
         assertCurrent()
         if (actor.snapshot() !== original) throw new Error('The current project changed during import review. Review again')
         timelineReview = { preparation, assertCurrent, original, startup }
         const current = rootComposition(original)
-        return { id, ...preparation.report, current: startup ? null : {
+        return { id, ...preparation.report, mutedRoles: startup ? [] : timelineMutedRoles(preparation.project, original), current: startup ? null : {
           width: current.width, height: current.height, fps: current.fps,
           sampleRate: current.sample_rate, channels: current.channels,
         } } satisfies TimelineImportPreview
       }
       case 'discardTimelinePreview':
-        if (args.id === timelineReviewId) discardTimelineReview()
-        return null
+        if (!timelineRead || (args.id !== timelineRead.id && args.id !== timelineRead.requestId)) return false
+        discardTimelineReview()
+        return true
       case 'importTimeline': {
         if (quitting || workspaceTransitions > 0) throw new Error('Wait for the current project operation to finish')
         deps.exportJobs?.assertWritable()
         const review = timelineReview
-        if (!review || args.id !== timelineReviewId) throw new Error('The timeline review expired. Review the timeline again')
+        const read = timelineRead
+        if (!review || !read || args.id !== read.id) throw new Error('The timeline review expired. Review the timeline again')
         const { preparation: { project, report, assertDocumentUnchanged }, assertCurrent, original, startup } = review
         assertCurrent()
         if ((report.mediaChanges.length || report.outputColorChange) && args.acceptMediaChanges !== true) {
@@ -1062,23 +1089,33 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
         if (actor.snapshot() !== original) {
           throw new Error('The current project changed during review. Review the import again')
         }
-        const compute = (startup ? deps.timelineReviewCompute : undefined) ?? deps.compute
+        const reviewCompute = deps.timelineReviewCompute
+        const hashSource = reviewCompute ? (path: string) => reviewCompute.hashMediaSource(path, read.id) : deps.compute.hashMediaSource
         const checkedVersions = new Map<string, string>()
         const staleMedia = () => new Error('Original media changed or became unreadable after review. Review the timeline again')
-        for (const item of Object.values(project.media_pool)) {
-          const version = await timelineMediaVersion(item.path_abs)
-          assertCurrent()
-          if (version === null) throw staleMedia()
-          let hash: string
-          try { hash = await compute.hashMediaSource(item.path_abs) } catch { throw staleMedia() }
-          assertCurrent()
-          if (hash !== item.file_hash_blake3) throw staleMedia()
-          checkedVersions.set(item.path_abs, version)
-        }
-        await assertDocumentUnchanged()
-        for (const [path, version] of checkedVersions) {
-          if (await timelineMediaVersion(path) !== version) throw staleMedia()
-          assertCurrent()
+        const items = Object.values(project.media_pool)
+        try {
+          reviewCompute?.begin(read.id, startup)
+          reportTimelineProgress(read.id, { stage: 'verifying', done: 0, total: items.length })
+          for (const [index, item] of items.entries()) {
+            const version = await timelineMediaVersion(item.path_abs)
+            assertCurrent()
+            if (version === null) throw staleMedia()
+            let hash: string
+            try { hash = await hashSource(item.path_abs) }
+            catch { assertCurrent(); throw staleMedia() }
+            assertCurrent()
+            if (hash !== item.file_hash_blake3) throw staleMedia()
+            checkedVersions.set(item.path_abs, version)
+            reportTimelineProgress(read.id, { stage: 'verifying', done: index + 1, total: items.length })
+          }
+          await assertDocumentUnchanged()
+          for (const [path, version] of checkedVersions) {
+            assertCurrent()
+            if (await timelineMediaVersion(path) !== version) throw staleMedia()
+          }
+        } finally {
+          read.stop()
         }
         assertCurrent()
         if (actor.snapshot() !== original) throw new Error('The current project changed during confirmation. Review the import again')
@@ -1093,6 +1130,9 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
           })
           if (!result.ok) throw new Error(JSON.stringify(result.error))
         }
+        // Stop accepting cancellation in the same turn that admits the write.
+        discardTimelineReview()
+        reportTimelineProgress(read.id, { stage: 'committing' })
         let dir: string
         if (destination) {
           const { width, height, fps } = rootComposition(project)
@@ -1252,6 +1292,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
     },
     abandon: () => {
       quitting = true
+      discardTimelineReview()
       opened = null
       autosave.stop()
     },
@@ -1287,6 +1328,7 @@ export function createTsActorHost(deps: TsActorHostDeps): TsActorHost {
       refreshMotifCatalog()
     },
     stop() {
+      discardTimelineReview()
       importGeneration++
       agent.stop()
       autosave.stop()

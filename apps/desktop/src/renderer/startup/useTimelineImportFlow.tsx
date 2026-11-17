@@ -1,5 +1,6 @@
 import { open as openDialog } from "@/bridge/dialog";
-import { useState, type ReactNode } from "react";
+import { listen } from "@/bridge/events";
+import { useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { AppDialog } from "../components/AppDialog";
 import { AppSelect } from "../components/AppSelect";
@@ -10,7 +11,11 @@ import {
   projectImportTimeline,
   projectPreviewTimeline,
 } from "../ipc";
-import type { TimelineEditBlocked, TimelineImportApprovals, TimelineImportPreview, TimelineMediaBlocked, TimelineMediaChange, TimelineMediaReplacement, TimelineSequenceChoice } from "../../shared/timelineImport";
+import {
+  TIMELINE_IMPORT_PROGRESS_EVENT, type TimelineEditBlocked, type TimelineImportApprovals, type TimelineImportPreview,
+  type TimelineImportProgress, type TimelineImportStep, type TimelineMediaBlocked, type TimelineMediaChange,
+  type TimelineMediaReplacement, type TimelineProjectDestination, type TimelineSequenceChoice,
+} from "../../shared/timelineImport";
 import { fpsLabel } from "./canvasPresets";
 import { cleanIpcDetail } from "./openError";
 import { NewProjectForm } from "./NewProjectForm";
@@ -29,9 +34,27 @@ function TimelineImportDialog({ title, onClose, actions, children }: {
   );
 }
 
+function TimelineProgressMessage({ step, cancelling }: { step: TimelineImportStep; cancelling: boolean }) {
+  const { t } = useTranslation();
+  const messages = {
+    reading: "startup.import_progress_reading",
+    "finding-media": "startup.import_progress_finding_media",
+    "checking-media": "startup.import_progress_checking_media",
+    "checking-edits": "startup.import_progress_checking_edits",
+    verifying: "startup.import_progress_verifying",
+    committing: "startup.import_progress_committing",
+  } as const;
+  const message = cancelling ? t("startup.import_progress_cancelling")
+    : "total" in step ? t(messages[step.stage], { done: step.done, total: step.total })
+    : t(messages[step.stage]);
+  return <p role="status" aria-live="polite">{message}</p>;
+}
+
 export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromStartup: boolean; onWorkspaceReady: () => void }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
+  const activeWork = useRef<{ id: string; cancellation?: Promise<boolean> } | null>(null);
+  const [work, setWork] = useState<{ step: TimelineImportStep; cancelling: boolean } | null>(null);
   const [sourcePicker, setSourcePicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [projectForm, setProjectForm] = useState<TimelineImportPreview | null>(null);
@@ -41,17 +64,57 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
   const [sequenceImport, setSequenceImport] = useState<{ choices: TimelineSequenceChoice[]; request: Omit<ReviewRequest, "index"> } | null>(null);
 
   const begin = () => {
-    if (!busy && !error && !blocked && !sequenceImport && !timelinePreview && !projectForm) setSourcePicker(true);
+    if (!busy && !work && !error && !blocked && !sequenceImport && !timelinePreview && !projectForm) setSourcePicker(true);
   };
 
   function reportError(cause: unknown) {
     setError(t("startup.import_timeline_failed", { detail: cleanIpcDetail(cause) }));
   }
 
+  async function runTimelineWork<T>(id: string, initial: TimelineImportStep, run: () => Promise<T>): Promise<T | null> {
+    const operation: NonNullable<typeof activeWork.current> = { id };
+    activeWork.current = operation;
+    let unlisten: (() => void) | undefined;
+    try {
+      unlisten = await listen<TimelineImportProgress>(TIMELINE_IMPORT_PROGRESS_EVENT, ({ payload }) => {
+        if (payload.id !== id || activeWork.current !== operation) return;
+        setWork(previous => ({ step: payload, cancelling: previous?.cancelling ?? false }));
+      });
+      setWork({ step: initial, cancelling: false });
+      const result = await run();
+      return await operation.cancellation ? null : result;
+    } catch (cause) {
+      if (await operation.cancellation) return null;
+      throw cause;
+    } finally {
+      unlisten?.();
+      if (activeWork.current === operation) {
+        activeWork.current = null;
+        setWork(null);
+      }
+    }
+  }
+
+  function cancelWork() {
+    const operation = activeWork.current;
+    if (!operation || !work || work.step.stage === "committing" || operation.cancellation) return;
+    setWork({ ...work, cancelling: true });
+    operation.cancellation = projectDiscardTimelinePreview(operation.id).catch(() => false).then(accepted => {
+      if (!accepted && activeWork.current === operation) {
+        delete operation.cancellation;
+        setWork(previous => previous && { ...previous, cancelling: false });
+      }
+      return accepted;
+    });
+  }
+
   async function review(next: ReviewRequest) {
     setRequest(next);
-    const result = await projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements,
-      next.documentId, next.omitEffects, next.leaveTitleGaps, next.revalidateReplacements, next.leaveMediaGaps);
+    const id = crypto.randomUUID();
+    const result = await runTimelineWork(id, { stage: "reading" }, () =>
+      projectPreviewTimeline(next.source, next.folder, next.index, next.newProject, next.replacements,
+        next.documentId, next.omitEffects, next.leaveTitleGaps, next.revalidateReplacements, next.leaveMediaGaps, id));
+    if (!result) { cancel(); return; }
     setRequest({ ...next, replacements: result.replacements, revalidateReplacements: false });
     if ("kind" in result) setBlocked(result);
     else setTimelinePreview(result);
@@ -128,6 +191,7 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     if (!request || busy) return;
     setBusy(true);
     setTimelinePreview(null);
+    setBlocked(null);
     try { await review({ ...request, newProject: true }); }
     catch (cause) { reportError(cause); }
     finally { setBusy(false); }
@@ -163,6 +227,17 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
     setError(null);
   }
 
+  const progress = work && <TimelineProgressMessage step={work.step} cancelling={work.cancelling} />;
+  const cancelProgress = work && !work.cancelling && work.step.stage !== "committing" ? cancelWork : undefined;
+
+  async function confirm(preview: TimelineImportPreview, canvas: 'fit' | 'fill' | 'original',
+    approvals: TimelineImportApprovals, destination?: TimelineProjectDestination) {
+    const result = await runTimelineWork(preview.id, { stage: "verifying", done: 0, total: preview.media }, () =>
+      projectImportTimeline(preview.id, canvas, destination, approvals));
+    if (result === null) cancel();
+    return result;
+  }
+
   const editIssues = blocked?.kind === "media-blocked" ? blocked.editIssues : blocked?.issues ?? [];
   const mediaGapAssets = blocked?.kind === "media-blocked"
     ? [...new Set(blocked.issues.filter(issue => issue.canLeaveGaps).map(issue => issue.assetRef))]
@@ -182,6 +257,13 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
 
   const dialogs = (
     <>
+      {work && !projectForm && !timelinePreview && (
+        <TimelineImportDialog title={t("startup.import_progress_title")} onClose={cancelProgress} actions={
+          <Button onClick={cancelProgress} disabled={!cancelProgress}>{t("new_project.cancel")}</Button>
+        }>
+          {progress}
+        </TimelineImportDialog>
+      )}
       {sourcePicker && (
         <TimelineImportDialog title={t("startup.import_timeline_title")} onClose={() => setSourcePicker(false)}>
           <Button onClick={() => void chooseSource(false)}>{t("startup.import_fcpxml_file")}</Button>
@@ -234,6 +316,9 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           onClose={busy ? undefined : cancel}
           actions={<>
             <Button onClick={cancel} disabled={busy}>{t("new_project.cancel")}</Button>
+            {!request?.newProject && blocked.issues.some(issue => issue.stalePoolMetadata) && (
+              <Button onClick={() => void reviewAsNewProject()} disabled={busy}>{t("startup.import_review_as_new")}</Button>
+            )}
             {refreshBlocked}
             {!needsSourceEdit && blocked.editIssues.some(issue => issue.recovery === "omit-effect") && <Button onClick={() => void reviewWithFallback("omitEffects")} disabled={busy}>
               {t("startup.import_review_without_effects")}
@@ -295,7 +380,11 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
         />
       )}
       {projectForm && (
-        <NewProjectForm timeline={projectForm} onCancel={cancel} onReviewTimeline={refreshReview} onCreated={() => {
+        <NewProjectForm timelineImport={{
+          preview: projectForm,
+          submit: (destination, approvals) => confirm(projectForm, "fit", approvals, destination),
+          progress, cancelProgress,
+        }} onCancel={cancel} onReviewTimeline={refreshReview} onCreated={() => {
           setProjectForm(null);
           setRequest(null);
           onWorkspaceReady();
@@ -309,16 +398,18 @@ export function useTimelineImportFlow({ fromStartup, onWorkspaceReady }: { fromS
           onReviewAsNewProject={reviewAsNewProject}
           onRefreshReview={refreshReview}
           onCancel={cancel}
+          progress={progress}
+          cancelProgress={cancelProgress}
           onImport={async (canvas, approvals) => {
             if (timelinePreview.current === null) setProjectForm(timelinePreview);
-            else await projectImportTimeline(timelinePreview.id, canvas, undefined, approvals);
+            else await confirm(timelinePreview, canvas, approvals);
             setTimelinePreview(null);
           }}
         />
       )}
     </>
   );
-  return { begin, busy, dialogs };
+  return { begin, busy: busy || work !== null, dialogs };
 }
 
 interface ReviewRequest {
@@ -397,13 +488,15 @@ function MediaDifferenceRows({ changes, onRelink, disabled }: {
   ));
 }
 
-function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, onRefreshReview, busyRelinking }: {
+function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewAsNewProject, onRefreshReview, busyRelinking, progress, cancelProgress }: {
   preview: TimelineImportPreview;
   onImport: (canvas: 'fit' | 'fill' | 'original', approvals: TimelineImportApprovals) => Promise<void>;
   onRelink: (assetRef: string) => Promise<void>;
   onReviewAsNewProject: () => Promise<void>;
   onRefreshReview: () => Promise<void>;
   busyRelinking: boolean;
+  progress: ReactNode;
+  cancelProgress: (() => void) | undefined;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
@@ -436,7 +529,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
       title={t("startup.timeline_review")}
       onClose={busy || busyRelinking ? undefined : onCancel}
       actions={<>
-        <Button size="lg" onClick={onCancel} disabled={busy || busyRelinking}>{t("new_project.cancel")}</Button>
+        <Button size="lg" onClick={busy ? cancelProgress : onCancel} disabled={busyRelinking || (busy && !cancelProgress)}>{t("new_project.cancel")}</Button>
         {error && (
           <Button size="lg" onClick={() => void onRefreshReview()} disabled={busy || busyRelinking}>
             {t("startup.import_refresh_review")}
@@ -452,6 +545,7 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
         </Button>
       </>}
     >
+      {progress}
       <p>{preview.name}</p>
       {preview.destination && <p className="new-project-preview" title={preview.destination}>{preview.destination}</p>}
       <p>{t("startup.timeline_review_format", {
@@ -502,6 +596,16 @@ function TimelineImportReview({ preview, onImport, onCancel, onRelink, onReviewA
             current: current.sampleRate / 1000 + " kHz / " + current.channels,
             imported: "48 kHz / stereo",
           })}</p>
+        </section>
+      )}
+      {preview.mutedRoles.length > 0 && (
+        <section aria-label={t("startup.import_destination_mixer")}>
+          <p><strong>{t("startup.import_destination_mixer")}</strong></p>
+          {preview.mutedRoles.map(({ role, reason }) => (
+            <p key={role} className="new-project-error" role="status">
+              {t(reason === "muted" ? "startup.import_role_muted" : "startup.import_role_silenced_by_solo", { role: t(`audio_roles.${role}`) })}
+            </p>
+          ))}
         </section>
       )}
       {preview.namedFormatDefaults && <p role="status">{t("startup.timeline_review_named_format")}</p>}

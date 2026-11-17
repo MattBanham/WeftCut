@@ -42,6 +42,8 @@ pub struct Backend {
     /// Clip-compute jobs started with a host-injected `job_id`, so the host can
     /// cancel one by id (`cancel_compute_job`).
     pub(crate) compute_jobs: crate::compute_jobs::ComputeJobs,
+    #[cfg(feature = "jobs")]
+    timeline_media_read: std::sync::Mutex<Option<TimelineMediaRead>>,
 }
 
 /// Build the config-dir-rooted stores + cache layout + log slot, install the
@@ -91,7 +93,16 @@ fn build_backend(events: Arc<dyn EventSink>, config_dir: String, cache_dir: Stri
         agent_session: AgentSessionSlot::new(),
         log_slot,
         compute_jobs: crate::compute_jobs::ComputeJobs::default(),
+        #[cfg(feature = "jobs")]
+        timeline_media_read: std::sync::Mutex::new(None),
     }
+}
+
+#[cfg(feature = "jobs")]
+struct TimelineMediaRead {
+    id: String,
+    expected_generation: Option<u32>,
+    scope: CacheLayout,
 }
 
 /// Wire args for the `analyze_shots` compute — the auto_split_by_shot subset of
@@ -443,23 +454,64 @@ impl Backend {
         Ok(hash)
     }
 
-    /// Review sources with the bounded media probe. An open project supplies
-    /// its generation so a workspace change cancels the read. Startup has
-    /// no active workspace session to bind.
-    /// Stream durations travel beside the pool item for trim validation.
+    /// A timeline review owns only its reads. Cancelling it must leave the
+    /// workspace cache session and all of its other jobs active.
+    #[napi]
+    #[cfg(feature = "jobs")]
+    pub fn begin_timeline_media_read(
+        &self,
+        id: String,
+        expected_generation: Option<u32>,
+    ) -> napi::Result<()> {
+        let root = match expected_generation {
+            Some(generation) => self
+                .cache
+                .snapshot_expected(Some(generation))
+                .map_err(|e| Error::from_reason(e.to_string()))?
+                .current_root(),
+            None => std::env::temp_dir(),
+        };
+        let read = TimelineMediaRead {
+            id,
+            expected_generation,
+            scope: CacheLayout::new(root),
+        };
+        if let Some(previous) = self.timeline_media_read.lock().unwrap().replace(read) {
+            previous.scope.end_session();
+        }
+        Ok(())
+    }
+
+    #[napi]
+    #[cfg(feature = "jobs")]
+    pub fn end_timeline_media_read(&self, id: String) {
+        let mut active = self.timeline_media_read.lock().unwrap();
+        if active.as_ref().is_some_and(|read| read.id == id) {
+            active.take().unwrap().scope.end_session();
+        }
+    }
+
+    /// Stream facts travel beside the pool item for trim validation.
     #[napi]
     #[cfg(feature = "jobs")]
     pub async fn inspect_timeline_media(
         &self,
         path: String,
         hash_only: bool,
-        expected_generation: Option<u32>,
+        id: String,
     ) -> napi::Result<String> {
         let result: anyhow::Result<String> = async {
-            let scope = match expected_generation {
-                Some(generation) => self.cache.snapshot_expected(Some(generation))?,
-                None => CacheLayout::new(std::env::temp_dir()),
+            let (scope, expected_generation) = {
+                let active = self.timeline_media_read.lock().unwrap();
+                let read = active
+                    .as_ref()
+                    .filter(|read| read.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("timeline media read cancelled"))?;
+                (read.scope.snapshot(), read.expected_generation)
             };
+            if let Some(generation) = expected_generation {
+                self.cache.snapshot_expected(Some(generation))?;
+            }
             let permit = tokio::select! {
                 permit = crate::resources::import_preparation() => permit?,
                 _ = scope.cancelled() => anyhow::bail!("workspace cancelled"),
@@ -1222,6 +1274,42 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         sink.names().iter().any(|n| n == name)
+    }
+
+    #[cfg(feature = "jobs")]
+    #[test]
+    fn cancelling_timeline_media_reads_does_not_cancel_the_workspace() {
+        let backend = Backend::new_for_test(Arc::new(VecEventSink::new()));
+        let generation = backend.cache.generation();
+        backend
+            .begin_timeline_media_read("first".into(), Some(generation))
+            .unwrap();
+        let first = backend
+            .timeline_media_read
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .scope
+            .snapshot();
+        backend
+            .begin_timeline_media_read("second".into(), Some(generation))
+            .unwrap();
+        let second = backend
+            .timeline_media_read
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .scope
+            .snapshot();
+        assert!(first.is_cancelled());
+        backend.end_timeline_media_read("first".into());
+        assert!(!second.is_cancelled());
+        backend.end_timeline_media_read("second".into());
+        assert!(second.is_cancelled());
+        assert!(!backend.cache.is_cancelled());
+        assert_eq!(backend.cache.generation(), generation);
     }
 
     /// `parse_shot_opts` applies the analyze_clip defaults and validates ranges.

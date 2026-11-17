@@ -77,6 +77,66 @@ export interface Change {
   ranges: PlacedRange[]
 }
 
+/** A stretch of a composition that plays differently from the review baseline
+ *  (ADR 0169): stretches that play the same are matched wherever each side has
+ *  them, and what stays unmatched between two matches is one range. Content
+ *  only displaced is in none. */
+export interface ChangedRange {
+  composition_id: string
+  /** By what each side holds: `added` where nothing played (or silence),
+   *  `removed` where nothing plays now, `modified` where both play something
+   *  different. */
+  class: ChangeClass
+  /** Where it is now. Equal for a removal with no width now — a cut point,
+   *  where baseline content stopped and what followed closed up. */
+  t_start_us: number
+  t_end_us: number
+  /** Where it was in the baseline; equal when nothing was there. */
+  before_start_us: number
+  before_end_us: number
+  /** `review` when an unreviewed change plays in it, else `user`: the
+   *  range borrows its list from the entity changes inside (ADR 0115). */
+  source: 'review' | 'user'
+  /** The entity changes that play in it, unreviewed first. */
+  change_ids: EntityKey[]
+  /** A range to review that also holds the user's own changes. */
+  includes_user?: true
+  /** Only the audio, or only the picture, plays differently — or (`sync`)
+   *  nothing plays differently on its own: every layer playing on either side
+   *  is the same layer playing the same content with the same values, only
+   *  moved by different amounts. */
+  only?: 'audio' | 'picture' | 'sync'
+  /** Layers that play here moved by different amounts: they are out of sync
+   *  with each other by this much, in µs — the largest spread over the
+   *  range's stretches. */
+  sync_offset_us?: number
+  /** Sound against picture, when every sound layer apart moved as one and
+   *  every picture layer as one: positive when the sound now plays later
+   *  against the picture than in the baseline, in µs. */
+  sound_lag_us?: number
+  /** The audio role of that sound when it is one role. */
+  sound_role?: 'dialogue' | 'music' | 'sfx' | 'voiceover'
+  /** The layers apart are all of one kind: pictures against pictures, or
+   *  sounds against sounds. Absent when picture and sound play apart. */
+  sync_between?: 'picture' | 'sound'
+  /** Bound sync is broken: members of one link (`Composition.links`) play
+   *  apart, or dialogue-role audio plays apart from picture. */
+  sync_bound?: true
+  /** Silence lengthened (`added`) or shortened (`removed`), nothing else. */
+  gap?: true
+}
+
+/** How a changed range's sync reads: `loose` when it is only out of sync and
+ *  no bound sync is broken — one fact, drawn quietly; `bound` when linked
+ *  layers or dialogue play apart; `mixed` when it is out of sync and plays
+ *  differently besides; undefined when nothing moved apart. */
+export type RangeSync = 'loose' | 'bound' | 'mixed'
+export function rangeSync(r: ChangedRange): RangeSync | undefined {
+  if (r.sync_offset_us === undefined) return undefined
+  if (r.sync_bound) return 'bound'
+  return r.only === 'sync' ? 'loose' : 'mixed'
+}
+
 /** The kind of entity a change describes. */
 export function changeKind(change: Pick<Change, 'id'>): EntityKind {
   return parseEntityKey(change.id).kind
@@ -103,7 +163,7 @@ export interface GroupDecoration {
 export interface ReviewVersion { session: number; revision: number; baseline_revision: number }
 
 /** `review_view` arguments. The user-only list is sent only when asked for
- *  (the Changes tab's "show my changes"); its count always is.
+ *  (the Changes tab's user-changes switch); its count always is.
  *  `held_content`: the `content_revision` of the view the caller holds, read
  *  with the same `include_user` — when the lists are still those, the answer
  *  is a `ReviewViewUnchanged` instead of the lists again. */
@@ -129,6 +189,9 @@ export interface ReviewView {
   /** Group layers containing changes of EITHER list; filter by `change_ids`
    *  against the list on screen. */
   decorations: GroupDecoration[]
+  /** Where the film plays differently (ADR 0169): the ranges to review, and
+   *  the user's own too when the user-only list was asked for. */
+  ranges: ChangedRange[]
 }
 
 /** A `review_view` answer to a caller that holds the current lists
@@ -171,6 +234,9 @@ export interface ReviewActivityView {
   reverted: boolean
   changes: Change[]
   decorations: GroupDecoration[]
+  /** Where the call made the film play differently, placed where that
+   *  content plays now. */
+  ranges: ChangedRange[]
 }
 
 /** Main → renderer: the baseline changed (approval, attribution, re-pin,

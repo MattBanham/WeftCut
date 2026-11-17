@@ -29,9 +29,8 @@ export const UI_METRICS = {
     miniTimeline: {
       /** How near a point mark a band press still names it. */
       pointSlop: 4,
-      /** Where the row of removals' baseline footprints starts, under the
-       * current change band (`.mini-change-historical`). */
-      historyRowTop: 5,
+      /** How near two changed ranges of one look paint as one block. */
+      changeMergePx: 3,
     },
   },
 
@@ -46,10 +45,16 @@ export const UI_METRICS = {
     headerColumn: 160,
     /** Track row height; per-track drags are persisted in baseline units. */
     trackHeight: { default: 56, min: 24, max: 200 },
-    /** Pointer distance from a layer's left/right edge that trims instead of moves.
-     * Clamped to a third of the chip so the two edges never overlap. */
+    /** Pointer distance from a layer's left/right edge that trims instead of moves. */
     trimEdgeZone: 6,
-    /** Layer chip widths below which its label shortens, then disappears. */
+    /** Narrowest layer chip whose edges trim: two edge zones and a move grip
+     * as wide as either. Narrower, the whole chip moves; zoom in to trim. */
+    layerTrimMin: 18,
+    /** Below this a layer chip is a sliver: a mark of where the clip sits, with
+     * no border, padding or content that could spill past its time span. */
+    layerSliverMax: 6,
+    /** Layer chip widths below which its label shortens, then disappears. The
+     * corner badges share the shorter threshold: below it they cannot fit. */
     layerLabelMin: 48,
     layerFullLabelMin: 120,
     /** The sticky name chip inside a layer, and its rename field. */

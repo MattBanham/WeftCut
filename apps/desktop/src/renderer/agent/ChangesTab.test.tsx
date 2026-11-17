@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import i18n from '../i18n'
-import type { Change, ReviewView } from '../../shared/review'
+import type { Change, ChangedRange, ReviewView } from '../../shared/review'
 import type { LayerSummary, TrackSummary } from '../ipc'
 import type { AgentActivitySnapshot } from '../../shared/agent-activity'
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), jump: vi.fn(), reveal: vi.fn(() => true), listeners: new Map<string, (e: { payload: unknown }) => void>() }))
@@ -17,7 +17,7 @@ import { useAgentActivity } from './activityStore'
 import { resetReviewForTests, useReview } from './reviewStore'
 import { useProjectStore } from '../state/projectStore'
 import { ROOT_ID, compositionFixture, summaryFixture } from '../testing/summaryFixture'
-import { selectChange, useReviewFocus } from './reviewFocus'
+import { selectChange, selectRange, useReviewFocus } from './reviewFocus'
 
 const S = 1_000_000
 const clip = (id: string, label: string, s: number, e: number): LayerSummary => ({
@@ -40,7 +40,7 @@ const unreviewed: Change[] = [
 ]
 const mine: Change[] = [change({ id: 'Layer:mine', class: 'modified', ranges: range(5 * S, 6 * S) })]
 const view = (baseline: number, list = unreviewed, user = mine): ReviewView => ({
-  version: { session: 1, revision: 1, baseline_revision: baseline }, content_revision: 1, has_baseline: true, unreviewed: list, user, user_count: user.length, decorations: [],
+  version: { session: 1, revision: 1, baseline_revision: baseline }, content_revision: 1, has_baseline: true, unreviewed: list, user, user_count: user.length, decorations: [], ranges: [],
 })
 /** Main sends the user-only list only when asked. */
 const served = (v: ReviewView, args?: { include_user?: boolean }): ReviewView => (args?.include_user ? v : { ...v, user: [] })
@@ -65,14 +65,25 @@ useReviewFocus.setState({ focus: null, hover: null })
 afterEach(() => { cleanup(); resetReviewForTests() })
 
 const rows = () => [...document.querySelectorAll<HTMLElement>('[data-change-id]')]
+/** The switch in the note under the list that lists the user's own changes. */
+const userSwitch = () => document.querySelector<HTMLButtonElement>('.agent-changes-user-note button')!
+/** The toolbar's text past its diff stat: the notes and the actions. */
+const toolbarControls = () => [...document.querySelector('.agent-changes .agent-activity-toolbar')!.children]
+  .filter(e => !e.classList.contains('agent-changes-stats')).map(e => e.textContent).join('')
 
 describe('AgentPanel Changes tab', () => {
   it('is the third tab with an unreviewed badge; groups by composition, root first, in timeline order', async () => {
     render(<AgentPanel editor />)
     await flush()
     expect(screen.getAllByRole('tab').map(t => t.textContent)).toEqual(['Activity', 'Tacks', 'Changes4'])
-    // The badge is the count: the toolbar does not repeat it, nor the subtitle (the tab's title) the list.
-    expect(document.querySelector('.agent-changes .agent-activity-toolbar')!.textContent).toBe('Show my changes (1)Revert allApprove all')
+    // The badge is the count; the toolbar opens with its diff stat, then what acts. The
+    // subtitle (the tab's title) does not repeat over the list.
+    expect(document.querySelector('.agent-changes .agent-activity-toolbar')!.firstElementChild!.classList.contains('agent-changes-stats')).toBe(true)
+    expect(toolbarControls()).toBe('Revert allApprove all')
+    // The user's own changes are a note after the list, before its footnote: they need no review.
+    const note = document.querySelector<HTMLElement>('.agent-changes-user-note')!
+    expect(note.textContent).toBe('Plus 1 user change · Show')
+    expect(note.nextElementSibling!.classList.contains('agent-list-footnote')).toBe(true)
     expect(screen.queryByText('What agents changed since you last approved')).toBeNull()
     expect(screen.getByRole('tab', { name: /Changes/ }).title).toBe('What agents changed since you last approved')
     const groups = [...document.querySelectorAll('.agent-change-group-heading > span')].map(e => e.textContent)
@@ -104,12 +115,11 @@ describe('AgentPanel Changes tab', () => {
     expect(within(empty).getByText('Approving records nothing in history; reverting is one step you can undo. To drop a single change, undo it or edit it back.')).toBeTruthy()
     expect(within(empty).queryByText('What agents changed since you last approved')).toBeNull()
     expect(document.querySelector('.agent-changes .agent-list-footnote')).toBeNull()
-    // Nothing awaits review: both actions leave; the user's filter stays while they have changes.
-    expect(screen.queryByRole('button', { name: 'Approve all' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Revert all' })).toBeNull()
-    expect(document.querySelector('.agent-changes .agent-activity-toolbar')!.textContent).toBe('Show my changes (1)')
-    act(() => { useReview.getState().apply(view(5, [], [])) })
+    // Nothing awaits review: the toolbar leaves; the user's note stays under the message while they have changes.
     expect(document.querySelector('.agent-changes .agent-activity-toolbar')).toBeNull()
+    expect(within(empty).getByText('Plus 1 user change')).toBeTruthy()
+    act(() => { useReview.getState().apply(view(5, [], [])) })
+    expect(document.querySelector('.agent-changes-user-note')).toBeNull()
   })
 
   it('revert all names the held view and empties the tab; it waits while history is locked', async () => {
@@ -130,14 +140,15 @@ describe('AgentPanel Changes tab', () => {
     expect(rows()).toHaveLength(0)
   })
 
-  it('"show my changes" lists user-only changes, marked as the user\'s', async () => {
+  it('the user-changes note lists user-only changes, marked as the user\'s', async () => {
     render(<AgentPanel editor />)
     await flush()
-    const filter = screen.getByRole('button', { name: 'Show my changes (1)' })
-    expect(filter.getAttribute('aria-pressed')).toBe('false')
+    expect(userSwitch().getAttribute('aria-pressed')).toBe('false')
     expect(document.querySelector('[data-source="user"]')).toBeNull()
-    fireEvent.click(filter)
+    fireEvent.click(userSwitch())
     await flush()
+    expect(userSwitch().getAttribute('aria-pressed')).toBe('true')
+    expect(userSwitch().textContent).toBe('Hide')
     expect(calls('review_view').at(-1)).toEqual({ include_user: true })
     const user = document.querySelector<HTMLElement>('[data-source="user"]')!
     expect(user.dataset.changeId).toBe('Layer:mine')
@@ -147,18 +158,35 @@ describe('AgentPanel Changes tab', () => {
     expect(screen.getByRole('tab', { name: /Changes/ }).textContent).toBe('Changes4')
   })
 
-  it('"show my changes" switches itself off once an undo takes the user\'s changes back', async () => {
+  it('heads the list with a diff stat of the unreviewed changes alone, gone once nothing awaits review', async () => {
+    const stat = () => [...document.querySelectorAll<HTMLElement>('.agent-changes-stats .agent-changes-stat')]
+      .map(s => [s.querySelector('[aria-hidden="true"]')!.textContent, s.title])
     render(<AgentPanel editor />)
     await flush()
-    fireEvent.click(screen.getByRole('button', { name: 'Show my changes (1)' }))
+    const expected = [['+1', '1 added'], ['−1', '1 removed'], ['~2', '2 modified']]
+    expect(stat()).toEqual(expected)
+    // The user's own change is listed under the filter but needs no review, so it is not counted.
+    fireEvent.click(userSwitch())
+    await flush()
+    expect(document.querySelector('[data-source="user"]')).not.toBeNull()
+    expect(stat()).toEqual(expected)
+    fireEvent.click(screen.getByRole('button', { name: 'Approve all' }))
+    await flush()
+    expect(document.querySelector('.agent-changes-stats')).toBeNull()
+  })
+
+  it('the user-changes switch turns itself off once an undo takes the user\'s changes back', async () => {
+    render(<AgentPanel editor />)
+    await flush()
+    fireEvent.click(userSwitch())
     await flush()
     expect(useReview.getState().showUser).toBe(true)
     act(() => { useReview.getState().apply(view(5, unreviewed, []), true) })
     expect(useReview.getState().showUser).toBe(false)
-    expect(screen.queryByRole('button', { name: /Show my changes/ })).toBeNull()
+    expect(document.querySelector('.agent-changes-user-note')).toBeNull()
     expect(document.querySelector('[data-source="user"]')).toBeNull()
     // Revert all and Approve all still have their row, alone.
-    expect(document.querySelector('.agent-changes .agent-activity-toolbar')!.textContent).toBe('Revert allApprove all')
+    expect(toolbarControls()).toBe('Revert allApprove all')
   })
 
   it('an approval made after the list changed approves nothing and says so in the toolbar', async () => {
@@ -173,7 +201,7 @@ describe('AgentPanel Changes tab', () => {
     expect(note.getAttribute('role')).toBe('status')
     expect(note.title).toBe('The changes were updated — review again. Nothing was approved.')
     expect(note.parentElement!.classList.contains('agent-activity-toolbar')).toBe(true)
-    expect(note.nextElementSibling?.textContent).toBe('Revert all')
+    expect(note.nextElementSibling?.textContent).toBe('Revert allApprove all')
     // An approval that applies clears it.
     mocks.invoke.mockImplementation(async (channel: string) => channel === 'review_approve_all' ? { applied: true, view: view(4, []) } : fresh)
     fireEvent.click(screen.getByRole('button', { name: 'Approve all' }))
@@ -218,7 +246,10 @@ describe('AgentPanel Changes tab', () => {
       change({ id: 'Layer:trimmed', class: 'modified', ranges: range(2.5 * S, 4 * S),
         details: [{ type: 'time', field: 'start', from_us: 2 * S, to_us: 2.5 * S }, { type: 'trim', side: 'start', delta_us: -0.5 * S }] }),
     ]
-    mocks.invoke.mockImplementation(async (channel: string) => channel === 'review_view' ? view(1, list, []) : { available: true, url: '', connections: [] })
+    // Both edited clips play differently: their lines carry no weight note.
+    const plays: ChangedRange = { composition_id: ROOT_ID, class: 'modified', t_start_us: S, t_end_us: 4 * S, before_start_us: 2 * S, before_end_us: 4 * S,
+      source: 'review', change_ids: ['Layer:early', 'Layer:trimmed'] }
+    mocks.invoke.mockImplementation(async (channel: string) => channel === 'review_view' ? { ...view(1, list, []), ranges: [plays] } : { available: true, url: '', connections: [] })
     render(<AgentPanel editor />)
     await flush()
     const row = (id: string) => document.querySelector<HTMLElement>(`[data-change-id="${id}"]`)!
@@ -263,14 +294,14 @@ describe('AgentPanel Changes tab', () => {
     expect(useReviewFocus.getState().focus).toBeNull()
   })
 
-  it('a user change stays focusable only while "show my changes" lists it', async () => {
+  it('a user change stays focusable only while the user-changes switch lists it', async () => {
     useReview.setState({ showUser: true })
     render(<AgentPanel editor />)
     await flush()
     act(() => selectChange('Layer:mine'))
     act(() => { useReview.getState().apply(view(2), true) })
     expect(useReviewFocus.getState().focus).toEqual({ kind: 'change', source: 'review', id: 'Layer:mine' })
-    fireEvent.click(screen.getByRole('button', { name: 'Show my changes (1)' }))
+    fireEvent.click(userSwitch())
     expect(useReviewFocus.getState().focus).toBeNull()
   })
 
@@ -283,6 +314,22 @@ describe('AgentPanel Changes tab', () => {
     expect(rows().find(r => r.dataset.changeId === 'Layer:next')!.textContent).toContain('Start 4.0 → 3.0 s')
   })
 
+
+  it('a row the film shows less loudly says so after its line, in the entity diff\'s order', async () => {
+    const changed = (ids: string[], only?: 'sync'): ChangedRange => ({ composition_id: ROOT_ID, class: 'modified', t_start_us: 0, t_end_us: 9 * S,
+      before_start_us: 0, before_end_us: 9 * S, source: 'review', change_ids: ids as ChangedRange['change_ids'], ...(only ? { only, sync_offset_us: 2 * S } : {}) })
+    mocks.invoke.mockImplementation(async (channel: string) => channel === 'review_view'
+      ? { ...view(1, unreviewed, []), ranges: [changed(['Layer:early', 'Layer:inner']), changed(['Layer:late'], 'sync')] }
+      : { available: true, url: '', connections: [] })
+    render(<AgentPanel editor />)
+    await flush()
+    expect(rows().map(r => r.dataset.changeId)).toEqual(['Layer:early', 'Layer:a', 'Layer:late', 'Layer:inner'])
+    const notes = Object.fromEntries(rows().map(r => [r.dataset.changeId, [r.dataset.reviewWeight, r.querySelector('.agent-change-weight')?.textContent ?? null]]))
+    expect(notes).toEqual({
+      'Layer:early': ['full', null], 'Layer:inner': ['full', null],
+      'Layer:a': ['quiet', ' · plays the same'], 'Layer:late': ['soft', ' · out of sync only'],
+    })
+  })
 
   it('an agent row names the work session that last edited it; a user row does not', async () => {
     useReview.setState({ showUser: true })
@@ -315,6 +362,39 @@ describe('AgentPanel Changes tab', () => {
       await flush()
       expect(screen.getByRole('tab', { name: /Changes/ }).getAttribute('aria-selected')).toBe('true')
       expect(scrolled).toContain('Layer:late')
+    } finally { delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView }
+  })
+
+  it('a focused range frames its rows under a bar that names it; a framed row steps to it, Esc steps back, then lets go', async () => {
+    const pair: ChangedRange = { composition_id: ROOT_ID, class: 'modified', t_start_us: S, t_end_us: 9 * S, before_start_us: S, before_end_us: 9 * S,
+      source: 'review', change_ids: ['Layer:late', 'Layer:early'] }
+    mocks.invoke.mockImplementation(async (channel: string, args?: { include_user?: boolean }) =>
+      channel === 'review_view' ? served({ ...view(1), ranges: [pair] }, args) : { available: true, url: '', connections: [] })
+    const scrolled: string[] = []
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { scrolled.push(this.dataset.changeId ?? '') }
+    try {
+      render(<AgentPanel editor />)
+      await flush()
+      act(() => selectRange(pair))
+      const framed = () => rows().filter(r => r.dataset.inRange).map(r => r.dataset.changeId)
+      expect(framed()).toEqual(['Layer:early', 'Layer:late'])
+      expect(scrolled.at(-1)).toBe('Layer:early')
+      const bar = screen.getByRole('group', { name: 'Changed range' })
+      // Which of the timeline's ranges it is; which change only once one is pointed at.
+      expect(bar.textContent).toContain('1 of 1')
+      expect(bar.textContent).not.toContain('change 2 of 2')
+      // A framed row's click steps to it, keeping the range; the line says which, in row order.
+      fireEvent.click(within(rows().find(r => r.dataset.changeId === 'Layer:late')!).getByRole('button', { name: /Late clip/ }))
+      expect(useReviewFocus.getState().focus).toMatchObject({ kind: 'range', step: 'Layer:late' })
+      expect(rows().find(r => r.dataset.changeId === 'Layer:late')!.dataset.selected).toBe('true')
+      expect(bar.textContent).toContain('change 2 of 2')
+      const close = within(bar).getByRole('button', { name: 'Let go of this range' })
+      fireEvent.keyDown(close, { key: 'Escape' })
+      expect(useReviewFocus.getState().focus).toMatchObject({ kind: 'range', step: null })
+      fireEvent.keyDown(close, { key: 'Escape' })
+      expect(useReviewFocus.getState().focus).toBeNull()
+      expect(screen.queryByRole('group', { name: 'Changed range' })).toBeNull()
+      expect(framed()).toEqual([])
     } finally { delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView }
   })
 })

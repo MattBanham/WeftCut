@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Change, ReviewView } from '../../shared/review'
+import type { Change, ChangedRange, ReviewView } from '../../shared/review'
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listeners: new Map<string, (e: { payload: unknown }) => void>() }))
 vi.mock('@/bridge/ipc', () => ({ invoke: mocks.invoke }))
 vi.mock('@/bridge/events', () => ({ listen: vi.fn(async (name: string, fn: (e: { payload: unknown }) => void) => { mocks.listeners.set(name, fn); return () => { mocks.listeners.delete(name) } }) }))
@@ -8,7 +8,7 @@ import { act, renderHook } from '@testing-library/react'
 import { acquireReview, approveAllChanges, clearActivityChanges, isNewerReviewView, refreshReview, resetReviewForTests, revertAllChanges, selectHighlight, setShowUser, showActivityChanges, useCompositionChangeRanges, useLayerReviewMark, useReview } from './reviewStore'
 import { useAgentActivity } from './activityStore'
 import type { AgentActivity, AgentActivitySnapshot } from '../../shared/agent-activity'
-import { buildReviewHighlight } from './reviewHighlight'
+import { buildReviewHighlight, changeWeight, changeWeights } from './reviewHighlight'
 import { useProjectStore } from '../state/projectStore'
 import { summaryFixture } from '../testing/summaryFixture'
 
@@ -17,7 +17,7 @@ const change = (patch: Partial<Change> = {}): Change => ({
   ranges: [{ composition_id: 'root', track_id: null, t_start_us: 0, t_end_us: 1_000_000 }], ...patch,
 })
 const view = (revision: number, baseline: number, unreviewed: Change[] = [change()], session = 1): ReviewView => ({
-  version: { session, revision, baseline_revision: baseline }, content_revision: revision, has_baseline: true, unreviewed, user: [], user_count: 0, decorations: [],
+  version: { session, revision, baseline_revision: baseline }, content_revision: revision, has_baseline: true, unreviewed, user: [], user_count: 0, decorations: [], ranges: [],
 })
 const approved = (v: ReviewView, applied = true) => ({ applied, view: v })
 /** Resolve microtasks and the listen() promise. */
@@ -162,7 +162,7 @@ describe('review consumers', () => {
     release()
   })
 
-  it('asks for the user-only list only while "show my changes" is on', async () => {
+  it('asks for the user-only list only while the user-changes switch is on', async () => {
     const mine = change({ id: 'Layer:mine' })
     mocks.invoke.mockImplementation(async (_: string, args: { include_user?: boolean }) =>
       ({ ...view(1, 1), user: args.include_user ? [mine] : [], user_count: 1 }))
@@ -180,6 +180,16 @@ describe('review consumers', () => {
 })
 
 describe('buildReviewHighlight', () => {
+  it('paints each changed range as a band mark, a removal with no width now as a cut point', () => {
+    const range = (cls: 'added' | 'removed', s: number, e: number, source: 'review' | 'user' = 'review') => ({
+      composition_id: 'root', class: cls, t_start_us: s, t_end_us: e, before_start_us: s, before_end_us: s + 2,
+      source, change_ids: ['Layer:x' as const],
+    })
+    const h = buildReviewHighlight([], [], [range('added', 0, 4), range('removed', 6, 6, 'user')])
+    expect(h.ranges.map(r => [r.cls, r.tStartUs, r.tEndUs, r.cut, r.user])).toEqual([['added', 0, 4, false, false], ['removed', 6, 6, true, true]])
+    expect(new Set(h.ranges.map(r => r.key)).size).toBe(2)
+  })
+
   it('marks each current entity and uses only explicit baseline footprints for removal ghosts', () => {
     const gone = change({ id: 'Layer:gone', class: 'removed', ranges: [],
       before_ranges: [{ composition_id: 'root', track_id: 'track-1', t_start_us: 3, t_end_us: 9 }] })
@@ -190,30 +200,27 @@ describe('buildReviewHighlight', () => {
     expect([...h.layers]).toEqual([['a', 'added'], ['moved', 'modified']])
     expect(h.ghosts).toEqual([{ changeId: 'Layer:gone', layerId: 'gone', compositionId: 'root', trackId: 'track-1', tStartUs: 3, tEndUs: 9 }])
     expect([...h.groups]).toEqual([['group', 1]])
-    // Its baseline footprint reaches the mini timeline as historical only.
-    expect(h.ranges.filter(r => r.changeId === 'Layer:gone')).toEqual([{ changeId: 'Layer:gone', cls: 'removed', compositionId: 'root', tStartUs: 3, tEndUs: 9, historical: true }])
-    expect(h.ranges.filter(r => r.historical).map(r => r.changeId)).toEqual(['Layer:gone'])
+    // The bands paint changed ranges, never an entity's footprint.
+    expect(h.ranges).toEqual([])
     expect([...h.layerChanges]).toEqual([['a', 'Layer:a'], ['moved', 'Layer:moved']])
     expect(buildReviewHighlight([{ ...gone, before_ranges: [] }], []).ghosts).toEqual([])
   })
 
-  it('paints a Group\'s "contains changes" stretch under the changes, and its badge counts only the changes given', () => {
+  it('counts in a Group\'s badge only the changes given', () => {
     const group = change({ id: 'Layer:group', class: 'added', ranges: [{ composition_id: 'root', track_id: 'v1', t_start_us: 2, t_end_us: 6 }] })
     const inner = change({ id: 'Layer:inner', class: 'modified', composition_id: 'grp', ranges: [{ composition_id: 'grp', track_id: 'g1', t_start_us: 0, t_end_us: 1 }] })
     // The decoration also names a change of the other list, not on screen.
     const h = buildReviewHighlight([group, inner], [
       { layer_id: 'group', composition_id: 'root', t_start_us: 2, t_end_us: 6, change_ids: ['Layer:inner', 'Layer:mine'] },
     ])
-    expect(h.ranges.filter(r => r.compositionId === 'root').map(r => r.changeId)).toEqual(['Group:group', 'Layer:group'])
     expect([...h.groups]).toEqual([['group', 1]])
   })
 
-  it('gives a removed marker or transition, which has no ghost, its baseline footprint on the mini timeline', () => {
+  it('gives a removed marker, which has no ghost, a trace on the marker lane', () => {
     const marker = change({ id: 'Marker:m', class: 'removed', ranges: [],
       before_ranges: [{ composition_id: 'root', track_id: null, t_start_us: 5, t_end_us: 5 }] })
     const h = buildReviewHighlight([marker], [])
     expect(h.ghosts).toEqual([])
-    expect(h.ranges).toEqual([{ changeId: 'Marker:m', cls: 'removed', compositionId: 'root', tStartUs: 5, tEndUs: 5, historical: true }])
     // On the marker lane: a trace at its baseline place, named by its baseline label.
     expect(h.markerGhosts).toEqual([{ changeId: 'Marker:m', markerId: 'm', compositionId: 'root', tUs: 5, endUs: null, label: '' }])
   })
@@ -230,6 +237,73 @@ describe('buildReviewHighlight', () => {
   })
 })
 
+// A clip mark is as loud as the film difference its change plays in
+// (ADR 0169): by the ranges that list the change, never by time overlap.
+describe('review mark weight', () => {
+  const range = (ids: string[], patch: Partial<ChangedRange> = {}): ChangedRange => ({
+    composition_id: 'root', class: 'modified', t_start_us: 0, t_end_us: 1_000_000, before_start_us: 0, before_end_us: 1_000_000,
+    source: 'review', change_ids: ids as ChangedRange['change_ids'], ...patch,
+  })
+  const loose = (ids: string[]) => range(ids, { only: 'sync', sync_offset_us: 2_000_000 })
+  const bound = (ids: string[]) => range(ids, { only: 'sync', sync_offset_us: 2_000_000, sync_bound: true })
+  const layer = (id: string) => change({ id: `Layer:${id}`, class: 'modified' })
+  const weightOf = (id: string, ranges: ChangedRange[]) =>
+    buildReviewHighlight([layer(id)], [], ranges).layerWeights.get(id)
+
+  it('a clip whose change no range lists — only displaced — is quiet, even where a range covers its time', () => {
+    // The range spans the clip's footprint but names another change.
+    expect(weightOf('slid', [range(['Layer:other'])])).toBe('quiet')
+    expect(weightOf('slid', [])).toBe('quiet')
+  })
+
+  it('a clip listed in a modified range is full; listed only in a loose sync range, soft', () => {
+    expect(weightOf('c', [range(['Layer:c'])])).toBe('full')
+    expect(weightOf('c', [loose(['Layer:c'])])).toBe('soft')
+  })
+
+  it('a bound sync range is full', () => {
+    expect(weightOf('c', [bound(['Layer:c'])])).toBe('full')
+  })
+
+  it('the loudest range listing it wins, in either order', () => {
+    expect(weightOf('c', [loose(['Layer:c']), range(['Layer:c'])])).toBe('full')
+    expect(weightOf('c', [range(['Layer:c']), loose(['Layer:c'])])).toBe('full')
+  })
+
+  it('the user-changes switch promotes no clip: a range it brings in lists only the user\'s changes', () => {
+    const mine = layer('mine')
+    useReview.getState().apply({ ...view(1, 1, [layer('c')]), user_count: 1, ranges: [loose(['Layer:c'])] })
+    expect(selectHighlight(useReview.getState()).layerWeights.get('c')).toBe('soft')
+    // Same version with the user's list: their modified range over the same
+    // stretch is now held, and names their change alone.
+    useReview.getState().apply({ ...view(1, 1, [layer('c')]), user: [mine], user_count: 1,
+      ranges: [loose(['Layer:c']), range(['Layer:mine'], { source: 'user' })] }, true)
+    expect(useReview.getState().viewListsUser).toBe(true)
+    expect(selectHighlight(useReview.getState()).layerWeights.get('c')).toBe('soft')
+  })
+
+  it('applies to an activity\'s own changes and ranges alike', () => {
+    const h = buildReviewHighlight([layer('a'), layer('b')], [], [loose(['Layer:a'])])
+    expect(Object.fromEntries(h.layerWeights)).toEqual({ a: 'soft', b: 'quiet' })
+  })
+
+  it('gives no weight to a kind no range can list', () => {
+    const weights = changeWeights([range(['Marker:m', 'Layer:c'])])
+    expect(changeWeight({ id: 'Marker:m', class: 'modified' }, weights)).toBeNull()
+    expect(changeWeight({ id: 'Track:t', class: 'modified' }, weights)).toBeNull()
+    expect(changeWeight({ id: 'Layer:c', class: 'modified' }, weights)).toBe('full')
+    expect(changeWeight({ id: 'Transition:x', class: 'modified' }, weights)).toBe('quiet')
+  })
+
+  it('never calls a removal a loose sync range opens over "out of sync only"', () => {
+    // The clip rippled out where the bed ran on: the range lists it, but it is
+    // the content the rest moved apart over, not content playing the same.
+    const weights = changeWeights([loose(['Layer:gone', 'Layer:moved'])])
+    expect(changeWeight({ id: 'Layer:gone', class: 'removed' }, weights)).toBe('full')
+    expect(changeWeight({ id: 'Layer:moved', class: 'modified' }, weights)).toBe('soft')
+  })
+})
+
 // Per-activity highlight (ticket 07): one call's own changes take over every
 // timeline surface while its row is selected.
 describe('activity highlight', () => {
@@ -242,8 +316,9 @@ describe('activity highlight', () => {
     expanded: {}, tab: 'activity', reviewOverlay: true,
   })
   const mine = change({ id: 'Layer:mine', class: 'modified' })
+  const mineRange = { composition_id: 'root', class: 'modified' as const, t_start_us: 0, t_end_us: 1, before_start_us: 0, before_end_us: 1, source: 'review' as const, change_ids: ['Layer:mine' as const] }
   const answer = (available = true, reverted = false) => mocks.invoke.mockImplementation(async (channel: string) =>
-    channel === 'review_activity_view' ? { available, reverted, changes: available ? [mine] : [], decorations: [] } : view(1, 1))
+    channel === 'review_activity_view' ? { available, reverted, changes: available ? [mine] : [], decorations: [], ranges: available ? [mineRange] : [] } : view(1, 1))
   beforeEach(() => { useReview.getState().apply(view(1, 1)); seed([op('a'), op('b'), op('read', { kind: 'read', history_ids: [], effect: null })]) })
   afterEach(() => clearActivityChanges())
 
@@ -340,7 +415,7 @@ describe('activity highlight', () => {
     const mark = renderHook(() => useLayerReviewMark('mine'))
     const band = renderHook(() => useCompositionChangeRanges('root'))
     expect(mark.result.current).toBeNull()
-    expect(band.result.current.map(r => r.changeId)).toEqual(['Layer:mine'])
+    expect(band.result.current.map(r => r.range.change_ids)).toEqual([['Layer:mine']])
     act(() => useAgentActivity.setState({ reviewOverlay: true }))
     expect(mark.result.current).toBe('modified')
   })

@@ -3,13 +3,17 @@ import { useTranslation } from 'react-i18next'
 import { CheckCheck, LocateFixed, Undo2 } from 'lucide-react'
 import { useProjectStore } from '../state/projectStore'
 import { AppIcon } from '@/components/AppIcon'
-import { approveAllChanges, revertAllChanges, setShowUser, useChangeWords, useReview, useReviewView } from './reviewStore'
+import { approveAllChanges, revertAllChanges, setShowUser, useChangeWeights, useChangeWords, useReview, useReviewView } from './reviewStore'
+import { changeWeight } from './reviewHighlight'
 import { groupChanges, sessionReason, sessionReasonIndex, type ChangeRow } from './changeModel'
 import { changePlace, changeTitle, describeChange } from './changeWords'
 import { canLocate, locate } from './locate'
 import { JumpButton } from './JumpButton'
 import { useAgentActivity } from './activityStore'
-import { setReviewFocus, setReviewHover, useReviewFocus } from './reviewFocus'
+import { changeStats } from './changeStats'
+import { ChangeStatsBar } from './ChangeStatsBar'
+import { rangeOwnChanges, setReviewFocus, setReviewHover, stepRangeTo, useReviewFocus } from './reviewFocus'
+import { RangeBar } from './RangeBar'
 
 /** The Changes tab of the shared agent panel (ADR 0115): what differs from the
  *  Review baseline because an agent touched it, grouped by composition and in
@@ -22,10 +26,11 @@ import { setReviewFocus, setReviewHover, useReviewFocus } from './reviewFocus'
  *  lock). Both compare whole states, so both take the user's own differences
  *  with the agent's.
  *
- *  "Show my changes" lists the differences only the user made, too. They need
- *  no approval — the baseline is what the user accepted, and their own edits
- *  are accepted by making them — so their rows are muted and marked as the
- *  user's. Main sends them only while shown.
+ *  A note after the list counts the differences only the user made, and its
+ *  switch lists them too. They need no approval — the baseline is what the
+ *  user accepted, and their own edits are accepted by making them — so the
+ *  note comes last and their rows are muted and marked as the user's. Main
+ *  sends them only while shown.
  *
  *  Either action names the list on screen; one made after an agent changed
  *  the list does nothing and says so in the toolbar, over the fresh list.
@@ -35,7 +40,15 @@ import { setReviewFocus, setReviewHover, useReviewFocus } from './reviewFocus'
  *  marks stepping back); a second click lets it go. Hovering a row outlines
  *  its clips. Neither seeks — Locate does.
  *
- *  Each row describes one entity and identifies its work session.
+
+ *  A focused changed range frames the rows of its changes as one group, the
+ *  rest stepping back, under a bar that steps through them (`RangeBar`); a
+ *  click on a framed row steps to it, keeping the range.
+ *
+ *  Each row describes one entity and identifies its work session. A row whose
+ *  change the film shows less loudly than its class (`ReviewWeight`) says so
+ *  at the end of its line, as its clip's tooltip does; a quiet one's badge
+ *  steps back, in place — the order stays the entity diff's.
  */
 export function ChangesTab({ editor }: { editor: boolean }) {
   const { t } = useTranslation()
@@ -45,20 +58,29 @@ export function ChangesTab({ editor }: { editor: boolean }) {
   const summary = useProjectStore(s => s.summary)
   const [busy, setBusy] = useState(false)
   const focus = useReviewFocus(s => s.focus)
-  const selected = focus?.kind === 'change' && focus.source === 'review' ? focus.id : null
+  const range = useReviewFocus(s => s.range)
+  const rangeFocus = focus?.kind === 'range' && focus.source === 'review' ? focus : null
+  const selected = focus?.kind === 'change' && focus.source === 'review' ? focus.id : rangeFocus?.step ?? null
+  const framed = useMemo(() => (rangeFocus !== null && range !== null ? new Set<string>(rangeOwnChanges(range)) : null), [rangeFocus, range])
   const list = useRef<HTMLDivElement>(null)
   const activity = useAgentActivity(s => s.snapshot)
   const reasons = useMemo(() => sessionReasonIndex(activity), [activity])
   const words = useChangeWords({ frame: 'review' })
+  const weights = useChangeWeights()
   const unreviewed = view?.unreviewed ?? []
+  const stats = useMemo(() => changeStats({ unreviewed: view?.unreviewed ?? [], ranges: view?.ranges ?? [], filmId: summary?.root_id ?? null }), [view?.unreviewed, view?.ranges, summary?.root_id])
   const groups = useMemo(
     () => (view ? groupChanges(view.unreviewed, showUser ? view.user : [], summary?.root_id ?? null) : []),
     [view, showUser, summary?.root_id])
 
-  // A ghost or a mini timeline band focuses a change; bring its row into view.
+  // A ghost, a ruler range or a mini timeline band focuses something; bring
+  // its row into view — a range's first framed row, or the change stepped to.
   useEffect(() => {
-    if (focus?.kind !== 'change' || focus.source !== 'review') return
-    const row = list.current?.querySelector<HTMLElement>(`[data-change-id="${CSS.escape(focus.id)}"]`)
+    if (focus?.kind === 'tack' || focus === null || focus.source !== 'review') return
+    const id = focus.kind === 'change' ? focus.id : focus.step
+    const row = id !== null
+      ? list.current?.querySelector<HTMLElement>(`[data-change-id="${CSS.escape(id)}"]`)
+      : list.current?.querySelector<HTMLElement>('[data-in-range]')
     row?.scrollIntoView?.({ block: 'nearest' })
   }, [focus])
   // A row unmounted under the pointer never hears it leave.
@@ -84,15 +106,20 @@ export function ChangesTab({ editor }: { editor: boolean }) {
     const reason = source === 'agent' ? sessionReason(c, reasons) : null
     const locatable = editor && canLocate({ kind: 'change', change: c })
     const focused = selected === c.id
+    const weight = changeWeight(c, weights)
+    const note = weight === 'soft' || weight === 'quiet' ? t(`changes.weight_${weight}`) : null
+    const inRange = framed?.has(c.id) ?? false
     return <article key={`${source}-${c.id}`} data-change-id={c.id} data-source={source} data-selected={focused ? 'true' : undefined}
+      data-review-weight={weight ?? undefined} data-in-range={inRange || undefined}
       className={`agent-change class-${c.class} source-${source}`}
       onMouseEnter={() => setReviewHover({ kind: 'change', source: 'review', id: c.id })} onMouseLeave={() => setReviewHover(null)}>
       <div className="agent-tack-row">
         <button type="button" className="agent-tack-main agent-change-main" aria-pressed={focused}
-          onClick={() => setReviewFocus(focused ? null : { kind: 'change', source: 'review', id: c.id })}>
+          onClick={() => inRange ? stepRangeTo(focused ? null : c.id) : setReviewFocus(focused ? null : { kind: 'change', source: 'review', id: c.id })}>
           <span className={`agent-change-badge class-${c.class}`}>{t(`changes.class_${c.class}`)}</span>
           <span className="agent-activity-copy agent-change-copy"><span>{changeTitle(c, words)}</span>
-            <small title={when?.timecode}>{[describeChange(c, words), when?.text].filter(Boolean).join(' · ')}</small>
+            <small title={when?.timecode}>{[describeChange(c, words), when?.text].filter(Boolean).join(' · ')}
+              {note && <span className="agent-change-weight">{' · '}{note}</span>}</small>
             {reason && <small className="agent-change-from">{t('changes.from_session', { reason })}</small>}</span>
         </button>
         {source === 'user' && <span className="agent-change-mine" title={t('changes.mine_hint')}>{t('changes.mine')}</span>}
@@ -105,33 +132,40 @@ export function ChangesTab({ editor }: { editor: boolean }) {
 
   const userCount = view?.user_count ?? 0
   const empty = !view ? 'agent_panel.loading' : !view.has_baseline ? 'changes.no_baseline' : 'changes.empty'
-  const canShowUser = userCount > 0
-  const toolbar = canShowUser || stale || unreviewed.length > 0
-  return <div className="agent-tacks agent-changes" role="tabpanel" aria-label={t('agent_panel.tab_changes')}>
+  const toolbar = stale || unreviewed.length > 0
+  /** The user's own changes, below the list: how many, and the switch that
+   *  lists them. Last, since they need no review. */
+  const userNote = userCount > 0 && <p className="agent-changes-user-note">
+    <span>{t('changes.user_note', { count: userCount })}</span>{' · '}
+    <button type="button" aria-pressed={showUser} title={t('changes.show_mine_hint')}
+      onClick={() => setShowUser(!showUser)}>{t(showUser ? 'changes.hide_user' : 'changes.show_user')}</button>
+  </p>
+  return <div className="agent-tacks agent-changes" role="tabpanel" aria-label={t('agent_panel.tab_changes')} data-range-focus={framed !== null || undefined}>
     {/* The unreviewed count is the tab's badge; the subtitle, its title. The
-        toolbar holds only what can act: Approve all and Revert all while
-        something awaits review, the user's filter while they have changes. */}
+        toolbar holds what the list amounts to (+ − ~) and what can act on it,
+        while something awaits review. */}
     {toolbar && <div className="agent-activity-toolbar">
-      {canShowUser && <button type="button" aria-pressed={showUser} title={t('changes.show_mine_hint')}
-        onClick={() => setShowUser(!showUser)}>{t('changes.show_mine', { count: userCount })}</button>}
+      {unreviewed.length > 0 && <ChangeStatsBar stats={stats} />}
       {stale && <span className="agent-changes-stale" role="status" title={t(`changes.${stale}_stale`)}>{t(`changes.${stale}_stale_short`)}</span>}
-      {unreviewed.length > 0 && <>
+      {unreviewed.length > 0 && <span className="agent-changes-actions">
         <button type="button" className="agent-changes-revert-all" disabled={busy || locked}
           title={locked ? t('changes.revert_all_locked') : t('changes.revert_all_hint')}
           onClick={() => void settle(revertAllChanges)}><AppIcon icon={Undo2} size="body" />{t('changes.revert_all')}</button>
         <button type="button" className="agent-changes-approve-all" disabled={busy} title={t('changes.approve_all_hint')}
           onClick={() => void settle(approveAllChanges)}><AppIcon icon={CheckCheck} size="body" />{t('changes.approve_all')}</button>
-      </>}
+      </span>}
     </div>}
+    <RangeBar source="review" />
     <div className="agent-activity-list" ref={list}>
       {!groups.length && (view
-        ? <div className="agent-empty"><p>{t(empty)}</p><p className="agent-empty-subtitle">{t('changes.retention')}</p></div>
+        ? <div className="agent-empty"><p>{t(empty)}</p>{userNote}<p className="agent-empty-subtitle">{t('changes.retention')}</p></div>
         : <p className="agent-empty">{t(empty)}</p>)}
       {groups.map(g => <section key={g.compositionId ?? 'project'} className="agent-work-group agent-change-group">
         <h3 className="agent-change-group-heading"><span>{heading(g.compositionId)}</span>
           <small>{t('changes.group_count', { count: g.rows.filter(r => r.source === 'agent').length })}</small></h3>
         {g.rows.map(row)}
       </section>)}
+      {groups.length > 0 && userNote}
       {groups.length > 0 && <p className="agent-retention-note agent-list-footnote">{t('changes.retention')}</p>}
     </div>
   </div>

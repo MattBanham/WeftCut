@@ -476,6 +476,15 @@ jobs:
       # framebuffer; Windows/macOS use the runner's native GPU stack. Captures
       # are byte-identical cross-OS regardless (see the threshold note on the
       # compare job) — no software-rendering force is needed.
+      - name: Shared FCPXML importer tests
+        if: matrix.part == 'e2e-1' || matrix.part == 'all'
+        run: >-
+          npm test --
+          src/main/state/timeline-import
+          src/main/state/ts-actor-host.test.ts
+          src/renderer/startup/NewProjectForm.test.tsx
+          src/renderer/bridge/ipc.test.ts
+
       - name: E2E tests (includes determinism capture)
         shell: bash
         env:
